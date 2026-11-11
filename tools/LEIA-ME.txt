@@ -1,0 +1,133 @@
+FAR CRY INSTINCTS PREDATOR RECOMP 0.1.0
+=======================================
+
+Versao para PC de Far Cry Instincts Predator (Xbox 360), feita por recompilacao estatica.
+Sem ligacao com a Ubisoft ou a Microsoft. NENHUM arquivo do jogo vem junto (fases, graficos, sons,
+videos): voce precisa da sua propria copia do jogo.
+
+O QUE VOCE PRECISA
+------------------
+- Windows 10 ou 11 de 64 bits.
+- Processador de 4 nucleos e 8 threads.
+- 8 GB de RAM (o jogo usa ~1,5 GB).
+- Placa de video com DirectX 12 (video integrado serve).
+  O launcher mostra o que o seu PC tem e se atende esse minimo.
+- A SUA copia de Far Cry Instincts Predator para Xbox 360 (versao USA/Europa), com os arquivos
+  extraidos numa pasta. A pasta precisa ter o default.xex e os arquivos .dat do jogo.
+  Para extrair o ISO do disco use um programa como o extract-xiso.
+
+COMO JOGAR
+----------
+1. Extraia este pacote numa pasta onde voce possa gravar (por exemplo Documentos\FarCryPredatorRecomp).
+   Evite "Arquivos de Programas": o jogo grava saves e opcoes na propria pasta.
+2. Abra o PredatorGame.exe. Vai aparecer o launcher.
+3. Em "Pasta do jogo", clique em Procurar e escolha a pasta com o default.xex.
+4. Ajuste o video e os controles, se quiser, e clique em Jogar.
+   Na primeira vez o programa prepara os arquivos e os graficos: pode demorar cerca de 1 minuto a mais.
+   "Resolucao interna" 1,5x ou 2x deixa a imagem mais nitida, mas pesa bem mais na placa de video
+   (em video integrado use 1x).
+   "Sombras" alta ou muito alta deixa as sombras bem mais definidas; a alta pesa pouco.
+
+EDITOR DE MAPAS: escolha MAP EDITOR no menu principal do jogo. O editor e o PredatorEditor.exe (que fica
+junto do PredatorGame.exe e e aberto sozinho pelo menu); "EXIT EDITOR" volta para o jogo. Ele usa o ige.xex e o
+farcryed.dat da sua copia do jogo.
+
+Marcou "Abrir direto o jogo"? Para ver o launcher de novo, abra o PredatorGame.exe segurando Shift.
+
+AJUDAR A DIMINUIR AS TRAVADAS: abra o jogo pelo coletar_receita.bat em vez do PredatorGame.exe. Ele anota na pasta
+"receitas" quais efeitos graficos (shaders) apareceram enquanto voce jogava (so numeros, nada do jogo). Mandando essa
+pasta para o desenvolvedor, a proxima versao ja vem com esses efeitos preparados e nao trava na primeira vez.
+
+CONTROLES
+---------
+- Controles: DualSense e DualShock 4 (USB ou Bluetooth, sem programas extras) e controles de Xbox.
+- Teclado e mouse (padrao): W A S D andar, mouse olhar, botao esquerdo atirar, botao direito mirar,
+  Espaco = A (pular), T = B, R = X, F = Y, Q = LB, E = RB, Enter = Start, Esc = Back.
+- Os jogadores 1 a 4 escolhem seus dispositivos no botao "Controles" (tela dividida ate 4 pessoas):
+  teclado e mouse, "Controle" (o primeiro que estiver ligado) ou um controle ligado (DualSense, Xbox...).
+  O mesmo dispositivo nao pode ficar em dois jogadores.
+
+PERFIS
+------
+No launcher, "Perfil" escolhe quem esta jogando. Cada perfil tem os seus jogos salvos e o seu progresso.
+Para criar um perfil, escreva um nome novo (ate 15 letras, sem acento) e clique em Jogar. O perfil
+principal ("User 1") usa a pasta "save"; os outros ficam em "save\perfis\<nome>".
+
+TECLAS DURANTE O JOGO
+---------------------
+F1          configurar controles
+F2          soltar/prender o mouse na janela
++ e -       sensibilidade do mouse
+Alt+Enter   tela cheia / janela
+F12         guardar um relatorio de problema (pasta "bugs") quando algo der errado
+
+CODIGOS DE TRAPACA: no menu principal, MENU DE TRAPACAS abre uma caixinha para digitar
+o codigo com o teclado (Enter confirma, Esc ou B no controle cancela).
+
+JOGAR EM REDE LOCAL (SYSTEM LINK)
+---------------------------------
+Dois ou mais PCs na mesma rede (cabo ou Wi-Fi, no mesmo roteador), cada um com o jogo instalado.
+1. Num PC: MULTIPLAYER > SYSTEM LINK > X (CREATE MATCH) > CREATE MATCH.
+2. Nos outros: MULTIPLAYER > SYSTEM LINK, escolha a partida na lista e aperte A.
+3. Todos apertam X (READY) e quem criou escolhe LAUNCH.
+IMPORTANTE: na primeira vez o Windows pergunta se o PredatorGame pode usar a rede. Clique em "Permitir".
+Se a partida nao aparecer na lista, confira no Windows (Configuracoes > Rede e Internet > Wi-Fi ou Ethernet)
+se a rede esta como "Rede privada" e se o PredatorGame esta liberado no Firewall do Windows.
+O nome do jogador na partida e o nome do seu usuario do Windows.
+
+JOGAR PELA INTERNET (SYSTEM LINK, "ENTRAR POR IP")
+--------------------------------------------------
+Um PC cria a partida (o ANFITRIAO) e os amigos entram pela internet, sem programa de VPN.
+Todos falam so com o anfitriao, entao so ele precisa de portas abertas no roteador.
+
+QUEM CRIA A PARTIDA (ANFITRIAO)
+1. Abra o PredatorGame.exe. No launcher, deixe "IP do anfitriao" VAZIO e clique em MEU IP.
+   Aparece o seu IP de internet (ja fica copiado: cole com Ctrl+V na conversa com os amigos).
+2. Clique em Jogar. No jogo: MULTIPLAYER > SYSTEM LINK > X (CREATE MATCH) > CREATE MATCH.
+3. Ao criar a partida o jogo tenta abrir as portas do roteador sozinho (UPnP) e fecha quando
+   voce sai do jogo. O resultado fica no fcrecomp_log.txt (linhas que comecam com [upnp]).
+4. Na primeira vez o Windows pergunta se o PredatorGame pode usar a rede: clique em "Permitir"
+   (se aparecer, marque redes privadas E publicas).
+5. Quando todos estiverem no lobby e com READY, escolha LAUNCH.
+
+SE O ROTEADOR NAO ABRIR AS PORTAS SOZINHO
+- Muitos roteadores vem com o UPnP desligado. Ou ligue o UPnP na pagina do roteador, ou abra as
+  portas a mao: na pagina do roteador (normalmente http://192.168.0.1 ou http://192.168.1.1), procure
+  "Redirecionamento de portas", "Port Forwarding", "Servidor virtual" ou "NAT" e crie regras para
+  o IP do SEU PC (aparece no fcrecomp_log.txt como "[lan] o jogo usa o endereco ..."):
+      UDP 1000, UDP 1004, UDP 1005, UDP 1010 e UDP 49001  (porta externa = porta interna)
+  Dica: deixe o IP do seu PC fixo no roteador ("reserva de DHCP"), senao a regra para de valer.
+- Para conferir o UPnP: abra o cmd nesta pasta e rode  PredatorGame.exe --upnp-teste
+  (o resultado fica em upnp_teste.txt).
+- CGNAT: algumas operadoras (muito comum em fibra, 4G/5G e internet via radio) nao dao um IP
+  de internet de verdade para o seu roteador. O botao MEU IP avisa quando isso acontece. Com CGNAT
+  abrir portas NAO adianta: peca um "IP publico" (ou IP fixo) para a operadora, ou usem uma rede
+  virtual como Radmin VPN ou ZeroTier (ai e so jogar como em rede local, sem escrever IP nenhum).
+
+QUEM ENTRA (AMIGOS)
+1. Abra o PredatorGame.exe. No launcher, em "IP do anfitriao", escreva o IP que o anfitriao mandou
+   (exemplo: 177.45.10.20). Clique em Jogar. (O IP fica salvo para a proxima vez; para voltar a
+   jogar so em rede local, apague o campo.)
+2. No jogo: MULTIPLAYER > SYSTEM LINK. A partida do anfitriao aparece na lista: escolha e aperte A.
+3. Na primeira vez clique em "Permitir" no aviso do Firewall do Windows.
+4. Aperte X (READY) e espere o anfitriao escolher LAUNCH.
+Quem entra NAO precisa abrir portas no roteador.
+
+SE NAO APARECER NA LISTA
+- O anfitriao precisa estar com a partida ja criada (no lobby) antes de voce procurar.
+- Confira o IP (tem que ser o de internet, o do botao MEU IP, e nao o 192.168...).
+- Confira se o anfitriao abriu as portas (ou se o UPnP funcionou) e clicou em "Permitir" no Firewall.
+- Se o anfitriao tem CGNAT, so com rede virtual (veja acima).
+- O jogo foi feito para rede local: com internet lenta ou longe pode haver atraso ("lag").
+
+ARQUIVOS QUE O JOGO CRIA NESTA PASTA
+------------------------------------
+image.bin          preparado a partir do seu default.xex na primeira vez (nao compartilhe: e do jogo)
+image_editor.bin   o mesmo para o editor de mapas (do ige.xex), na primeira vez que ele abre
+save\              jogos salvos (perfil principal; os outros perfis em save\perfis)
+opcoes.ini         opcoes do launcher
+controles.ini      controles
+fcrecomp_log.txt   registro (mande junto quando relatar um problema)
+
+                                   Autor: bugcoder00
+                                      Versao 0.1.0

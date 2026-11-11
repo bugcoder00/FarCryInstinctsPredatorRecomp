@@ -1,0 +1,49 @@
+# Lista do que PODE ir para o GitHub (todo o resto fica de fora).
+# Nunca entra: arquivos do jogo (xex, image.bin, shaders.dat...), o C gerado a partir do jogo (out, out_editor),
+# builds/caches/gravações (build_*), saves, pacotes (dist) e a tradução.
+
+# 1) ignora tudo
+/*
+# 2) libera só o que é do projeto
+!/.gitignore
+!/README.md
+!/LICENSE
+!/DIAGNOSTICO.md
+!/*.bat
+
+!/tools/
+/tools/*
+!/tools/*.py
+!/tools/*.ps1
+!/tools/*.bat
+!/tools/LEIA-ME.txt
+!/tools/README.txt
+!/tools/receita_shaders.txt
+# ferramentas que leem arquivos do jogo direto (caminho da cópia de quem desenvolve)
+/tools/xma_achar.py
+/tools/xma_duracao.py
+
+!/PredatorRecomp/
+/PredatorRecomp/*
+!/PredatorRecomp/README.md
+!/PredatorRecomp/CMakeLists.txt
+!/PredatorRecomp/build.ps1
+!/PredatorRecomp/cmake/
+!/PredatorRecomp/runtime/
+!/PredatorRecomp/src/
+!/PredatorRecomp/tests/
+!/PredatorRecomp/game/
+
+# 3) por garantia, nunca subir arquivos do jogo ou de compilação, mesmo dentro das pastas liberadas
+*.xex
+*.bin
+*.dat
+*.fat
+*.iso
+*.xma
+*.bik
+*.exe
+*.obj
+*.lib
+*.pdb
+__pycache__/
