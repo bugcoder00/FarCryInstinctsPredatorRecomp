@@ -28,6 +28,8 @@ namespace
     thread_local bool t_inCallback = false;
 
     constexpr uint32_t CHANNELS = 6, SAMPLES = 256;          // quadro do Xbox: 6 canais x 256 amostras
+    // saida em estereo (padrao, como o console na TV) ou 5.1 de verdade (FCRECOMP_SOM51=1)
+    bool SomEstereo() { static const bool e = getenv("FCRECOMP_SOM51") == nullptr; return e; }
     constexpr uint32_t RING = 16;                            // quadros guardados para o XAudio2
     // ~32 ms de som na fila (latencia x seguranca). Com 4 (~21 ms) a fila secava por instantes no comeco da intro da
     // Ubisoft (o jogo carregando ao mesmo tempo): o Windows tocava ~10 ms de silencio em pedacos = estalos
@@ -87,6 +89,21 @@ namespace
                 s += "]";
             }
             Log("[audio] saida do PC com %u canais; mistura dos 6 do jogo (FE FD C LFE TE TD) por saida:%s", md.InputChannels, s.c_str());
+        }
+        XAUDIO2_VOICE_DETAILS md{};
+        g_master->GetVoiceDetails(&md);
+        if (SomEstereo() && md.InputChannels >= 2)
+        {
+            // estereo (como o console ligado na TV): o jogo sempre mistura em 5.1 e o Xbox junta os 6 canais em 2. Sem isto,
+            // o Windows manda os canais traseiros para as caixas de tras ou, num fone com 7.1 virtual, para "atras da cabeca"
+            // (os passos do personagem, que ficam um pouco atras da camera, soavam em 3D)
+            const uint32_t saidas = std::min<uint32_t>(md.InputChannels, 8);
+            float m[6 * 8] = {};
+            const float k = 0.7071f;
+            m[0 * CHANNELS + 0] = 1; m[0 * CHANNELS + 2] = k; m[0 * CHANNELS + 4] = k;   // esquerda = FE + C + TE
+            m[1 * CHANNELS + 1] = 1; m[1 * CHANNELS + 2] = k; m[1 * CHANNELS + 5] = k;   // direita  = FD + C + TD
+            if (SUCCEEDED(g_voice->SetOutputMatrix(g_master, CHANNELS, saidas, m)))
+                Log("[audio] som em estereo: os 6 canais do jogo juntados na esquerda/direita da frente");
         }
         g_voice->Start();
         // nome do dispositivo de som padrao (fone/caixa Bluetooth costuma ter 150-300 ms de atraso)

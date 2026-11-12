@@ -52,7 +52,7 @@ namespace xdraw
     namespace
     {
         constexpr uint32_t CANVAS = 2048;   // tamanho de cada superficie da "EDRAM"
-        // Resolucao interna (opcao "escala" do launcher), em meios: 2 = 1x, 3 = 1,5x, 4 = 2x. A EDRAM, os resolves e a
+        // Resolucao interna (opcao "escala" do launcher), em meios: 2 = 1x, 3 = 1,5x, 4 = 2x, 6 = 3x (4K). A EDRAM, os resolves e a
         // imagem final ficam maiores, mas tudo o que o jogo ve continua no tamanho dele (registradores, tamanho das
         // texturas, coordenadas dos desenhos e dos resolves, posicao do pixel nos shaders): as coordenadas so viram
         // pixels de verdade (Px) na hora de mandar para a placa. Texturas do jogo e dados lidos pela CPU nao mudam.
@@ -1761,13 +1761,21 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             wb.pitch = std::max<uint32_t>(32, (wb.pitch + 31) & ~31u);
             wb.donos = DonosDoRetorno(wb);
             WritebackBytes(wb, wb.antes);
-            if (!g_writebackPool.empty()) { wb.readback = std::move(g_writebackPool.back()); g_writebackPool.pop_back(); }
-            else
+            // tamanho que a copia precisa (linhas alinhadas a 256 bytes, na resolucao interna); minimo 128 KB, que e o
+            // que cabia antes (128x128 RGBA16F = 64x64 do jogo na escala 2x). Na 3x (4K) um 64x64 do jogo ja passa disso.
+            const UINT64 precisa = std::max<UINT64>(128 * 1024, (UINT64)wb.rowPitch * Px(wb.h));
+            while (!g_writebackPool.empty() && !wb.readback)
+            {
+                ComPtr<ID3D12Resource> r = std::move(g_writebackPool.back());
+                g_writebackPool.pop_back();
+                if (r->GetDesc().Width >= precisa) wb.readback = std::move(r);   // menor que o pedido: descartado
+            }
+            if (!wb.readback)
             {
                 D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
                 D3D12_RESOURCE_DESC bd{};
                 bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-                bd.Width = 128 * 1024;   // ate 128x128 RGBA16F (64x64 do jogo na escala 2x): 128 linhas de 1 KB
+                bd.Width = precisa;
                 bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
                 bd.SampleDesc.Count = 1;
                 bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -2666,9 +2674,10 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
     uint32_t EscalaMeios()
     {
         static const uint32_t meios = [] {
-            if (const char* e = getenv("FCRECOMP_ESCALA"))   // testes: 1, 1.5 ou 2
-                return (uint32_t)std::clamp<long>(std::lround(atof(e) * 2), 2, 4);
-            return (uint32_t)std::clamp(OpcoesAtuais().escala, 0, 2) + 2;
+            if (const char* e = getenv("FCRECOMP_ESCALA"))   // testes: 1, 1.5, 2 ou 3
+                return (uint32_t)std::clamp<long>(std::lround(atof(e) * 2), 2, 6);
+            static const uint32_t MEIOS[] = { 2, 3, 4, 6 };   // opcao do launcher: 1x, 1,5x, 2x, 3x (4K)
+            return MEIOS[std::clamp(OpcoesAtuais().escala, 0, 3)];
         }();
         return meios;
     }

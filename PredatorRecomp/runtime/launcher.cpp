@@ -19,7 +19,7 @@
 #include <dxgi.h>
 
 // versao mostrada no titulo do launcher e nas instrucoes (trocar a cada pacote novo)
-#define VERSAO_RECOMP L"0.1.1"
+#define VERSAO_RECOMP L"0.1.2"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -74,9 +74,11 @@ void OpcoesCarregar(const std::filesystem::path& exeDir)
         else if (k == "janela") g_op.janela = std::clamp(n, 0, 4);
         else if (k == "tela_cheia") g_op.telaCheia = n != 0;
         else if (k == "antisserrilhado") g_op.antisserrilhado = std::clamp(n, 0, 3);
-        else if (k == "escala") g_op.escala = std::clamp(n, 0, 2);
+        else if (k == "escala") g_op.escala = std::clamp(n, 0, 3);
         else if (k == "sombras") g_op.sombras = std::clamp(n, 0, 2);
         else if (k == "vsync") g_op.vsync = n != 0;
+        else if (k == "fps") g_op.fps = std::clamp(n, 0, 2);
+        else if (k == "fps60") g_op.fps = n != 0 ? 1 : 0;   // 0.1.1 de testes: caixa "60 FPS"
         else if (k == "mostrar_registro") g_op.mostrarRegistro = n != 0;
         else if (k == "abrir_direto") g_op.pularLauncher = n != 0;
         else if (k == "ip_anfitriao") g_op.ipAnfitriao = v;
@@ -94,11 +96,13 @@ void OpcoesSalvar()
       << "tela_cheia = " << g_op.telaCheia << "\n"
       << "; antisserrilhado: 0 desligado, 1 leve, 2 medio, 3 forte\n"
       << "antisserrilhado = " << g_op.antisserrilhado << "\n"
-      << "; resolucao interna (o jogo desenha em mais pixels): 0 = 1x 1280x720, 1 = 1,5x 1920x1080, 2 = 2x 2560x1440\n"
+      << "; resolucao interna (o jogo desenha em mais pixels): 0 = 1x 1280x720, 1 = 1,5x 1920x1080, 2 = 2x 2560x1440, 3 = 3x 3840x2160 (4K)\n"
       << "escala = " << g_op.escala << "\n"
       << "; qualidade das sombras (mapa de sombras maior, bordas mais definidas): 0 = normal, 1 = alta 2x, 2 = muito alta 3x\n"
       << "sombras = " << g_op.sombras << "\n"
       << "vsync = " << g_op.vsync << "\n"
+      << "; quadros por segundo: 0 = 30 (como o original), 1 = 60, 2 = sem limite (experimental)\n"
+      << "fps = " << g_op.fps << "\n"
       << "mostrar_registro = " << g_op.mostrarRegistro << "\n"
       << "abrir_direto = " << g_op.pularLauncher << "\n"
       << "; SYSTEM LINK pela internet: IP (ou nome) do PC de quem criou a partida; vazio = so rede local\n"
@@ -112,8 +116,8 @@ namespace
     enum : int
     {
         ID_PASTA = 100, ID_PROCURAR = 101, ID_SITUACAO = 102,
-        ID_JANELA = 110, ID_TELACHEIA = 111, ID_AA = 112, ID_VSYNC = 113, ID_REGISTRO = 114, ID_DIRETO = 115, ID_ESCALA = 116, ID_SOMBRAS = 117,
-        ID_CONTROLES = 120, ID_INSTRUCOES = 121, ID_SAIR = 122, ID_JOGAR = 123, ID_MEUIP = 124,
+        ID_JANELA = 110, ID_TELACHEIA = 111, ID_AA = 112, ID_VSYNC = 113, ID_REGISTRO = 114, ID_DIRETO = 115, ID_ESCALA = 116, ID_SOMBRAS = 117, ID_FPS = 118,
+        ID_CONTROLES = 120, ID_INSTRUCOES = 121, ID_SAIR = 122, ID_JOGAR = 123, ID_MEUIP = 124, ID_SALVAR = 125,
         ID_DICA = 130, ID_DICA_NET = 131, ID_ANFITRIAO = 132, ID_PERFIL = 133, ID_DICA_PERFIL = 134,
         ID_REQ_MIN = 135, ID_REQ_PC = 136,
     };
@@ -123,7 +127,7 @@ namespace
     #define RAM_JOGO_PT L"1,5"
     #define RAM_JOGO_EN L"1.5"
     // duas colunas: esquerda x 24-560, direita x 600-1136
-    constexpr int LARGURA = 1160, ALTURA = 676, TOPO = 104, DIR = 600;
+    constexpr int LARGURA = 1160, ALTURA = 710, TOPO = 104, DIR = 600;
 
     HFONT g_fonte, g_fonteGrande, g_fonteSub;
     HICON g_iconeTopo;
@@ -133,7 +137,7 @@ namespace
     struct SecaoTela { int x, y, fim; const wchar_t* nome; };
     const SecaoTela SECOES[] = {
         { 24, 116, 560, TR(L"PASTA DO JOGO", L"GAME FOLDER") }, { 24, 232, 560, TR(L"VÍDEO", L"VIDEO") },
-        { 24, 518, 560, TR(L"OUTROS", L"OTHER") },
+        { 24, 552, 560, TR(L"OUTROS", L"OTHER") },
         { DIR, 116, 1136, TR(L"PERFIL", L"PROFILE") }, { DIR, 232, 1136, TR(L"INTERNET (SYSTEM LINK)", L"INTERNET (SYSTEM LINK)") },
         { DIR, 380, 1136, TR(L"REQUISITOS MÍNIMOS", L"MINIMUM REQUIREMENTS") } };
 
@@ -141,7 +145,7 @@ namespace
     std::vector<std::string> PerfisExistentes();
     std::wstring DescreverEstePc(bool& atende);
     bool Caixa(int id) { return id == ID_TELACHEIA || id == ID_VSYNC || id == ID_REGISTRO || id == ID_DIRETO; }
-    bool Botao(int id) { return id == ID_PROCURAR || (id >= ID_CONTROLES && id <= ID_MEUIP); }
+    bool Botao(int id) { return id == ID_PROCURAR || (id >= ID_CONTROLES && id <= ID_SALVAR); }
 
     HWND Criar(HWND pai, const wchar_t* classe, const wchar_t* texto, DWORD estilo, int x, int y, int w, int h, int id, HFONT fonte = nullptr)
     {
@@ -364,6 +368,7 @@ namespace
         g_op.antisserrilhado = std::max(0, (int)SendDlgItemMessageW(j, ID_AA, CB_GETCURSEL, 0, 0));
         g_op.escala = std::max(0, (int)SendDlgItemMessageW(j, ID_ESCALA, CB_GETCURSEL, 0, 0));
         g_op.sombras = std::max(0, (int)SendDlgItemMessageW(j, ID_SOMBRAS, CB_GETCURSEL, 0, 0));
+        g_op.fps = std::max(0, (int)SendDlgItemMessageW(j, ID_FPS, CB_GETCURSEL, 0, 0));
         g_op.vsync = g_marcado[ID_VSYNC];
         g_op.mostrarRegistro = g_marcado[ID_REGISTRO];
         g_op.pularLauncher = g_marcado[ID_DIRETO];
@@ -591,19 +596,23 @@ namespace
                   { TR(L"Desligado", L"Off"), TR(L"1 - leve", L"1 - light"), TR(L"2 - médio", L"2 - medium"), TR(L"3 - forte (bordas mais lisas)", L"3 - strong (smoother edges)") }, g_op.antisserrilhado);
             Lista(j, ID_ESCALA, 358, TR(L"Resolução interna:", L"Internal resolution:"),
                   { TR(L"1x - 1280 × 720 (mais leve)", L"1x - 1280 × 720 (lightest)"), TR(L"1,5x - 1920 × 1080", L"1.5x - 1920 × 1080"),
-                    TR(L"2x - 2560 × 1440 (mais nítido, mais pesado)", L"2x - 2560 × 1440 (sharper, heavier)") }, g_op.escala);
+                    TR(L"2x - 2560 × 1440 (mais nítido, mais pesado)", L"2x - 2560 × 1440 (sharper, heavier)"),
+                    TR(L"3x - 3840 × 2160 / 4K (experimental)", L"3x - 3840 × 2160 / 4K (experimental)") }, g_op.escala);
             Lista(j, ID_SOMBRAS, 392, TR(L"Sombras:", L"Shadows:"),
                   { L"Normal", TR(L"Alta (bordas mais definidas)", L"High (sharper edges)"), TR(L"Muito alta (mais pesada)", L"Very high (heavier)") }, g_op.sombras);
+            Lista(j, ID_FPS, 426, TR(L"Quadros por segundo:", L"Frames per second:"),
+                  { TR(L"30 FPS (como o jogo original)", L"30 FPS (like the original game)"), TR(L"60 FPS (mais fluido, pesa o dobro)", L"60 FPS (smoother, twice the load)"),
+                    TR(L"Sem limite (experimental)", L"Unlocked (experimental)") }, g_op.fps);
             Criar(j, L"BUTTON", TR(L"Sincronia vertical (evita \"rasgos\" na imagem, pode baixar o FPS)", L"Vertical sync (avoids image \"tearing\", may lower the FPS)"),
-                  WS_TABSTOP, 24, 426, 536, 24, ID_VSYNC);
+                  WS_TABSTOP, 24, 460, 536, 24, ID_VSYNC);
             Criar(j, L"STATIC", TR(L"Resolução interna e sombras maiores deixam a imagem mais nítida, mas pesam na placa de vídeo"
                                    L" (vídeo integrado: 1x e sombras normais ou altas).",
                                    L"Higher internal resolution and shadows make the image sharper, but weigh on the graphics card"
-                                   L" (integrated graphics: 1x and normal or high shadows)."), SS_LEFT, 24, 456, 536, 44, ID_DICA);
+                                   L" (integrated graphics: 1x and normal or high shadows)."), SS_LEFT, 24, 490, 536, 44, ID_DICA);
 
             Criar(j, L"BUTTON", TR(L"Abrir direto o jogo da próxima vez (Shift ao abrir mostra esta janela)",
-                                   L"Start the game directly next time (Shift while opening shows this window)"), WS_TABSTOP, 24, 546, 536, 24, ID_DIRETO);
-            Criar(j, L"BUTTON", TR(L"Mostrar a janela de registro (para depurar)", L"Show the log window (for debugging)"), WS_TABSTOP, 24, 574, 536, 24, ID_REGISTRO);
+                                   L"Start the game directly next time (Shift while opening shows this window)"), WS_TABSTOP, 24, 580, 536, 24, ID_DIRETO);
+            Criar(j, L"BUTTON", TR(L"Mostrar a janela de registro (para depurar)", L"Show the log window (for debugging)"), WS_TABSTOP, 24, 608, 536, 24, ID_REGISTRO);
 
             // ---- coluna da direita: perfil, internet, requisitos
             {
@@ -648,10 +657,11 @@ namespace
                 Criar(j, L"STATIC", pc.c_str(), SS_LEFT, DIR, 494, 536, 62, ID_REQ_PC);
             }
 
-            Criar(j, L"BUTTON", TR(L"CONTROLES", L"CONTROLS"), WS_TABSTOP, 24, 618, 170, 38, ID_CONTROLES);
-            Criar(j, L"BUTTON", TR(L"INSTRUÇÕES", L"INSTRUCTIONS"), WS_TABSTOP, 204, 618, 190, 38, ID_INSTRUCOES);
-            Criar(j, L"BUTTON", TR(L"SAIR", L"QUIT"), WS_TABSTOP, 862, 618, 120, 38, ID_SAIR);
-            Criar(j, L"BUTTON", TR(L"JOGAR", L"PLAY"), WS_TABSTOP, 992, 618, 144, 38, ID_JOGAR);
+            Criar(j, L"BUTTON", TR(L"CONTROLES", L"CONTROLS"), WS_TABSTOP, 24, 652, 170, 38, ID_CONTROLES);
+            Criar(j, L"BUTTON", TR(L"INSTRUÇÕES", L"INSTRUCTIONS"), WS_TABSTOP, 204, 652, 190, 38, ID_INSTRUCOES);
+            Criar(j, L"BUTTON", TR(L"SALVAR", L"SAVE"), WS_TABSTOP, 702, 652, 150, 38, ID_SALVAR);
+            Criar(j, L"BUTTON", TR(L"SAIR", L"QUIT"), WS_TABSTOP, 862, 652, 120, 38, ID_SAIR);
+            Criar(j, L"BUTTON", TR(L"JOGAR", L"PLAY"), WS_TABSTOP, 992, 652, 144, 38, ID_JOGAR);
 
             g_marcado[ID_TELACHEIA] = g_op.telaCheia;
             g_marcado[ID_VSYNC] = g_op.vsync;
@@ -660,6 +670,15 @@ namespace
             AtualizarSituacao(j);
             return 0;
         }
+        case WM_TIMER:
+            if (wp == ID_SALVAR)
+            {
+                KillTimer(j, ID_SALVAR);
+                SetDlgItemTextW(j, ID_SALVAR, TR(L"SALVAR", L"SAVE"));
+                InvalidateRect(GetDlgItem(j, ID_SALVAR), nullptr, FALSE);
+                return 0;
+            }
+            break;
         case WM_COMMAND:
         {
             int id = LOWORD(wp);
@@ -676,6 +695,12 @@ namespace
             case ID_CONTROLES: ControlesAbrirJanela(false); return 0;
             case ID_INSTRUCOES: MostrarInstrucoes(j); return 0;
             case ID_MEUIP: MostrarMeuIp(j); return 0;
+            case ID_SALVAR:   // salva as opcoes no opcoes.ini sem abrir o jogo; o botao mostra "SALVO" por 2 s
+                LerTela(j);
+                OpcoesSalvar();
+                SetDlgItemTextW(j, ID_SALVAR, TR(L"SALVO", L"SAVED"));
+                SetTimer(j, ID_SALVAR, 2000, nullptr);
+                return 0;
             case ID_SAIR: case IDCANCEL: DestroyWindow(j); return 0;
             case ID_JOGAR: case IDOK: if (Preparar(j)) { g_jogar = true; DestroyWindow(j); } return 0;   // Enter = Jogar
             }

@@ -2043,6 +2043,63 @@ GUEST_FUNC(GUEST_SUB_GPUWAIT)
     ShortWait(spins++, 100);
 }
 
+// FPS (opcao do launcher "fps": 0 = 30, 1 = 60, 2 = sem limite; FCRECOMP_FPS=30/60/0 forca): sub_8273E6F8 e chamada pelo
+// D3D do jogo a cada troca de imagem e arma a espera de vblanks antes de mostrar a proxima: 16 bits de cima de r3 =
+// intervalo (o jogo pede 2 = 30 FPS), contado a partir do vblank da ultima troca (dispositivo+15620; o contador de vblanks
+// e +15616 e a contagem regressiva +15624, que a interrupcao de vblank, sub_827373F8, desconta so enquanto > 0). Se o
+// intervalo ja passou, a troca sai na hora quando a posicao do feixe (0..100 %) <= 16 bits de baixo (limite); senao espera
+// 1 vblank. 60 FPS: intervalo 1. Sem limite: intervalo 0 e limite FFFF (a troca sai sempre na hora, sem esperar vblank).
+// So muda o ritmo das trocas: o vblank continua a 60 Hz (videos e o resto seguem iguais) e o jogo mede o tempo de
+// cada quadro pelo relogio (mftb), entao anda na mesma velocidade (medido em 12/11: 4,8 m/s a 30 e 4,2 a 60 FPS).
+#ifndef PREDATOR_EDITOR
+int ModoFps()
+{
+    static const int modo = [] {
+        if (const char* e = getenv("FCRECOMP_FPS")) { int n = atoi(e); return n == 30 ? 0 : n == 60 ? 1 : 2; }
+        if (const char* e = getenv("FCRECOMP_FPS60")) return atoi(e) != 0 ? 1 : 0;
+        return OpcoesAtuais().fps;
+    }();
+    return modo;
+}
+GUEST_DECLARE_ORIGINAL(sub_8273E6F8);
+GUEST_FUNC(sub_8273E6F8)
+{
+    const int modo = ModoFps();
+    if (modo != 0)
+    {
+        uint32_t r3 = Gpr32(ctx, 3);
+        uint32_t novo = modo == 1 ? (1u << 16) | (r3 & 0xFFFF) : 0xFFFFu;
+        if ((r3 >> 16) > (novo >> 16))
+        {
+            static bool avisou = false;
+            if (!avisou)
+            {
+                avisou = true;
+                if (modo == 1) Log("[gpu] 60 FPS: troca de imagem a cada %u vblank(s) passou a 1", r3 >> 16);
+                else Log("[gpu] FPS sem limite: troca de imagem a cada %u vblank(s) passou a sair na hora", r3 >> 16);
+            }
+            SetGpr(ctx, 3, novo);
+        }
+    }
+    GUEST_ORIGINAL(sub_8273E6F8)(ctx, base);
+}
+// Sem limite: alem da espera de vblank, o laco principal do jogo (sub_82333318) tem um limitador proprio: mede o quadro e
+// dorme (sub_826437C8 -> Sleep) o que falta para 1/60 s (constante float em 820822EC, talvez usada por outras partes,
+// por isso nao e mudada). So nesse modo a chamada de sono vinda dali (retorno 82333414) e pulada. Achado em 12/11 com
+// um registro temporario de KeDelayExecutionThread + pilha.
+GUEST_DECLARE_ORIGINAL(sub_826437C8);
+GUEST_FUNC(sub_826437C8)
+{
+    if (ModoFps() == 2 && (uint32_t)ctx.lr == 0x82333414u)
+    {
+        static uint32_t n = 0;
+        if (n++ % 600 == 0) Log("[gpu] FPS sem limite: espera do limitador do jogo pulada (%u vezes, %d ms)", n, (int32_t)Gpr32(ctx, 3));
+        return;
+    }
+    GUEST_ORIGINAL(sub_826437C8)(ctx, base);
+}
+#endif
+
 // sub_823C32B8 = "tempo atual em ms" do jogo (secao critica + mftb + conversao). O agendador de tarefas da thread 16
 // (sub_8239A488 -> sub_823C3A30 temporizadores / sub_823C3630 fila) fica num laco perguntando a hora ~1,5 milhao de vezes
 // por segundo, quase sempre no mesmo milissegundo: um nucleo inteiro a 100 % so esperando (no Xbox havia nucleo de sobra;

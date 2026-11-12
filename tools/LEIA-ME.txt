@@ -1,4 +1,4 @@
-FAR CRY INSTINCTS PREDATOR RECOMP 0.1.1
+FAR CRY INSTINCTS PREDATOR RECOMP 0.1.2
 =======================================
 
 Versao para PC de Far Cry Instincts Predator (Xbox 360), feita por recompilacao estatica.
@@ -25,7 +25,10 @@ COMO JOGAR
 4. Ajuste o video e os controles, se quiser, e clique em Jogar.
    Na primeira vez o programa prepara os arquivos e os graficos: pode demorar cerca de 1 minuto a mais.
    "Resolucao interna" 1,5x ou 2x deixa a imagem mais nitida, mas pesa bem mais na placa de video
-   (em video integrado use 1x).
+   (em video integrado use 1x). 3x (4K) e experimental: precisa de placa de video forte.
+   "Quadros por segundo": 30 (como o jogo original), 60 (mais fluido, pesa o dobro na placa de video) ou
+   sem limite (experimental).
+   O botao Salvar guarda as opcoes sem abrir o jogo.
    "Sombras" alta ou muito alta deixa as sombras bem mais definidas; a alta pesa pouco.
 
 EDITOR DE MAPAS: escolha MAP EDITOR no menu principal do jogo. O editor e o PredatorEditor.exe (que fica
@@ -130,4 +133,4 @@ controles.ini      controles
 fcrecomp_log.txt   registro (mande junto quando relatar um problema)
 
                                    Autor: bugcoder00
-                                      Versao 0.1.1
+                                      Versao 0.1.2

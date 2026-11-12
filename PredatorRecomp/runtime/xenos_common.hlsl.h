@@ -53,7 +53,17 @@ float4 XenosToClip(float4 p)
     if (vteCntl & (1u << 9)) p.z *= p.w;               // VTX_Z_FMT
     float2 scale = float2((vteCntl & 1) ? vpScale.x : 1.0, (vteCntl & 4) ? vpScale.y : 1.0);
     float2 offset = float2((vteCntl & 2) ? vpOffset.x : 0.0, (vteCntl & 8) ? vpOffset.y : 0.0);
-    float2 screen = p.xy * scale + (offset + rtSize.zw + pixShift) * p.w;   // em pixels (com deslocamento da janela), vezes w
+    float2 screen = p.xy * scale + (offset + rtSize.zw) * p.w;   // em pixels (com deslocamento da janela), vezes w
+    // Bug 37 (brechas na borda direita/de baixo em 3x/4K): os quadrados 2D do jogo vao de -0,5 a 1279,5 (centro do pixel
+    // no inteiro). No Xbox uma borda em x,5 cobre ate o pixel inteiro seguinte; com o meio pixel da placa (pixShift) a
+    // borda 1279,5 caia em 3839 na 3x e a ultima coluna/linha ficava sem pintar. Acima de 1x, bordas exatamente em x,5
+    // de desenhos 2D (w = 1) sobem para o inteiro seguinte; bordas inteiras (tela dividida, bug 32) ficam como estao.
+    if (pixShift != 0 && resScale > 1.0 && abs(p.w - 1.0) < 1e-6)
+    {
+        float2 f = screen - floor(screen);
+        screen += select(abs(f - 0.5) < 1e-3, 0.5, 0.0);
+    }
+    screen += pixShift * p.w;
     float4 o;
     o.x = screen.x * 2.0 / rtSize.x - p.w;
     o.y = p.w - screen.y * 2.0 / rtSize.y;
