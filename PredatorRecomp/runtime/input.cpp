@@ -1571,6 +1571,19 @@ GUEST_FUNC(GUEST_SUB_MIRA)
             add(in + 192, dy * k * (inv ? -1.0f : 1.0f));
         }
     }
+#ifndef PREDATOR_EDITOR
+    // depuracao: FCRECOMP_OLHARLOG=1 mostra, a cada quadro, o giro pedido (entrada+188/+192) e a posicao/direcao do
+    // ouvinte (camera) para ver se a camera segue o mouse no mesmo quadro ou "flutua" depois
+    if (static const bool olharLog = getenv("FCRECOMP_OLHARLOG") != nullptr; olharLog && jogador1)
+    {
+        uint32_t ouv = R32(0x828D9C68);
+        float v[16] = {};
+        if (ouv) for (int i = 0; i < 16; i++) v[i] = BitsFloat(R32(ouv + i * 4));
+        Log("[olhar] q=%llu giro %.4f %.4f | ouv %.3f %.3f %.3f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f %.4f",
+            (unsigned long long)diag::CurrentFrame(), BitsFloat(R32(in + 188)), BitsFloat(R32(in + 192)),
+            v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]);
+    }
+#endif
     if (jogador1)
     {
         if (!repetindo) RoteiroAnotarGiro(somaX, somaY);

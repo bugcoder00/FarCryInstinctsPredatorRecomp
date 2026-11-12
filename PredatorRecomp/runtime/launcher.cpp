@@ -19,7 +19,7 @@
 #include <dxgi.h>
 
 // versao mostrada no titulo do launcher e nas instrucoes (trocar a cada pacote novo)
-#define VERSAO_RECOMP L"0.1.0"
+#define VERSAO_RECOMP L"0.1.1"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")

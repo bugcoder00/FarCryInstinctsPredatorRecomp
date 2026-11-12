@@ -1,4 +1,4 @@
-FAR CRY INSTINCTS PREDATOR RECOMP 0.1.0
+FAR CRY INSTINCTS PREDATOR RECOMP 0.1.1
 =======================================
 
 Versao para PC de Far Cry Instincts Predator (Xbox 360), feita por recompilacao estatica.
@@ -130,4 +130,4 @@ controles.ini      controles
 fcrecomp_log.txt   registro (mande junto quando relatar um problema)
 
                                    Autor: bugcoder00
-                                      Versao 0.1.0
+                                      Versao 0.1.1

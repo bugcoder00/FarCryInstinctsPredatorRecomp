@@ -941,6 +941,7 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             uint32_t meios = 2; // escala da superficie de origem (a textura tem Pm(width, meios) x Pm(height, meios))
             D3D12_RESOURCE_STATES state;
             uint64_t frame = 0; // quadro do ultimo resolve neste endereco
+            uint32_t ox = 0, oy = 0; // bug 33/34: posicao do retangulo dentro do bloco de 8x8 do destino (x0 & 7, y0 & 7)
             // memoria do jogo no destino no momento do resolve (bug 15): se o jogo escreve outra coisa ali depois, a
             // copia da placa ja nao vale (ver ResolveVencido)
             uint32_t memBytes = 0;
@@ -1163,6 +1164,7 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
                     for (uint32_t y = 0; y < height && !found; y += 32)
                         for (uint32_t x = 0; x < pitch && !found; x += 32)
                             if (TiledOffset(x, y, pitch, 2) == delta) { px = x; py = y; found = true; }
+                    px += tex->ox; py += tex->oy;
                     if (!found || px >= width || py >= height) continue;
                     uint32_t w = std::min(Px(tex->width), Px(width) - Px(px)), h = std::min(Px(tex->height), Px(height) - Px(py));
                     Transition(list, tex->res.Get(), tex->state, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1721,7 +1723,7 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
         struct PendingWriteback
         {
             ComPtr<ID3D12Resource> readback; uint32_t dest, w, h, rowPitch, destInfo, pitch; uint64_t serial;
-            uint32_t dono = 0;              // numero da reserva da memoria no momento do resolve
+            std::vector<uint32_t> donos;    // numero da reserva de cada pagina de 4 KB do destino no momento do resolve
             std::vector<uint8_t> antes;     // bytes do destino no momento do resolve (ou do ultimo retorno nosso)
         };
         std::vector<PendingWriteback> g_pendingWritebacks;
@@ -1738,13 +1740,26 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
                     memcpy(&out[i], Phys(wb.dest + TiledOffset(x, y, wb.pitch, 2)), 4);
         }
 
+        // Crashes no System Link (11/11/2026, 3 registros): depois do bug 35 o miolo da mira passou de 65x65 para 64x64 e
+        // entrou no retorno (16 KB de memoria). A estrutura de som estava DENTRO desse pedaco (0DDEA000, o resolve era
+        // 0DDE9000) e a conferencia so olhava o dono do primeiro endereco. Agora: (1) o retorno vale so abaixo de 64x64
+        // (como antes: so a medicao de brilho, ate 80x48, e lida pela CPU) e (2) confere o dono de cada pagina de 4 KB.
+        std::vector<uint32_t> DonosDoRetorno(const PendingWriteback& wb)
+        {
+            std::vector<uint32_t> d;
+            const uint32_t bytes = wb.pitch * ((wb.h + 31) & ~31u) * 4;
+            for (uint32_t a = wb.dest & ~0xFFFu; a < wb.dest + bytes; a += 0x1000)
+                d.push_back(GuestAllocSerial(0xA0000000u | (a & 0x1FFFFFFF)));
+            return d;
+        }
+
         void QueueWriteback(ID3D12GraphicsCommandList* list, ResolvedTexture& tex, uint32_t dest, uint32_t destInfo, uint32_t destPitch)
         {
             static const bool off = getenv("FCRECOMP_SEMRETORNO") != nullptr;
-            if (off || tex.format != COLOR_FORMAT || tex.width * tex.height > 64 * 64 || tex.meios != g_meios) return;
+            if (off || tex.format != COLOR_FORMAT || tex.width * tex.height >= 64 * 64 || tex.meios != g_meios) return;
             PendingWriteback wb{ nullptr, dest, tex.width, tex.height, (Px(tex.width) * 8 + 255) & ~255u, destInfo, destPitch & 0x3FFF, render::FrameSerial() };
             wb.pitch = std::max<uint32_t>(32, (wb.pitch + 31) & ~31u);
-            wb.dono = GuestAllocSerial(0xA0000000u | (dest & 0x1FFFFFFF));
+            wb.donos = DonosDoRetorno(wb);
             WritebackBytes(wb, wb.antes);
             if (!g_writebackPool.empty()) { wb.readback = std::move(g_writebackPool.back()); g_writebackPool.pop_back(); }
             else
@@ -1778,12 +1793,13 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
                 if (wb.serial + 2 > now) { i++; continue; }
                 std::vector<uint8_t> agora;
                 WritebackBytes(wb, agora);
-                if (wb.dono != GuestAllocSerial(0xA0000000u | (wb.dest & 0x1FFFFFFF)) || agora != wb.antes)
+                const bool liberada = wb.donos != DonosDoRetorno(wb);
+                if (liberada || agora != wb.antes)
                 {
                     static int avisos = 0;
                     if (avisos++ < 20)
                         Log("[draw] retorno do resolve %ux%u para %08X descartado: a memoria %s depois do resolve", wb.w, wb.h, wb.dest,
-                            wb.dono != GuestAllocSerial(0xA0000000u | (wb.dest & 0x1FFFFFFF)) ? "foi liberada/reaproveitada" : "foi escrita por outro");
+                            liberada ? "foi liberada/reaproveitada" : "foi escrita por outro");
                     diag::Note(diag::Other, "retorno de resolve pequeno descartado (memoria reaproveitada pelo jogo)");
                     if (static const char* vig = getenv("FCRECOMP_VIGIARETORNO"); vig && avisos % 30 == 0)
                         Log("[retorno] %d descartes ate agora (ultimo %08X, quadro %llu)", avisos, wb.dest, (unsigned long long)g_frameNumber);
@@ -1974,7 +1990,13 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             }
             if (!(maxX > minX && maxY > minY) || minX < -4 || minY < -4 || maxX > CANVAS + 4 || maxY > CANVAS + 4)
                 return false;
-            x0 = (uint32_t)std::max(0.0f, minX); y0 = (uint32_t)std::max(0.0f, minY);
+            // Bug 35: o jogo manda os cantos com o meio pixel do D3D9 (ex.: 7,5 para comecar na linha 8; 607,5 para 608).
+            // Antes o inicio era truncado (7, 607) e o resolve levava uma linha/coluna a mais (na tela dividida
+            // horizontal, a borda de cima do menu aparecia na linha 359). Agora arredonda, como o fim ja fazia.
+            // FCRECOMP_RESOLVETRUNCA=1 volta ao antigo.
+            static const bool trunca = getenv("FCRECOMP_RESOLVETRUNCA") != nullptr;
+            const float r = trunca ? 0.0f : 0.5f;
+            x0 = (uint32_t)std::max(0.0f, minX + r); y0 = (uint32_t)std::max(0.0f, minY + r);
             x1 = std::min<uint32_t>(CANVAS, (uint32_t)(maxX + 0.5f)); y1 = std::min<uint32_t>(CANVAS, (uint32_t)(maxY + 0.5f));
             return x1 > x0 && y1 > y0;
         }
@@ -3449,9 +3471,14 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         // PA_SU_VTX_CNTL.pix_center (bit 0): 0 = centro do pixel no numero inteiro (D3D9, o padrao do Xbox); o D3D12 usa
         // centro em +0,5. Sem o meio pixel, os quadrados de tela cheia do jogo nao cobriam a ultima coluna (x=1279) nem a
         // ultima linha (y=719): linhas finas na borda direita e de baixo. FCRECOMP_NOPIXSHIFT=1 desliga.
+        // Bug 32 (risca no meio da tela dividida em 1,5x): o meio pixel e meio pixel DA PLACA (0,5 / escala em pixels do
+        // jogo). Com 0,5 pixel do jogo, em 1,5x o quadrado que comeca em x=0 so comecava em 0,75 pixel da placa e a
+        // primeira coluna (o centro dela e 0,5) ficava sem pintar: na tela dividida, a coluna do x=640 do jogador 2
+        // ficava com a imagem de antes. Em 1x nada muda. FCRECOMP_PIXSHIFTJOGO=1 volta ao antigo.
         {
             static const bool noShift = getenv("FCRECOMP_NOPIXSHIFT") != nullptr;
-            float shift = (!noShift && !(Reg(0x2302) & 1)) ? 0.5f : 0.0f;
+            static const bool shiftJogo = getenv("FCRECOMP_PIXSHIFTJOGO") != nullptr;
+            float shift = (!noShift && !(Reg(0x2302) & 1)) ? (shiftJogo ? 0.5f : 1.0f / color.meios) : 0.0f;
             memcpy(&d[212], &shift, 4);
         }
         d[209] = (Reg(0x2180) & (1u << 18)) ? (0x80000000u | ((Reg(0x2181) >> 8) & 0xFF)) : 0;
@@ -3744,7 +3771,30 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         {
             DXGI_FORMAT fmt = isDepth ? DEPTH_COPY_FORMAT : COLOR_FORMAT;
             const uint32_t m = isDepth ? depth->meios : color.meios;   // escala da superficie de origem
-            auto& tex = g_resolved[dest];
+            // Bugs 30/31 (tela dividida sem a metade do jogador 2 e sem o HUD dele): o jogo monta a tela inteira de
+            // 1280x720 em 006DA000, mas cada jogador resolve so 640x720 DENTRO dela (largura da linha do destino = 1280;
+            // o jogador 2 em 006EE000, que e o x=640 dessa imagem). No Xbox o resolve menor troca so o pedaco dele e o
+            // resto da imagem de 1280 continua na memoria; aqui o resolve de 640 trocava a textura inteira e a metade
+            // direita voltava a ser o pedaco velho do jogador 2 (sem HUD; no menu, preto). Agora:
+            //  - resolve menor no mesmo endereco de uma imagem maior com a mesma largura de linha: copia so o canto
+            //    superior esquerdo dela ("parcial");
+            //  - resolve dentro de outra imagem (endereco no meio dela, mesma largura de linha): atualiza tambem o
+            //    pedaco correspondente dela.
+            // FCRECOMP_SEMPARCIAL=1 volta ao antigo.
+            static const bool semParcial = getenv("FCRECOMP_SEMPARCIAL") != nullptr;
+            const uint32_t pitchW = destPitch & 0x3FFF;
+            auto& atual = g_resolved[dest];
+            // Bugs 33-35 (tela dividida horizontal: risca no meio e faixa velha embaixo): o endereco do destino e sempre o
+            // de um bloco de 32x32 (tiled) e o retangulo fica nele na mesma posicao que tem dentro do bloco da origem. O
+            // jogador 2 de cima/baixo resolve 0,8-1280,368 para o endereco da linha 352: a linha 8 vai para 360. Antes ia
+            // para 352: tudo 8 linhas acima, risca no meio e linhas 712-720 velhas. A textura continua comecando em x0,y0;
+            // o deslocamento vale na hora de montar a imagem maior. FCRECOMP_SEMDESLOC8=1 desliga.
+            static const bool semDesloc8 = getenv("FCRECOMP_SEMDESLOC8") != nullptr;
+            const uint32_t ox = semDesloc8 ? 0 : x0 & 31, oy = semDesloc8 ? 0 : y0 & 31;
+            const bool parcial = !semParcial && !isDepth && atual.res && atual.format == fmt && atual.meios == m && atual.width == pitchW &&
+                atual.width >= w + ox && atual.height >= h + oy && (atual.width > w || atual.height > h);
+            ResolvedTexture pedaco{};
+            auto& tex = parcial ? pedaco : atual;
             if (!tex.res || tex.width != w || tex.height != h || tex.format != fmt || tex.meios != m)
             {
                 // devolve a textura atual ao estoque e pega (ou cria) a do tamanho pedido (escala no bit 16 da largura)
@@ -3853,12 +3903,59 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                 list->DrawInstanced(3, 1, 0, 0);
             }
             Transition(list, tex.res.Get(), tex.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            tex.seq = ++g_resolveSeq;
-            tex.frame = g_frameNumber;
-            if (!isDepth) g_lastResolve = tex.res.Get();
-            CaptureForDebug(list, tex, dest);
-            if (!isDepth) QueueWriteback(list, tex, dest, Reg(0x231B), destPitch);
-            MarcarMemoriaDoResolve(tex, dest, Reg(0x231B));
+            if (parcial)
+            {
+                // o pedaco vai para o canto superior esquerdo da imagem maior; a textura do pedaco volta ao estoque
+                Transition(list, pedaco.res.Get(), pedaco.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                Transition(list, atual.res.Get(), atual.state, D3D12_RESOURCE_STATE_COPY_DEST);
+                D3D12_TEXTURE_COPY_LOCATION dst{ atual.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                D3D12_TEXTURE_COPY_LOCATION src{ pedaco.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                D3D12_BOX box{ 0, 0, 0, Pm(w, m), Pm(h, m), 1 };
+                list->CopyTextureRegion(&dst, Pm(ox, m), Pm(oy, m), 0, &src, &box);
+                Transition(list, pedaco.res.Get(), pedaco.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                Transition(list, atual.res.Get(), atual.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                g_resolvePool[{ dest, w | (m << 16), h, fmt }] = { std::move(pedaco.res), pedaco.state };
+                static int avisos = 0;
+                if (avisos++ < 5)
+                    Log("[draw] resolve %ux%u para %08X: so o canto da imagem de %ux%u que ja estava ali (largura da linha %u)",
+                        w, h, dest, atual.width, atual.height, pitchW);
+            }
+            if (!parcial) { atual.ox = isDepth ? 0 : ox; atual.oy = isDepth ? 0 : oy; }
+            atual.seq = ++g_resolveSeq;
+            atual.frame = g_frameNumber;
+            if (!isDepth) g_lastResolve = atual.res.Get();
+            CaptureForDebug(list, atual, dest);
+            if (!isDepth && !parcial) QueueWriteback(list, atual, dest, Reg(0x231B), destPitch);
+            MarcarMemoriaDoResolve(atual, dest, Reg(0x231B));
+
+            // resolve dentro de outra imagem ja resolvida (ex.: o jogador 2 em 006EE000, dentro da tela de 006DA000)
+            if (!isDepth && !semParcial)
+                for (auto& [addr, c] : g_resolved)
+                {
+                    if (addr >= dest || !c.res || c.format != COLOR_FORMAT || c.meios != m || c.width != pitchW) continue;
+                    const uint32_t cp = (c.width + 31) & ~31u;
+                    if (dest >= addr + cp * c.height * 4) continue;
+                    uint32_t delta = dest - addr, px = 0, py = 0;
+                    bool found = false;
+                    for (uint32_t y = 0; y < c.height && !found; y += 32)
+                        for (uint32_t x = 0; x < cp && !found; x += 32)
+                            if (TiledOffset(x, y, cp, 2) == delta) { px = x; py = y; found = true; }
+                    px += ox; py += oy;
+                    if (!found || px + w > c.width || py + h > c.height) continue;
+                    Transition(list, atual.res.Get(), atual.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    Transition(list, c.res.Get(), c.state, D3D12_RESOURCE_STATE_COPY_DEST);
+                    D3D12_TEXTURE_COPY_LOCATION dst{ c.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                    D3D12_TEXTURE_COPY_LOCATION src{ atual.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                    D3D12_BOX box{ 0, 0, 0, Pm(w, m), Pm(h, m), 1 };
+                    list->CopyTextureRegion(&dst, Pm(px, m), Pm(py, m), 0, &src, &box);
+                    Transition(list, c.res.Get(), c.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    Transition(list, atual.res.Get(), atual.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    c.seq = ++g_resolveSeq;   // as copias montadas/recortadas com ela sao refeitas
+                    static int avisos = 0;
+                    if (avisos++ < 5)
+                        Log("[draw] resolve %ux%u para %08X: atualiza tambem o pedaco %u,%u da imagem %ux%u em %08X",
+                            w, h, dest, px, py, c.width, c.height, addr);
+                }
         }
 
         // limpezas pedidas junto com o resolve: feitas antes do proximo desenho na superficie, SO no retangulo copiado
@@ -4161,7 +4258,8 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                 for (uint32_t y = 0; y < 720 && !found; y += 32)
                     for (uint32_t x = 0; x < 1280 && !found; x += 32)
                         if (TiledOffset(x, y, 1280, 2) == delta) { px = x; py = y; found = true; }
-                if (!found) continue;
+                px += tex.ox; py += tex.oy;
+                if (!found || px >= 1280 || py >= 720) continue;
                 uint32_t w = std::min(Px(tex.width), Px(1280) - Px(px)), h = std::min(Px(tex.height), Px(720) - Px(py));
                 Transition(list, tex.res.Get(), tex.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
                 D3D12_TEXTURE_COPY_LOCATION dst{ fbTex.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
