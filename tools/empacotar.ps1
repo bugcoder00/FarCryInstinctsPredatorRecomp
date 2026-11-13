@@ -1,6 +1,6 @@
 # Monta o pacote para distribuir: so o executavel, as DLLs que ele precisa e o LEIA-ME. Nenhum arquivo do jogo
 # (o image.bin e criado pelo proprio jogo a partir do default.xex da copia de quem joga) e nenhum codigo-fonte.
-# Uso: powershell -ExecutionPolicy Bypass -File tools\empacotar.ps1   ->   dist\FarCryPredatorRecomp + .zip
+# Uso: powershell -ExecutionPolicy Bypass -File tools\empacotar.ps1   ->   dist\FarCryPredatorRecomp + zip com a versao
 #      -Ingles: a versao em ingles (build_game_en, compilada com build_game.ps1 -Ingles e -Editor -Ingles)
 #               -> dist\FarCryPredatorRecomp_EN + .zip, com o README.txt em ingles no lugar do LEIA-ME
 param([switch]$Ingles)
@@ -36,7 +36,10 @@ if ($Ingles) { Copy-Item "$raiz\tools\collect_recipe.bat" $destino } else { Copy
 $proibidos = Get-ChildItem $destino -Recurse | Where-Object { $_.Name -match '\.(bin|xex|dat|ini|map|lib|pdb|txt)$' -and $_.Name -ne $leia -and $_.Name -ne 'receita_shaders.txt' -and $_.Name -ne 'shader_recipe.txt' }
 if ($proibidos) { throw "arquivo que nao deveria ir no pacote: $($proibidos.Name -join ', ')" }
 
-$zip = "$destino.zip"
+# nome do zip com a versao (a do launcher.cpp, VERSAO_RECOMP): FarCryPredatorRecompLauncher_0.1.3_PTBR.zip / _ENG.zip
+$versao = [regex]::Match((Get-Content -Raw "$raiz\PredatorRecomp\runtime\launcher.cpp"), 'VERSAO_RECOMP L"([0-9.]+)"').Groups[1].Value
+if (-not $versao) { throw "versao nao achada em launcher.cpp (VERSAO_RECOMP)" }
+$zip = "$raiz\dist\FarCryPredatorRecompLauncher_${versao}_$(if ($Ingles) { 'ENG' } else { 'PTBR' }).zip"
 if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path $destino -DestinationPath $zip
 Get-ChildItem $destino | ForEach-Object { "{0,-20} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB) }

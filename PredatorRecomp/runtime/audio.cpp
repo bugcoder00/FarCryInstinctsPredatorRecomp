@@ -16,6 +16,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+void WatchAddWriteRange(uint32_t addr, uint32_t size);   // watch.cpp (diagnostico FCRECOMP_VOZESVIGIA)
 
 #pragma comment(lib, "xaudio2.lib")
 
@@ -332,6 +333,93 @@ KFUNC(XAudioGetVoiceCategoryVolume)
 // +32 e +44 marcas. Os que passam do limite do grupo (tabela +28: {maximo, em uso} por grupo, +32 grupos) ou do total
 // (+20), ou ficam baixos demais, sao parados/virtualizados. Anota cada som novo e cada troca de estado.
 #ifndef PREDATOR_EDITOR   // gancho so do jogo: no editor de mapas (ige.xex) o endereco e de outra funcao
+// depuracao (FCRECOMP_SOMSWITCH=1, cachoeira repetindo): evento "mudar interruptor" do motor de som (sub_824B6070,
+// chamado pelo despachante sub_824B6E38 com r3/r4 = grupo/id, *r5 = valor, r6 = ligado, r7). Anota cada mudanca.
+// depuracao (FCRECOMP_SOMEVENTO=objeto): evento de som postado para esse objeto (sub_824B8020: r4 objeto, r5 id,
+// r6 -> evento): quem postou (cadeia de retornos do PowerPC) e os campos do evento
+GUEST_DECLARE_ORIGINAL(sub_824B8020);
+GUEST_FUNC(sub_824B8020)
+{
+    if (static const uint32_t alvo = getenv("FCRECOMP_SOMEVENTO") ? strtoul(getenv("FCRECOMP_SOMEVENTO"), nullptr, 16) : 0;
+        alvo && Gpr32(ctx, 4) == alvo)
+    {
+        std::string chain;
+        uint32_t sp = Gpr32(ctx, 1);
+        for (int i = 0; i < 14 && sp >= 0x10000000 && sp < 0x80000000; i++)
+        {
+            uint32_t next = R32(sp);
+            if (next <= sp) break;
+            char b[16]; snprintf(b, sizeof(b), " %08X", R32(next - 8)); chain += b;
+            sp = next;
+        }
+        uint32_t ev = Gpr32(ctx, 6) ? R32(Gpr32(ctx, 6)) : 0;
+        std::string campos;
+        for (uint32_t o = 0; ev && o < 96; o += 4) { char b[16]; snprintf(b, sizeof(b), " %08X", R32(ev + o)); campos += b; }
+        Log("[somevento] t=%.0f obj %08X id %08X lr %08X ev %08X:%s | pilha:%s", perf::Now(), Gpr32(ctx, 4), Gpr32(ctx, 5),
+            (uint32_t)Lr(ctx), ev, campos.c_str(), chain.c_str());
+    }
+    GUEST_ORIGINAL(sub_824B8020)(ctx, base);
+}
+
+// depuracao (FCRECOMP_SOMESTADO=1): estado de som do personagem (sub_82279108 devolve 0-6, -1; sub_82278220 para o som
+// do estado antigo e liga o do novo). Anota cada mudanca com os campos que a funcao usa.
+GUEST_DECLARE_ORIGINAL(sub_82279108);
+GUEST_FUNC(sub_82279108)
+{
+    uint32_t obj = Gpr32(ctx, 3);
+    GUEST_ORIGINAL(sub_82279108)(ctx, base);
+    if (static const bool est = getenv("FCRECOMP_SOMESTADO") != nullptr; est)
+    {
+        static std::mutex m;
+        static std::vector<std::pair<uint32_t, int32_t>> ult;
+        std::lock_guard lock(m);
+        int32_t v = (int32_t)Gpr32(ctx, 3);
+        auto it = std::find_if(ult.begin(), ult.end(), [&](auto& p) { return p.first == obj; });
+        if (it == ult.end() || it->second != v)
+        {
+            auto F = [](uint32_t a) { uint32_t x = R32(a); float f; memcpy(&f, &x, 4); return f; };
+            Log("[somestado] t=%.0f obj %08X estado %d -> %d (+1352 %u +1064 %u +2436 %u +2950 %u +354 %u +2396 %.2f +2400 %.2f +2404 %.2f)",
+                perf::Now(), obj, it == ult.end() ? -99 : it->second, v, R32(obj + 1352), R32(obj + 1064), R32(obj + 2436),
+                *(uint8_t*)G(obj + 2950), *(uint8_t*)G(obj + 354), F(obj + 2396), F(obj + 2400), F(obj + 2404));
+            if (it == ult.end()) ult.push_back({ obj, v }); else it->second = v;
+        }
+    }
+}
+
+GUEST_DECLARE_ORIGINAL(sub_824B6070);
+GUEST_FUNC(sub_824B6070)
+{
+    if (static const bool sw = getenv("FCRECOMP_SOMSWITCH") != nullptr; sw)
+    {
+        static std::mutex m;
+        static std::vector<std::pair<uint64_t, uint64_t>> ult;   // (r3,r4) -> (valor,r6)
+        std::lock_guard lock(m);
+        uint64_t k = ((uint64_t)Gpr32(ctx, 3) << 32) | Gpr32(ctx, 4);
+        uint32_t r5 = Gpr32(ctx, 5);
+        uint64_t v = ((uint64_t)(r5 ? R32(r5) : 0) << 32) | Gpr32(ctx, 6);
+        auto it = std::find_if(ult.begin(), ult.end(), [&](auto& p) { return p.first == k; });
+        static const bool todos = getenv("FCRECOMP_SOMSWITCH")[0] == '2';
+        if (todos || it == ult.end() || it->second != v)
+        {
+            static int n = 0;
+            // texto (se houver) no valor e no que ele aponta
+            auto Txt = [](uint32_t a) {
+                std::string t;
+                if (a < 0x40000000 || a >= 0xC0000000) return t;
+                for (int i = 0; i < 48; i++) { uint8_t c = *(uint8_t*)G(a + i); if (!c) break; if (c < 32 || c > 126) return std::string(); t += (char)c; }
+                return t;
+            };
+            uint32_t val = r5 ? R32(r5) : 0;
+            if (n++ < 3000)
+                Log("[somswitch] t=%.0f grupo %08X id %08X valor %08X (+4 %08X) ligado %u r7 %08X%s txt '%s' '%s' '%s'", perf::Now(), Gpr32(ctx, 3), Gpr32(ctx, 4),
+                    val, r5 ? R32(r5 + 4) : 0, Gpr32(ctx, 6), Gpr32(ctx, 7), it == ult.end() ? " (novo)" : "", Txt(val).c_str(),
+                    val >= 0x40000000 && val < 0xC0000000 ? Txt(R32(val)).c_str() : "", Txt(Gpr32(ctx, 3)).c_str());
+            if (it == ult.end()) ult.push_back({ k, v }); else it->second = v;
+        }
+    }
+    GUEST_ORIGINAL(sub_824B6070)(ctx, base);
+}
+
 GUEST_DECLARE_ORIGINAL(sub_824C37B8);
 GUEST_FUNC(sub_824C37B8)
 {
@@ -476,6 +564,13 @@ GUEST_FUNC(sub_824C37B8)
                     char b[96]; snprintf(b, sizeof(b), " %08X(+48=%u pos %.1f %.1f %.1f)", ouv, R32(ouv + 48), F(ouv), F(ouv + 4), F(ouv + 8)); o += b;
                 }
                 Log("[vozes]    camadas %u:%s | ouvintes:%s", nCam, s.c_str(), o.c_str());
+                // FCRECOMP_VOZESVIGIA=1: sons de ambiente (1a camada com marcas 3, na posicao do ouvinte) tocando: vigia
+                // quem escreve o estado (+40) e o no da lista, para achar quem os para (cachoeira repetindo)
+                if (static const bool vigia = getenv("FCRECOMP_VOZESVIGIA") != nullptr; vigia && estado == 1 && cam && R32(cam + 36) == 3)
+                {
+                    Log("[vozes]    vigiando o som %08X (+8=%08X)", som, R32(som + 8));
+                    ::WatchAddWriteRange(som + 40, 4);
+                }
             }
         }
     }

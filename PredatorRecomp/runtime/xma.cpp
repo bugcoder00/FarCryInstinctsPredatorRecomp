@@ -68,6 +68,8 @@ namespace
         uint32_t outWrite() const { return Get(0, 27, 5); }
         // dword 1
         uint32_t ib1Count() const { return Get(1, 0, 12); }
+        uint32_t loopSubframeEnd() const { return Get(1, 14, 3); }    // ultimo subquadro (128 amostras) do quadro final do laco
+        uint32_t loopSubframeSkip() const { return Get(1, 17, 3); }   // subquadros pulados no 1o quadro depois da volta
         uint32_t sampleRate() const { return Get(1, 27, 2); }   // 0=24k 1=32k 2=44,1k 3=48k
         bool stereo() const { return Get(1, 29, 1); }
         bool outValid() const { return Get(1, 31, 1); }
@@ -142,6 +144,10 @@ namespace
         double consFirst = 0, consLast = 0;
         uint32_t bufFrames = 0;   // depuracao: quadros decodificados do buffer de entrada atual (FCRECOMP_XMACONTA)
         std::vector<uint32_t> bufStarts;   // depuracao: onde cada um comecou (pacote * bits + bit)
+        // subquadros do laco: o nosso decodificador entrega cada quadro um quadro depois (o 1o so "aquece"), entao o
+        // som do quadro final do laco sai na 1a decodificacao depois da volta (corta o fim dele: lacoCorta) e o do
+        // 1o quadro do laco sai na 2a (pula o comeco dele: lacoPula). lacoEtapa: 1 = proxima saida e a do quadro final
+        uint32_t lacoCorta = 0, lacoPula = 0, lacoEtapa = 0;
     };
     State g_state[CONTEXT_COUNT];
 
@@ -197,6 +203,7 @@ namespace
         s.pending.clear();
         s.outFull = false;
         s.hasCarry = false;
+        s.lacoCorta = s.lacoPula = s.lacoEtapa = 0;
     }
 
     // Le o proximo quadro do fluxo a partir de (pacote, bit) no buffer atual, seguindo os pacotes do mesmo fluxo
@@ -374,9 +381,10 @@ namespace
             uint32_t freeBytes = capacity - used;
 
             // descarrega o que ja foi decodificado
-            if (s.pending.size() * 2 >= 256 && freeBytes >= 256)
+            const size_t livre = s.pending.size();
+            if (livre * 2 >= 256 && freeBytes >= 256)
             {
-                uint32_t n = std::min<uint32_t>((uint32_t)s.pending.size() * 2, freeBytes);
+                uint32_t n = std::min<uint32_t>((uint32_t)livre * 2, freeBytes);
                 n -= n % (256);                                      // blocos inteiros
                 uint32_t samples = n / 2;
                 uint8_t* outBuf = Phys(c.out());
@@ -384,6 +392,7 @@ namespace
                 for (uint32_t i = 0; i < samples; i++)
                 {
                     int16_t v = s.pending.front(); s.pending.pop_front();
+                    if (s.wav) { fwrite(&v, 2, 1, s.wav); s.wavBytes += 2; }
                     if (mudo) v = 0;
                     uint32_t pos = (wr + i * 2) % capacity;
                     outBuf[pos] = (uint8_t)((uint16_t)v >> 8); outBuf[pos + 1] = (uint8_t)v;
@@ -394,7 +403,7 @@ namespace
                 continue;
             }
             if (freeBytes < frameBytes) break;
-            if (s.pending.size() * 2 >= frameBytes) break;   // ainda ha PCM esperando espaco
+            if (livre * 2 >= frameBytes) break;   // ainda ha PCM esperando espaco
 
             // proximo quadro da entrada
             bool cur = c.currentBuffer();
@@ -459,6 +468,12 @@ namespace
             // depois de um quadro: o som acabava em vez de repetir, como uma das camadas do helicoptero do treino)
             auto loopBack = [&] {
                 if (!c.loopCount() || !c.loopEnd()) return false;
+                // subquadros do laco (como o chip): do quadro final so tocam os subquadros 0..fim, e do primeiro quadro
+                // depois da volta os primeiros "pula" ficam de fora. Os arquivos trazem ~10 ms de silencio no fim e no
+                // comeco do laco; sem isso cada volta tinha um buraco (cachoeira da fase 05 "repetindo" a cada 2,4 s)
+                s.lacoCorta = (3 - std::min<uint32_t>(c.loopSubframeEnd(), 3)) * 128 * ch;
+                s.lacoPula = std::min<uint32_t>(c.loopSubframeSkip(), 3) * 128 * ch;
+                s.lacoEtapa = (s.lacoCorta || s.lacoPula) ? 1 : 0;
                 c.Set(2, 0, 26, c.loopStart());
                 if (c.loopCount() < 255) c.Set(0, 12, 8, c.loopCount() - 1);
                 s.hasCarry = false;
@@ -587,7 +602,7 @@ namespace
 
             // depuracao (FCRECOMP_XMARITMO=endereco do buffer): cada quadro desse som com hora, posicao e saida
             if (static const uint32_t ritmo = getenv("FCRECOMP_XMARITMO") ? strtoul(getenv("FCRECOMP_XMARITMO"), nullptr, 16) : 0;
-                ritmo && bufAddr == ritmo)
+                ritmo && (bufAddr == ritmo || Assinatura(buf) == ritmo))   // endereco ou assinatura ("som XXXXXXXX")
             {
                 static std::atomic<int> n{ 0 };
                 if (n++ < 400)
@@ -600,6 +615,27 @@ namespace
             int got = s.dec.DecodeFrame(fw.buf.data(), len, s.scratch.data());
             s.scratch.resize((size_t)got * ch);
             RefFrame(id, fw.buf.data(), len, s.scratch);
+            if (s.lacoEtapa && !s.scratch.empty())   // volta do laco (ver lacoCorta): fim do quadro final, comeco do 1o
+            {
+                const uint32_t antes = (uint32_t)s.scratch.size();
+                if (s.lacoEtapa == 1)
+                {
+                    uint32_t k = std::min<uint32_t>(s.lacoCorta, antes);
+                    s.scratch.erase(s.scratch.end() - k, s.scratch.end());
+                    s.lacoEtapa = 2;
+                }
+                else
+                {
+                    uint32_t k = std::min<uint32_t>(s.lacoPula, antes);
+                    s.scratch.erase(s.scratch.begin(), s.scratch.begin() + k);
+                    s.lacoEtapa = 0;
+                }
+                if (static const bool lg = getenv("FCRECOMP_XMALACO") != nullptr; lg)
+                {
+                    static std::atomic<int> n{ 0 };
+                    if (n++ < 40) Log("[xmalaco] ctx %u: laco, saida de %u amostras ficou com %u", id, antes, (uint32_t)s.scratch.size());
+                }
+            }
             {
                 s.frames++;
                 s.bufFrames++;
@@ -608,10 +644,8 @@ namespace
                 s.soundSamples += s.scratch.size();
                 for (int16_t v : s.scratch) s.pending.push_back(v);
                 s.samples += s.scratch.size();
-                if (s.wav && !s.scratch.empty())
+                if (s.wav)   // FCRECOMP_XMAWAV agora grava o que sai para o jogo (na descarga, ja com os cortes do laco); aqui so o cabecalho
                 {
-                    fwrite(s.scratch.data(), 2, s.scratch.size(), s.wav);
-                    s.wavBytes += (uint32_t)s.scratch.size() * 2;
                     // cabecalho sempre atualizado (o programa pode sair sem fechar o arquivo)
                     long pos = ftell(s.wav);
                     uint32_t riff = 36 + s.wavBytes;
@@ -743,6 +777,22 @@ namespace
                     perf::Now(), index >= 0x6A0 ? "LIMPA" : index >= 0x690 ? "TRAVA" : "LIGA", id, c.d[0], c.loopCount(),
                     (int)c.ib0Valid(), (int)c.ib1Valid(), c.d[1], c.readOffset(), c.loopStart(), c.loopEnd(), c.ib0(), c.ib1());
             });
+        // depuracao (FCRECOMP_XMAQUEM=endereco do buffer): quem no jogo limpa/liga o canal desse buffer (enderecos do .exe,
+        // compare com o FCRecomp.map)
+        if (static const char* quem = getenv("FCRECOMP_XMAQUEM"); quem && index >= 0x650 && index <= 0x6A9)
+        {
+            static const uint32_t alvo = (uint32_t)strtoul(quem, nullptr, 16);
+            bits(index >= 0x6A0 ? 0x6A0 : index >= 0x690 ? 0x690 : 0x650, [&](uint32_t id) {
+                Ctx c; Load(id, c);
+                if (c.ib0() != alvo || index > 0x659 || c.readOffset() != 32) return;   // o canal (re)comecando do inicio
+                void* pilha[40];
+                USHORT n = RtlCaptureStackBackTrace(0, 40, pilha, nullptr);
+                uintptr_t baseExe = (uintptr_t)GetModuleHandleW(nullptr);
+                std::string s;
+                for (USHORT i = 0; i < n; i++) { char b[24]; snprintf(b, sizeof(b), " %llX", (unsigned long long)((uintptr_t)pilha[i] - baseExe)); s += b; }
+                Log("[xmaquem] t=%.0f LIGA do inicio ctx %u leitura %u:%s", perf::Now(), id, c.readOffset(), s.c_str());
+            });
+        }
         if (index >= 0x650 && index <= 0x659) { bits(0x650, [](uint32_t id) { g_enabled[id] = true; }); SetEvent(g_workEvent); }
         else if (index >= 0x690 && index <= 0x699)
             bits(0x690, [](uint32_t id) { std::lock_guard lock(g_ctxMutex[id]); g_enabled[id] = false; });   // espera o chip largar

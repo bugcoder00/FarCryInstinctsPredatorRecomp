@@ -10,6 +10,7 @@
 #include "guest.h"
 #include "controles.h"
 #include "diag.h"
+#include "perf.h"
 #include <windows.h>
 #include <xinput.h>
 #include <atomic>
@@ -1428,6 +1429,7 @@ GUEST_DECLARE_ORIGINAL(sub_821D3B78);
 #endif
 // declaradas aqui (e nao dentro do gancho) para manter a ligacao C++ mesmo quando GUEST_FUNC e extern "C"
 void WatchAddWriteRange(uint32_t addr, uint32_t size);
+void WatchAddReadRange(uint32_t addr, uint32_t size);
 extern std::atomic<uint64_t> g_missionStartFrame;
 // Opcao "INVERT STICK" do menu do jogo (CONTROLLER OPTIONS): sub_821D3B78 devolve o objeto de opcoes do perfil em uso
 // e o byte +184 e a opcao (a tela do menu le dali). Chamada com uma copia do contexto, abaixo da pilha atual.
@@ -1577,10 +1579,50 @@ GUEST_FUNC(GUEST_SUB_MIRA)
     if (static const bool olharLog = getenv("FCRECOMP_OLHARLOG") != nullptr; olharLog && jogador1)
     {
         uint32_t ouv = R32(0x828D9C68);
+        // FCRECOMP_OLHARVIGIA=<quadro>: quem grava a direcao do ouvinte (ouvinte+16) e em que ordem com o giro deste quadro
+        if (static bool vig = false; !vig && ouv && getenv("FCRECOMP_OLHARVIGIA") && diag::CurrentFrame() >= (uint64_t)atoi(getenv("FCRECOMP_OLHARVIGIA")))
+        {
+            vig = true;
+            WatchAddWriteRange(ouv + 16, 4);
+        }
         float v[16] = {};
         if (ouv) for (int i = 0; i < 16; i++) v[i] = BitsFloat(R32(ouv + i * 4));
-        Log("[olhar] q=%llu giro %.4f %.4f | ouv %.3f %.3f %.3f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f %.4f",
-            (unsigned long long)diag::CurrentFrame(), BitsFloat(R32(in + 188)), BitsFloat(R32(in + 192)),
+        // FCRECOMP_OLHARLEITURA=<quadro>: quem le o giro do quadro (entrada+188) depois de calculado
+        if (static bool lei = false; !lei && getenv("FCRECOMP_OLHARLEITURA") && diag::CurrentFrame() >= (uint64_t)atoi(getenv("FCRECOMP_OLHARLEITURA")))
+        {
+            lei = true;
+            ::WatchAddReadRange(in + 188, 8);
+        }
+        // FCRECOMP_OLHARANGULO=<quadro>: quem le/grava o angulo do jogador (jogador+932 vertical, +940 horizontal)
+        if (static bool ang = false; !ang && getenv("FCRECOMP_OLHARANGULO") && diag::CurrentFrame() >= (uint64_t)atoi(getenv("FCRECOMP_OLHARANGULO")))
+        {
+            ang = true;
+            ::WatchAddReadRange(in - 908 + 932, 12);
+        }
+        // FCRECOMP_OLHARDIF=1: floats do jogador (jogador-0x400 .. +0x1000) que mudaram desde a leitura anterior
+        // (para achar o angulo da camera: o que muda junto com o giro)
+        if (static const bool dif = getenv("FCRECOMP_OLHARDIF") != nullptr; dif)
+        {
+            static uint32_t antes[0x500];
+            static uint32_t dono = 0;
+            const uint32_t ini = in - 908 - 0x400;
+            std::string s;
+            for (uint32_t i = 0; i < 0x500; i++)
+            {
+                uint32_t w = R32(ini + i * 4);
+                if (dono == ini && w != antes[i])
+                {
+                    float a0 = BitsFloat(antes[i]), a1 = BitsFloat(w);
+                    if (std::isfinite(a0) && std::isfinite(a1) && std::fabs(a1) < 1e6f && std::fabs(a0) < 1e6f)
+                    { char b[48]; snprintf(b, sizeof(b), " %d:%.4f", (int)(i * 4) - 0x400, a1 - a0); s += b; }
+                }
+                antes[i] = w;
+            }
+            dono = ini;
+            if (!s.empty() && s.size() < 6000) Log("[olhardif] q=%llu%s", (unsigned long long)diag::CurrentFrame(), s.c_str());
+        }
+        Log("[olhar] t=%.1f q=%llu giro %.4f %.4f | ouv %.3f %.3f %.3f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f %.4f",
+            perf::Now(), (unsigned long long)diag::CurrentFrame(), BitsFloat(R32(in + 188)), BitsFloat(R32(in + 192)),
             v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]);
     }
 #endif

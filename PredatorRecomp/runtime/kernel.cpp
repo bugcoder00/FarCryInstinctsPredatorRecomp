@@ -10,6 +10,7 @@
 #include <intrin.h>
 #include <algorithm>
 #include <vector>
+[[noreturn]] void SairDoProcesso(unsigned codigo);   // main.cpp
 
 #pragma comment(lib, "Synchronization.lib")   // WaitOnAddress / WakeByAddressSingle
 
@@ -842,27 +843,27 @@ KFUNC(DbgBreakPoint) { Log("[kernel] DbgBreakPoint"); }
 KFUNC(KeBugCheck)
 {
     Log("[kernel] KeBugCheck %08X", Gpr32(ctx, 3));
-    ExitProcess(1);
+    SairDoProcesso(1);
 }
 
 KFUNC(KeBugCheckEx)
 {
     Log("[kernel] KeBugCheckEx %08X %08X %08X %08X %08X", Gpr32(ctx, 3), Gpr32(ctx, 4), Gpr32(ctx, 5), Gpr32(ctx, 6), Gpr32(ctx, 7));
-    ExitProcess(1);
+    SairDoProcesso(1);
 }
 
 KFUNC(HalReturnToFirmware)
 {
     Log("[kernel] HalReturnToFirmware %u", Gpr32(ctx, 3));
     RedeEncerrar();
-    ExitProcess(0);
+    SairDoProcesso(0);
 }
 
 KFUNC(XamLoaderTerminateTitle)
 {
     Log("[xam] XamLoaderTerminateTitle");
     RedeEncerrar();
-    ExitProcess(0);
+    SairDoProcesso(0);
 }
 
 KFUNC(ExRegisterTitleTerminateNotification) {}

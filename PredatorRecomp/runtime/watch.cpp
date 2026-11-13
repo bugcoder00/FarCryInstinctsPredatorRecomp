@@ -78,7 +78,9 @@ namespace
             std::lock_guard lock(g_mutex);
             uintptr_t rip = (uintptr_t)e->ContextRecord->Rip;
             uint32_t fn = GuestFunctionAt(rip);
-            if (g_readers.insert(fn).second)
+            // FCRECOMP_WATCHTODOS=1: anota todo acesso (ate FCRECOMP_WATCHMAX), nao so o 1o de cada funcao
+            static const bool todos = getenv("FCRECOMP_WATCHTODOS") != nullptr;
+            if (g_readers.insert(fn).second || (todos && g_logged++ < MAX_LOG))
             {
                 auto t = CurrentGuestThread();
                 Log("[watch] %s de %08X por sub_%08X (chamada de %08X) thread '%s'", rec->ExceptionInformation[0] == 1 ? "escrita" : "leitura",
@@ -100,6 +102,17 @@ namespace
                     auto& c = *t->ctx;
                     Log("[watch]   registradores: r3=%08X r4=%08X r5=%08X r6=%08X r29=%08X r30=%08X r31=%08X r1=%08X",
                         Gpr32(c, 3), Gpr32(c, 4), Gpr32(c, 5), Gpr32(c, 6), Gpr32(c, 29), Gpr32(c, 30), Gpr32(c, 31), Gpr32(c, 1));
+                    // cadeia de retornos do PowerPC (back chain): quem chamou a funcao que escreveu
+                    std::string chain;
+                    uint32_t sp = Gpr32(c, 1);
+                    for (int i = 0; i < 12 && sp >= 0x10000000 && sp < 0x80000000; i++)
+                    {
+                        uint32_t next = R32(sp);
+                        if (next <= sp) break;
+                        char b[16]; snprintf(b, sizeof(b), " %08X", R32(next - 8)); chain += b;
+                        sp = next;
+                    }
+                    Log("[watch]   pilha:%s", chain.c_str());
                 }
                 char key[64];
                 snprintf(key, sizeof(key), "escrita observada por sub_%08X", GuestFunctionAt(rip));

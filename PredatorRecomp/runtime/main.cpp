@@ -42,6 +42,19 @@ void Log(const char* fmt, ...)
     if (g_logFile) { fprintf(g_logFile, "%s\n", buf); fflush(g_logFile); }
 }
 
+// Saida do programa: TerminateProcess em vez de ExitProcess. O ExitProcess mata as outras threads no meio do que
+// estavam fazendo e depois roda os destrutores globais e o desligamento das DLLs (driver de video, audio): com as
+// threads do jogo cortadas segurando travas, isso batia dentro do ntdll e o Windows deixava um
+// PredatorGame.exe.<pid>.dmp em AppData\Local\CrashDumps a cada troca de programa (reinicio do jogo) ou saida
+// (issue no GitHub, 12/11). O que precisa ser fechado (rede, placa de video) e fechado antes de chamar isto; o log
+// ja e gravado linha a linha.
+[[noreturn]] void SairDoProcesso(unsigned codigo)
+{
+    fflush(nullptr);
+    TerminateProcess(GetCurrentProcess(), codigo);
+    for (;;) Sleep(INFINITE);
+}
+
 bool g_trace = false;
 
 // ---------------------------------------------------------------- tempo por funcao do sistema (FCRECOMP_KTEMPO)
@@ -133,7 +146,7 @@ static void MissingFunction(GuestCpu& ctx, uint8_t*)
     snprintf(det, sizeof(det), "chamada de %08X", (uint32_t)Lr(ctx));
     diag::Note(diag::Crash, key, det);
     diag::WriteReport("funcao inexistente");
-    ExitProcess(1);
+    SairDoProcesso(1);
 }
 
 static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* e)
@@ -194,7 +207,7 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* e)
     }
     diag::WriteReport("travamento");
     RedeEncerrar();
-    ExitProcess(1);
+    SairDoProcesso(1);
 }
 
 // ---------------------------------------------------------------- variaveis do kernel importadas pelo jogo

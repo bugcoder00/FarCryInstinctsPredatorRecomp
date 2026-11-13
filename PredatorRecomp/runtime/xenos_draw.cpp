@@ -1127,7 +1127,19 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             if (pieces.empty()) return nullptr;
             // um pedaco so: apenas faixas de tela (mesma altura, ao menos metade da largura); outros casos usam o proprio
             // resolve (montar em tamanho cheio deixava o resto com lixo -> metade da tela rosa)
-            if (pieces.size() == 1 && (pieces[0].second->height != height || pieces[0].second->width * 2 < width)) return nullptr;
+            // Bug 38 (reflexo/refracao da agua deslocado na tela dividida de cima/baixo): a agua de cada jogador le a copia
+            // da cena (resolve de 1280x360) como textura de 1280x720 com a imagem na metade de cima, como na memoria do
+            // console; entregar o resolve esticado para a altura toda dobrava a coordenada vertical (personagem "fantasma"
+            // ao lado do corpo). Faixas horizontais (mesma largura, ao menos metade da altura) agora tambem ficam na
+            // posicao delas. FCRECOMP_SEMFAIXAH=1 volta ao antigo.
+            static const bool semFaixaH = getenv("FCRECOMP_SEMFAIXAH") != nullptr;
+            if (pieces.size() == 1)
+            {
+                const ResolvedTexture* p = pieces[0].second;
+                const bool faixaV = p->height == height && p->width * 2 >= width;
+                const bool faixaH = !semFaixaH && p->width == width && p->height * 2 >= height && p->height < height;
+                if (!faixaV && !faixaH) return nullptr;
+            }
             // um pedaco so tambem conta: o resolve de uma faixa (ex.: 640x720) lido como textura de 1280x720 fica na
             // posicao dele dentro de uma textura do tamanho pedido, em vez de ser esticado
             std::sort(pieces.begin(), pieces.end(), [](auto& a, auto& b) { return a.second->seq < b.second->seq; });
@@ -3503,6 +3515,10 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             d[215] = scaledMask;
             float texScale = g_meios / 2.0f;   // escala das texturas marcadas em scaledMask (imagens da tela)
             memcpy(&d[240], &texScale, 4);
+            // ultrawide (gpu.cpp AspectoTela): desenhos 2D em alvos da largura da tela vao para o centro (xenos_common.hlsl.h)
+            static const float hudK = (16.0f / 9.0f) / AspectoTela();
+            float hudEsc = (hudK < 0.999f && color.width == 1280) ? hudK : 1.0f;
+            memcpy(&d[241], &hudEsc, 4);
             for (uint32_t i = 0; i < 24; i++) d[216 + i] = Reg(0x2388 + i);
             static bool logged = false;
             if ((d[213] & 63) && !logged)

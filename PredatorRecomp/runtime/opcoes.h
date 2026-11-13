@@ -12,6 +12,7 @@ struct Opcoes
     int escala = 0;                    // resolucao interna: 0 = 1x (1280x720), 1 = 1,5x (1920x1080), 2 = 2x (2560x1440), 3 = 3x (3840x2160, 4K)
     int sombras = 0;                   // mapa de sombras: 0 = normal (como a resolucao interna), 1 = alta (2x), 2 = muito alta (3x)
     bool vsync = false;                // espera o monitor (pode baixar o FPS)
+    int formato = 0;                   // formato da imagem: 0 = 16:9 (original), 1 = o do monitor (ultrawide 21:9, 32:9; experimental), 2 = 16:9 com barras pretas
     int fps = 0;                       // quadros por segundo: 0 = 30 (como o original), 1 = 60, 2 = sem limite (experimental); gpu.cpp sub_8273E6F8
     bool mostrarRegistro = false;      // janela de console com o registro
     bool pularLauncher = false;        // abre direto o jogo (Shift ao abrir mostra o launcher)
@@ -21,6 +22,7 @@ struct Opcoes
 };
 
 Opcoes& OpcoesAtuais();
+float AspectoTela();   // gpu.cpp: proporcao da imagem do jogo (16/9 ou a do monitor com a opcao ultrawide)
 void OpcoesCarregar(const std::filesystem::path& exeDir);
 void OpcoesSalvar();
 std::string PerfilValido(const std::string& nome);   // letras sem acento, numeros, espaco, - e _, ate 15

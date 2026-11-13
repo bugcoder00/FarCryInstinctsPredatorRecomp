@@ -6,6 +6,7 @@
 #include "diag.h"
 #include <dxcapi.h>
 #include <mutex>
+#include <cmath>
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -76,6 +77,15 @@ namespace render
         HANDLE g_fenceEvent = nullptr;
         UINT g_rtvSize = 0, g_srvSize = 0, g_samplerSize = 0;
         uint32_t g_width = 0, g_height = 0;
+        HWND g_hwnd = nullptr;
+        // opcao "16:9 com barras pretas" (formato = 2) ou FCRECOMP_BARRAS=1: a troca de quadros acompanha o tamanho da
+        // janela e a imagem do jogo e posta no meio sem esticar (faixas pretas dos lados num ultrawide, em cima/embaixo
+        // numa janela mais alta). Sem isso, a troca de quadros tem o tamanho da resolucao interna e o Windows estica.
+        bool Barras()
+        {
+            static const bool b = getenv("FCRECOMP_BARRAS") != nullptr || OpcoesAtuais().formato == 2;
+            return b;
+        }
 
         // estado do quadro em gravacao
         bool g_frameOpen = false;
@@ -386,6 +396,7 @@ float4 ps(VSOut i) : SV_Target
 
         g_width = width;
         g_height = height;
+        g_hwnd = window;
         DXGI_SWAP_CHAIN_DESC1 sd{};
         sd.Width = width;
         sd.Height = height;
@@ -615,6 +626,28 @@ float4 ps(VSOut i) : SV_Target
     void PresentTexture(ID3D12Resource* texture)
     {
         auto* list = FrameList();
+        if (texture && Barras() && g_hwnd)
+        {
+            // troca de quadros do tamanho da janela (minimizada: tamanho 0, fica como esta)
+            RECT cr{};
+            GetClientRect(g_hwnd, &cr);
+            const uint32_t cw = (uint32_t)(cr.right - cr.left), ch = (uint32_t)(cr.bottom - cr.top);
+            if (cw >= 16 && ch >= 16 && (cw != g_width || ch != g_height))
+            {
+                WaitIdle();   // nenhum quadro anterior pode estar usando os buffers da troca
+                for (auto& bb : g_backBuffers) bb.Reset();
+                HRESULT hr = g_swapChain->ResizeBuffers(0, cw, ch, DXGI_FORMAT_UNKNOWN, 0);
+                for (UINT i = 0; i < FRAMES; i++)
+                {
+                    g_swapChain->GetBuffer(i, IID_PPV_ARGS(&g_backBuffers[i]));
+                    D3D12_CPU_DESCRIPTOR_HANDLE h = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+                    h.ptr += i * g_rtvSize;
+                    g_device->CreateRenderTargetView(g_backBuffers[i].Get(), nullptr, h);
+                }
+                if (SUCCEEDED(hr)) { g_width = cw; g_height = ch; }
+                Log("[render] barras pretas: imagem da janela %ux%u (%s)", cw, ch, SUCCEEDED(hr) ? "ok" : "falhou");
+            }
+        }
         UINT back = g_swapChain->GetCurrentBackBufferIndex();
         if (texture) {
         auto srv = AllocSrv(1);
@@ -627,8 +660,30 @@ float4 ps(VSOut i) : SV_Target
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
         rtv.ptr += back * g_rtvSize;
         list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-        D3D12_VIEWPORT vp{ 0, 0, (float)g_width, (float)g_height, 0, 1 };
-        D3D12_RECT sc{ 0, 0, (LONG)g_width, (LONG)g_height };
+        // barras pretas: a imagem do jogo no maior retangulo com a proporcao dela que cabe na janela, centralizado
+        float vx = 0, vy = 0, vw = (float)g_width, vh = (float)g_height;
+        if (Barras())
+        {
+            const D3D12_RESOURCE_DESC td = texture->GetDesc();
+            const double tw = (double)td.Width, th = (double)td.Height;
+            if (tw > 0 && th > 0 && g_width > 0 && g_height > 0)
+            {
+                if ((double)g_width * th > (double)g_height * tw)   // janela mais larga que a imagem: faixas dos lados
+                {
+                    vw = (float)std::floor(g_height * tw / th + 0.5);
+                    vx = (float)std::floor((g_width - vw) / 2);
+                }
+                else                                                 // janela mais alta: faixas em cima e embaixo
+                {
+                    vh = (float)std::floor(g_width * th / tw + 0.5);
+                    vy = (float)std::floor((g_height - vh) / 2);
+                }
+                const float preto[4] = { 0, 0, 0, 1 };
+                list->ClearRenderTargetView(rtv, preto, 0, nullptr);
+            }
+        }
+        D3D12_VIEWPORT vp{ vx, vy, vw, vh, 0, 1 };
+        D3D12_RECT sc{ (LONG)vx, (LONG)vy, (LONG)(vx + vw), (LONG)(vy + vh) };
         list->RSSetViewports(1, &vp);
         list->RSSetScissorRects(1, &sc);
         // sem antisserrilhado aqui: na imagem final ele achava "bordas" no texto do HUD, dos menus (inclusive o de pausa)

@@ -30,6 +30,7 @@ cbuffer Draw : register(b1)
     uint scaledTex;     // bit por slot: textura com imagem da tela (resolve), texScale vezes o tamanho do jogo
     float4 ucp[6];      // PA_CL_UCP_0..5 (0x2388-0x239F: planos no espaco de recorte, aplicados a posicao que o shader escreve)
     float texScale;     // resolucao interna (escala das texturas marcadas em scaledTex)
+    float hudEsc;       // ultrawide: 16/9 dividido pela proporcao da imagem (1 = sem mudanca); so em alvos de 1280 de largura
 };
 
 // Planos de corte do usuario (reflexo da agua: corta o que esta abaixo da superficie). Distancia < 0 = cortado.
@@ -58,6 +59,12 @@ float4 XenosToClip(float4 p)
     // no inteiro). No Xbox uma borda em x,5 cobre ate o pixel inteiro seguinte; com o meio pixel da placa (pixShift) a
     // borda 1279,5 caia em 3839 na 3x e a ultima coluna/linha ficava sem pintar. Acima de 1x, bordas exatamente em x,5
     // de desenhos 2D (w = 1) sobem para o inteiro seguinte; bordas inteiras (tela dividida, bug 32) ficam como estao.
+    // Ultrawide: o jogo desenha a cena 3D mais aberta (proporcao 21:9 na camera) e a imagem 1280x720 e esticada na janela
+    // larga; os desenhos 2D (w = 1: HUD, menus, textos) seriam esticados junto. Eles sao apertados para o centro (x -> 640
+    // + (x - 640) * hudEsc) e ficam com a forma certa. Vertices na borda (x <= 0,5 ou >= 1279: quadrados de tela cheia,
+    // efeitos de pos-processamento, faixas pretas) ficam onde estao.
+    if (hudEsc < 1.0 && abs(p.w - 1.0) < 1e-6 && screen.x > 0.5 && screen.x < 1279.0)
+        screen.x = 640.0 + (screen.x - 640.0) * hudEsc;
     if (pixShift != 0 && resScale > 1.0 && abs(p.w - 1.0) < 1e-6)
     {
         float2 f = screen - floor(screen);

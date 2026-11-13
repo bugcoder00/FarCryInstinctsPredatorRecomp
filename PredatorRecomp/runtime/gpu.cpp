@@ -28,6 +28,7 @@ std::atomic<uint64_t> g_missionStartFrame{ 0 };   // quadro em que a fase comeco
 #include <algorithm>
 #include <unordered_map>
 #include <memory>
+[[noreturn]] void SairDoProcesso(unsigned codigo);   // main.cpp
 
 std::string ProfilerStatus();   // profiler.cpp: aviso da medicao na tecla F3 (titulo da janela)
 
@@ -1663,7 +1664,7 @@ namespace
             // espera a placa de video terminar antes de sair (evita recursos presos no driver)
             if (g_drawReady) { g_drawReady = false; Sleep(100); xdraw::Shutdown(); }
             else if (g_renderReady) render::WaitIdle();
-            ExitProcess(0);
+            SairDoProcesso(0);
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
@@ -1678,7 +1679,9 @@ namespace
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);   // preto ate o 1o quadro (antes: lixo/branco)
         RegisterClassW(&wc);
-        RECT r{ 0, 0, 1280, 720 };
+        // ultrawide: a janela tem o formato da imagem (largura x ka)
+        const float ka = AspectoTela() / (16.0f / 9.0f);
+        RECT r{ 0, 0, (LONG)(1280 * ka), 720 };
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
         // centralizada na area de trabalho; se a tela for pequena, a janela diminui (a imagem e esticada)
         RECT work;
@@ -1688,7 +1691,7 @@ namespace
         if (w > maxW || h > maxH)
         {
             float s = std::min((float)maxW / w, (float)maxH / h) * 0.95f;
-            r = { 0, 0, (LONG)(1280 * s), (LONG)(720 * s) };
+            r = { 0, 0, (LONG)(1280 * ka * s), (LONG)(720 * s) };
             AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
             w = r.right - r.left;
             h = r.bottom - r.top;
@@ -1697,7 +1700,7 @@ namespace
         if (int t = OpcoesAtuais().janela; t > 0 && t <= 4)
         {
             static const int TAM[5][2] = { { 0, 0 }, { 1280, 720 }, { 1600, 900 }, { 1920, 1080 }, { 2560, 1440 } };
-            RECT rr{ 0, 0, TAM[t][0], TAM[t][1] };
+            RECT rr{ 0, 0, (LONG)(TAM[t][0] * ka), TAM[t][1] };
             AdjustWindowRect(&rr, WS_OVERLAPPEDWINDOW, FALSE);
             w = std::min<int>(rr.right - rr.left, maxW);
             h = std::min<int>(rr.bottom - rr.top, maxH);
@@ -1705,9 +1708,9 @@ namespace
         else if (OpcoesAtuais().janela == 0)
         {
             // automatico: o maior 16:9 que cabe (90% da area de trabalho)
-            float s = std::min((float)maxW / 1280, (float)maxH / 720) * 0.9f;
+            float s = std::min((float)maxW / (1280 * ka), (float)maxH / 720) * 0.9f;
             s = std::max(s, 0.5f);
-            RECT rr{ 0, 0, (LONG)(1280 * s), (LONG)(720 * s) };
+            RECT rr{ 0, 0, (LONG)(1280 * ka * s), (LONG)(720 * s) };
             AdjustWindowRect(&rr, WS_OVERLAPPEDWINDOW, FALSE);
             w = std::min<int>(rr.right - rr.left, maxW);
             h = std::min<int>(rr.bottom - rr.top, maxH);
@@ -1727,7 +1730,7 @@ namespace
             if (maxW - w < minLog)
             {
                 float s = std::min((float)(maxW - minLog) / w, 1.0f);
-                RECT rr{ 0, 0, (LONG)(1280 * s), (LONG)(720 * s) };
+                RECT rr{ 0, 0, (LONG)(1280 * ka * s), (LONG)(720 * s) };
                 AdjustWindowRect(&rr, WS_OVERLAPPEDWINDOW, FALSE);
                 w = rr.right - rr.left;
                 h = rr.bottom - rr.top;
@@ -1744,7 +1747,17 @@ namespace
         const char* reinicio = getenv("PREDATOR_REINICIO");
         bool usarLugar = reinicio && sscanf(reinicio, "%ld,%ld,%ld,%ld,%d,%d", &lugar.rcNormalPosition.left, &lugar.rcNormalPosition.top,
                                             &lugar.rcNormalPosition.right, &lugar.rcNormalPosition.bottom, &cheia, &maximizada) == 6;
-        g_window = CreateWindowW(L"FCRecomp", L"" GUEST_TITULO, WS_OVERLAPPEDWINDOW | (usarLugar ? 0 : WS_VISIBLE),
+        // troca de programa em tela cheia: a janela ja nasce sem moldura e do tamanho do monitor. Antes ela nascia do
+        // tamanho da janela normal e virava tela cheia depois; ao aparecer, saia 1 quadro branco (item 39).
+        const bool cheiaDireto = usarLugar && cheia;
+        if (cheiaDireto)
+        {
+            MONITORINFO mi{ sizeof(mi) };
+            GetMonitorInfoW(MonitorFromRect(&lugar.rcNormalPosition, MONITOR_DEFAULTTONEAREST), &mi);
+            x = mi.rcMonitor.left; y = mi.rcMonitor.top;
+            w = mi.rcMonitor.right - mi.rcMonitor.left; h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        }
+        g_window = CreateWindowW(L"FCRecomp", L"" GUEST_TITULO, cheiaDireto ? WS_POPUP : WS_OVERLAPPEDWINDOW | (usarLugar ? 0 : WS_VISIBLE),
             x, y, w, h, nullptr, nullptr, wc.hInstance, nullptr);
         if (usarLugar)
         {
@@ -1756,12 +1769,21 @@ namespace
         AplicarIcone(g_window);
         SetTimer(g_window, 1, 500, nullptr);
         SetTimer(g_window, 2, 50, nullptr);   // barra da tela de preparacao
-        if (usarLugar)
+        if (cheiaDireto)
         {
-            lugar.showCmd = cheia ? SW_HIDE : maximizada ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+            // o lugar da janela normal fica guardado para o Alt+Enter
+            g_antesTelaCheia = lugar;
+            g_antesTelaCheia.showCmd = maximizada ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+            g_telaCheiaLigada = true;
+            SetWindowPos(g_window, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            Log("[janela] tela cheia");
+        }
+        else if (usarLugar)
+        {
+            lugar.showCmd = maximizada ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
             SetWindowPlacement(g_window, &lugar);
         }
-        if (cheia) TelaCheia(g_window, true);
+        if (cheia && !cheiaDireto) TelaCheia(g_window, true);
         if (usarLugar)
         {
             UpdateWindow(g_window);
@@ -1810,7 +1832,7 @@ static BOOL WINAPI ConsoleCtrl(DWORD)
     diag::WriteReport("saida");
     RedeEncerrar();
     if (g_drawReady) { g_drawReady = false; Sleep(100); xdraw::Shutdown(); }
-    ExitProcess(0);
+    SairDoProcesso(0);
 }
 
 void XmaInit();   // xma.cpp
@@ -2051,7 +2073,32 @@ GUEST_FUNC(GUEST_SUB_GPUWAIT)
 // 1 vblank. 60 FPS: intervalo 1. Sem limite: intervalo 0 e limite FFFF (a troca sai sempre na hora, sem esperar vblank).
 // So muda o ritmo das trocas: o vblank continua a 60 Hz (videos e o resto seguem iguais) e o jogo mede o tempo de
 // cada quadro pelo relogio (mftb), entao anda na mesma velocidade (medido em 12/11: 4,8 m/s a 30 e 4,2 a 60 FPS).
-#ifndef PREDATOR_EDITOR
+// proporcao (largura/altura) da imagem do jogo: 16/9, ou a do monitor com a opcao ultrawide (so mais larga que 16:9,
+// ate 4:1). FCRECOMP_ASPECTO=n forca um numero (ex.: 2.3333 para testar 21:9 numa janela). No editor, sempre 16/9.
+float AspectoTela()
+{
+    static const float a = [] {
+        const float padrao = 16.0f / 9.0f;
+#ifdef PREDATOR_EDITOR
+        return padrao;
+#else
+        float v = padrao;
+        if (const char* e = getenv("FCRECOMP_ASPECTO")) v = (float)atof(e);
+        else if (OpcoesAtuais().formato == 1)
+        {
+            MONITORINFO mi{ sizeof(mi) };
+            HMONITOR mon = g_window ? MonitorFromWindow(g_window, MONITOR_DEFAULTTOPRIMARY) : MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+            if (GetMonitorInfoW(mon, &mi) && mi.rcMonitor.bottom > mi.rcMonitor.top)
+                v = (float)(mi.rcMonitor.right - mi.rcMonitor.left) / (float)(mi.rcMonitor.bottom - mi.rcMonitor.top);
+            Log("[gpu] formato do monitor: %ldx%ld (%.3f)", mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top, v);
+        }
+        if (!(v > padrao + 0.01f)) return padrao;
+        return std::min(v, 4.0f);
+#endif
+    }();
+    return a;
+}
+
 int ModoFps()
 {
     static const int modo = [] {
@@ -2061,8 +2108,14 @@ int ModoFps()
     }();
     return modo;
 }
-GUEST_DECLARE_ORIGINAL(sub_8273E6F8);
-GUEST_FUNC(sub_8273E6F8)
+// a mesma funcao no editor de mapas (ige.xex) e sub_826460B0 (12/11: o editor ficava a 30 FPS com a opcao em 60)
+#ifdef PREDATOR_EDITOR
+#define FPS_TROCA sub_826460B0
+#else
+#define FPS_TROCA sub_8273E6F8
+#endif
+GUEST_DECLARE_ORIGINAL(FPS_TROCA);
+GUEST_FUNC(FPS_TROCA)
 {
     const int modo = ModoFps();
     if (modo != 0)
@@ -2081,22 +2134,51 @@ GUEST_FUNC(sub_8273E6F8)
             SetGpr(ctx, 3, novo);
         }
     }
-    GUEST_ORIGINAL(sub_8273E6F8)(ctx, base);
+    GUEST_ORIGINAL(FPS_TROCA)(ctx, base);
 }
 // Sem limite: alem da espera de vblank, o laco principal do jogo (sub_82333318) tem um limitador proprio: mede o quadro e
 // dorme (sub_826437C8 -> Sleep) o que falta para 1/60 s (constante float em 820822EC, talvez usada por outras partes,
 // por isso nao e mudada). So nesse modo a chamada de sono vinda dali (retorno 82333414) e pulada. Achado em 12/11 com
 // um registro temporario de KeDelayExecutionThread + pilha.
-GUEST_DECLARE_ORIGINAL(sub_826437C8);
-GUEST_FUNC(sub_826437C8)
+// No editor (ige.xex) o mesmo laco (em 82391DBC, mesma sequencia fsubs/fsel/fctidz) e o sono e sub_82637A98, chamada
+// de retorno 82391DE8 (achado em 12/11 pelo padrao das instrucoes).
+#ifdef PREDATOR_EDITOR
+#define FPS_SONO sub_82637A98
+#define FPS_SONO_RETORNO 0x82391DE8u
+#else
+#define FPS_SONO sub_826437C8
+#define FPS_SONO_RETORNO 0x82333414u
+#endif
+GUEST_DECLARE_ORIGINAL(FPS_SONO);
+GUEST_FUNC(FPS_SONO)
 {
-    if (ModoFps() == 2 && (uint32_t)ctx.lr == 0x82333414u)
+    if (ModoFps() == 2 && (uint32_t)ctx.lr == FPS_SONO_RETORNO)
     {
         static uint32_t n = 0;
         if (n++ % 600 == 0) Log("[gpu] FPS sem limite: espera do limitador do jogo pulada (%u vezes, %d ms)", n, (int32_t)Gpr32(ctx, 3));
         return;
     }
-    GUEST_ORIGINAL(sub_826437C8)(ctx, base);
+    GUEST_ORIGINAL(FPS_SONO)(ctx, base);
+}
+#ifndef PREDATOR_EDITOR
+// Ultrawide (opcao "Formato da imagem" = o do monitor, ou FCRECOMP_ASPECTO=2.333): a estrutura de video do jogo
+// (829161A0, preenchida por sub_823AF430) guarda em +12 a proporcao da tela (16/9 = 820822CC; 4/3 sem tela larga). O
+// jogo usa esse numero na camera (sub_8236EA88 -> +864 do aparelho) e em outros calculos: com 21/9 ele mostra mais
+// cenario dos lados com a mesma altura de visao. A imagem continua 1280x720 "do jogo" e a janela a estica para 21:9;
+// o HUD e os menus (desenhos 2D) sao trazidos para o centro em xenos_common.hlsl.h (hudEsc).
+GUEST_DECLARE_ORIGINAL(sub_823AF430);
+GUEST_FUNC(sub_823AF430)
+{
+    GUEST_ORIGINAL(sub_823AF430)(ctx, base);
+    const float a = AspectoTela();
+    uint32_t antes = R32(0x829161ACu);
+    float fa; memcpy(&fa, &antes, 4);
+    if (base[0x829161A1u] && std::abs(a - fa) > 1e-3f)   // so com a tela larga ligada (16:9) no jogo
+    {
+        uint32_t v; memcpy(&v, &a, 4);
+        W32(0x829161ACu, v);
+        Log("[gpu] formato da imagem: %.4f -> %.4f (ultrawide)", fa, a);
+    }
 }
 #endif
 

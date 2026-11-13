@@ -281,25 +281,25 @@ namespace
             Criar(j, L"STATIC", TR(L"Sensibilidade (0,1 a 10):", L"Sensitivity (0.1 to 10):"), 0, 450, 227, 240, 20, -1);
             Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 690, 224, 60, 22, ID_SENS);
 
-            Criar(j, L"BUTTON", TR(L"Câmera precisa no analógico direito (como o mouse)", L"Precise camera on the right stick (like the mouse)"), BS_AUTOCHECKBOX | WS_TABSTOP, 16, 254, 420, 22, ID_PADDIRETO);
-            Criar(j, L"STATIC", TR(L"Sensibilidade do controle (0,2 a 5):", L"Controller sensitivity (0.2 to 5):"), 0, 450, 257, 240, 20, -1);
-            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 690, 254, 60, 22, ID_PADVEL);
-            Criar(j, L"STATIC", TR(L"Zona morta (0 a 0,5):", L"Dead zone (0 to 0.5):"), 0, 36, 287, 150, 20, -1);
-            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 186, 284, 60, 22, ID_PADZONA);
-            Criar(j, L"STATIC", TR(L"Aceleração no fim do curso (0 a 2):", L"Turn boost at full tilt (0 to 2):"), 0, 270, 287, 230, 20, -1);
-            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 500, 284, 60, 22, ID_PADACEL);
-            Criar(j, L"STATIC", TR(L"Suavização (0 = na hora, até 0,9):", L"Smoothing (0 = instant, up to 0.9):"), 0, 584, 287, 230, 20, -1);
-            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 814, 284, 60, 22, ID_PADSUAVE);
-            Criar(j, L"STATIC", TR(L"Sensibilidade vertical (0,2 a 5):", L"Vertical sensitivity (0.2 to 5):"), 0, 36, 317, 210, 20, -1);
-            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 246, 314, 60, 22, ID_PADVELV);
-            Criar(j, L"STATIC", TR(L"Ao mirar com o gatilho esquerdo (x 0,1 a 2):", L"While aiming with the left trigger (x 0.1 to 2):"), 0, 330, 317, 300, 20, -1);
-            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 630, 314, 60, 22, ID_PADMIRA);
+            Criar(j, L"BUTTON", TR(L"Câmera precisa no analógico direito (como o mouse)", L"Precise camera on the right stick (like the mouse)"), BS_AUTOCHECKBOX | WS_TABSTOP, 16, 288, 420, 22, ID_PADDIRETO);
+            Criar(j, L"STATIC", TR(L"Sensibilidade do controle (0,2 a 5):", L"Controller sensitivity (0.2 to 5):"), 0, 450, 291, 240, 20, -1);
+            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 690, 288, 60, 22, ID_PADVEL);
+            Criar(j, L"STATIC", TR(L"Zona morta (0 a 0,5):", L"Dead zone (0 to 0.5):"), 0, 36, 321, 150, 20, -1);
+            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 186, 318, 60, 22, ID_PADZONA);
+            Criar(j, L"STATIC", TR(L"Aceleração no fim do curso (0 a 2):", L"Turn boost at full tilt (0 to 2):"), 0, 270, 321, 230, 20, -1);
+            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 500, 318, 60, 22, ID_PADACEL);
+            Criar(j, L"STATIC", TR(L"Suavização (0 = na hora, até 0,9):", L"Smoothing (0 = instant, up to 0.9):"), 0, 584, 321, 230, 20, -1);
+            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 814, 318, 60, 22, ID_PADSUAVE);
+            Criar(j, L"STATIC", TR(L"Sensibilidade vertical (0,2 a 5):", L"Vertical sensitivity (0.2 to 5):"), 0, 36, 351, 210, 20, -1);
+            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 246, 348, 60, 22, ID_PADVELV);
+            Criar(j, L"STATIC", TR(L"Ao mirar com o gatilho esquerdo (x 0,1 a 2):", L"While aiming with the left trigger (x 0.1 to 2):"), 0, 330, 351, 300, 20, -1);
+            Criar(j, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 630, 348, 60, 22, ID_PADMIRA);
             // As ~40 listas de teclas levam ~0,4 s para criar (~7 ms cada lista do Windows): sao criadas logo depois que a
             // janela aparece (WM_CRIAR_TECLAS), para ela abrir na hora
             g_teclaLista.clear();
             g_listaCheia.clear();
             size_t metade = (g_cfg.acoes.size() + 1) / 2;
-            int yb = 382 + (int)metade * 30 + 14;
+            int yb = 416 + (int)metade * 30 + 14;
             Criar(j, L"BUTTON", TR(L"VOLTAR AO PADRÃO", L"RESTORE DEFAULTS"), WS_TABSTOP, 16, yb, 250, 36, ID_PADRAO);
             Criar(j, L"BUTTON", TR(L"CANCELAR", L"CANCEL"), WS_TABSTOP, 788, yb, 136, 36, ID_CANCELAR);
             Criar(j, L"BUTTON", TR(L"SALVAR", L"SAVE"), WS_TABSTOP, 934, yb, 140, 36, ID_SALVAR);
@@ -327,7 +327,7 @@ namespace
             for (size_t a = 0; a < n; a++)
             {
                 int col = a < metade ? 0 : 1, lin = (int)(a < metade ? a : a - metade);
-                int x = 16 + col * 540, y = 382 + lin * 30;
+                int x = 16 + col * 540, y = 416 + lin * 30;
                 std::wstring nome = W(g_cfg.acoes[a].ajuda);
                 if (!nome.empty()) nome[0] = towupper(nome[0]);
                 naOrdem(Criar(j, L"STATIC", nome.c_str(), SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS, x, y + 4, 250, 20, -1));
@@ -420,8 +420,9 @@ namespace
             HGDIOBJ antes = SelectObject(mem, bmp);
             FillRect(mem, &r, tema::PincelFundo());
             tema::Secao(mem, S(16), S(12), r.right - S(16), TR(L"JOGADORES", L"PLAYERS"));
-            tema::Secao(mem, S(16), S(196), r.right - S(16), TR(L"MOUSE E CÂMERA", L"MOUSE AND CAMERA"));
-            tema::Secao(mem, S(16), S(352), r.right - S(16), TR(L"TECLAS DO TECLADO E MOUSE  •  ATÉ 2 POR BOTÃO DO CONTROLE", L"KEYBOARD AND MOUSE KEYS  •  UP TO 2 PER CONTROLLER BUTTON"));
+            tema::Secao(mem, S(16), S(196), r.right - S(16), TR(L"MOUSE", L"MOUSE"));
+            tema::Secao(mem, S(16), S(260), r.right - S(16), TR(L"CONTROLE (ANALÓGICO DIREITO)", L"CONTROLLER (RIGHT STICK)"));
+            tema::Secao(mem, S(16), S(386), r.right - S(16), TR(L"TECLAS DO TECLADO E MOUSE  •  ATÉ 2 POR BOTÃO DO CONTROLE", L"KEYBOARD AND MOUSE KEYS  •  UP TO 2 PER CONTROLLER BUTTON"));
             BitBlt(dc, 0, 0, r.right, r.bottom, mem, 0, 0, SRCCOPY);
             SelectObject(mem, antes);
             DeleteObject(bmp); DeleteDC(mem);

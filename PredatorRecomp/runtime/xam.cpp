@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+[[noreturn]] void SairDoProcesso(unsigned codigo);   // main.cpp
 
 constexpr uint32_t X_ERROR_DEVICE_NOT_CONNECTED = 0x48F;
 constexpr uint32_t X_ERROR_NOT_FOUND = 0x490;
@@ -181,7 +182,7 @@ KFUNC(XamLoaderLaunchTitle)
         CloseHandle(pi.hProcess);
     }
     else Log("[xam] falha ao reabrir o jogo (erro %lu)", GetLastError());
-    ExitProcess(0);
+    SairDoProcesso(0);
 }
 
 // ---------------------------------------------------------------- mensagens para os "aplicativos" do sistema
