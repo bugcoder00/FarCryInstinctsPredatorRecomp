@@ -16,14 +16,22 @@
 namespace
 {
     struct HostJump { jmp_buf buf; };
-    thread_local std::unordered_map<uint32_t, HostJump> t_jumps;   // buffer do jogo -> marca do PC (nos estaveis)
+    // buffer do jogo -> marca do PC (nos estaveis). Dentro de uma funcao (criado no 1o uso): um thread_local com
+    // construtor no nivel do arquivo e montado em TODA thread que nasce no processo, ate nas do Windows; o
+    // unordered_map aloca memoria ao ser criado, e uma thread do Windows nascendo bem na hora do fechamento batia
+    // nesse malloc (PredatorGame.exe.<pid>.dmp em CrashDumps ao fechar o launcher, 13/11)
+    std::unordered_map<uint32_t, HostJump>& Saltos()
+    {
+        thread_local std::unordered_map<uint32_t, HostJump> t_jumps;
+        return t_jumps;
+    }
 }
 
 // chamada pelo codigo traduzido no ponto de cada setjmp do jogo (buffer do jogo em r3)
 extern "C" jmp_buf* predator_setjmp_buffer(PredatorCpuContext* ctx, uint8_t* base)
 {
     (void)base;
-    return &t_jumps[Gpr32(*ctx, 3)].buf;
+    return &Saltos()[Gpr32(*ctx, 3)].buf;
 }
 
 // longjmp do jogo (r3 = buffer, r4 = valor)
@@ -33,6 +41,7 @@ GUEST_FUNC(GUEST_SUB_LONGJMP)
 {
     uint32_t guestBuf = Gpr32(ctx, 3);
     GUEST_ORIGINAL(GUEST_SUB_LONGJMP)(ctx, base);   // restaura pilha, lr, CR e nao volateis do jogo; r3 = valor (1 se era 0)
+    auto& t_jumps = Saltos();
     auto it = t_jumps.find(guestBuf);
     if (it != t_jumps.end())
     {
