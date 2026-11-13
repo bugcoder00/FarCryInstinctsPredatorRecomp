@@ -324,7 +324,7 @@ static std::vector<uint8_t> ReadAll(const std::filesystem::path& p)
     return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), {});
 }
 
-int main(int argc, char** argv)
+static int MainPrograma(int argc, char** argv)
 {
     timeBeginPeriod(1);   // relogio do Windows em 1 ms (o padrao de ~15,6 ms deixava toda espera curta lenta)
     // O programa ajusta o tamanho das janelas a escala de tela do Windows (125%, 150%...). Sem avisar isso, o Windows
@@ -518,4 +518,13 @@ int main(int argc, char** argv)
     WaitObjects({ mainThread }, true, -1);
     Log("thread principal terminou");
     return 0;
+}
+
+// Toda saida do main (fechar o launcher, ferramentas de linha de comando, fim do jogo) tambem sai por SairDoProcesso:
+// voltar do main roda o desligamento do runtime C (e das DLLs) com outras threads ainda vivas (lista do UPnP, do
+// XInput, do pool do Windows). Uma thread que nascia nessa hora batia ao preparar as variaveis thread_local (o
+// malloc ja desligado) e o Windows deixava um .dmp em CrashDumps (issue no GitHub, 13/11: continuava depois da 0.1.3).
+int main(int argc, char** argv)
+{
+    SairDoProcesso((unsigned)MainPrograma(argc, argv));
 }
