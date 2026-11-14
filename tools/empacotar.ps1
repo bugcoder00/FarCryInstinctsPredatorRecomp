@@ -36,7 +36,7 @@ if ($Ingles) { Copy-Item "$raiz\tools\collect_recipe.bat" $destino } else { Copy
 $proibidos = Get-ChildItem $destino -Recurse | Where-Object { $_.Name -match '\.(bin|xex|dat|ini|map|lib|pdb|txt)$' -and $_.Name -ne $leia -and $_.Name -ne 'receita_shaders.txt' -and $_.Name -ne 'shader_recipe.txt' }
 if ($proibidos) { throw "arquivo que nao deveria ir no pacote: $($proibidos.Name -join ', ')" }
 
-# nome do zip com a versao (a do launcher.cpp, VERSAO_RECOMP): FarCryPredatorRecompLauncher_0.1.3_PTBR.zip / _ENG.zip
+# nome do zip com a versao (a do launcher.cpp, VERSAO_RECOMP): FarCryPredatorRecompLauncher_0.1.4_PTBR.zip / _ENG.zip
 $versao = [regex]::Match((Get-Content -Raw "$raiz\PredatorRecomp\runtime\launcher.cpp"), 'VERSAO_RECOMP L"([0-9.]+)"').Groups[1].Value
 if (-not $versao) { throw "versao nao achada em launcher.cpp (VERSAO_RECOMP)" }
 $zip = "$raiz\dist\FarCryPredatorRecompLauncher_${versao}_$(if ($Ingles) { 'ENG' } else { 'PTBR' }).zip"

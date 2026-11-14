@@ -51,6 +51,7 @@ void Log(const char* fmt, ...)
 [[noreturn]] void SairDoProcesso(unsigned codigo)
 {
     fflush(nullptr);
+    ClipCursor(nullptr);   // o mouse preso na janela (camera ou ponteiro dos menus) nao fica preso depois de fechar
     TerminateProcess(GetCurrentProcess(), codigo);
     for (;;) Sleep(INFINITE);
 }

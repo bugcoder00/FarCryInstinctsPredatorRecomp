@@ -27,7 +27,7 @@ namespace
         ID_PADVELV = 128, ID_PADMIRA = 129,
         ID_TECLA = 200,      // 200 + 2*acao (+1): teclas 1 e 2 de cada botao
         ID_SALVAR = 300, ID_CANCELAR = 301, ID_PADRAO = 302,
-        TIMER_ESTADO = 1,
+        TIMER_ESTADO = 1, TIMER_AVISO = 2,
         WM_CRIAR_TECLAS = WM_APP + 1,   // monta as listas de teclas depois que a janela aparece
     };
 
@@ -44,43 +44,98 @@ namespace
     std::string g_escolhidoAntes[4];     // dispositivo de cada jogador antes da ultima troca (regra: nada repetido)
     std::vector<int> g_teclas;           // codigos dos itens das listas de teclas (0 = nenhuma)
     std::vector<std::wstring> g_nomesTeclas;   // nomes dos itens (montados uma vez)
-    // As ~40 listas de teclas comecam so com a tecla escolhida e recebem a lista inteira quando ganham o foco (clique
-    // ou Tab): encher todas ao abrir (~120 itens cada) levava ~0,75 s e a janela demorava a aparecer.
-    // g_teclaLista[id] = tecla escolhida enquanto a lista ainda nao foi enchida.
+    // Cada tecla e um campo (botao desenhado pelo tema): clique (ou Enter/Espaco nele) e aperte a tecla, o botao do
+    // mouse ou gire a roda que quer usar; clique direito no campo = "(nenhuma)". g_teclaLista[idx] = tecla do campo.
+    ControlesCfg g_cfgTeclas;   // configuracao mostrada (os campos de teclas sao criados depois, com ela)
     std::vector<int> g_teclaLista;
-    std::vector<bool> g_listaCheia;
-    ControlesCfg g_cfgTeclas;   // configuracao mostrada (as listas de teclas sao criadas depois, com ela)
+    int g_esperando = -1;      // campo esperando a tecla (-1 = nenhum)
+    int g_perdeu = -1;         // campo que perdeu a tecla para outro (fica vermelho por um instante)
+    int g_engolirSoltar = 0;   // tecla escolhida: o "soltar" dela nao vai para a janela (Alt abriria o menu da janela)
+    bool TeclaId(int id) { return id >= ID_TECLA && id < ID_TECLA + (int)g_teclaLista.size(); }
     int IndiceTecla(int vk) { auto it = std::find(g_teclas.begin(), g_teclas.end(), vk); return it == g_teclas.end() ? 0 : (int)(it - g_teclas.begin()); }
 
     void MostrarTecla(HWND j, int idx, int vk)
     {
-        HWND cb = GetDlgItem(j, ID_TECLA + idx);
-        if (g_listaCheia[idx]) { SendMessageW(cb, CB_SETCURSEL, IndiceTecla(vk), 0); return; }
         g_teclaLista[idx] = g_teclas[IndiceTecla(vk)];
-        SendMessageW(cb, CB_RESETCONTENT, 0, 0);
-        SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)g_nomesTeclas[IndiceTecla(vk)].c_str());
-        SendMessageW(cb, CB_SETCURSEL, 0, 0);
+        SetDlgItemTextW(j, ID_TECLA + idx, g_nomesTeclas[IndiceTecla(vk)].c_str());
     }
 
-    void EncherLista(HWND j, int idx)
+    int TeclaDaLista(HWND, int idx) { return g_teclaLista[idx]; }
+
+    void Esperar(HWND j, int idx)
     {
-        if (g_listaCheia[idx]) return;
-        HWND cb = GetDlgItem(j, ID_TECLA + idx);
-        SendMessageW(cb, WM_SETREDRAW, FALSE, 0);
-        SendMessageW(cb, CB_RESETCONTENT, 0, 0);
-        SendMessageW(cb, CB_INITSTORAGE, g_nomesTeclas.size(), 32 * sizeof(wchar_t));
-        for (auto& n : g_nomesTeclas) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)n.c_str());
-        SendMessageW(cb, CB_SETCURSEL, IndiceTecla(g_teclaLista[idx]), 0);
-        SendMessageW(cb, WM_SETREDRAW, TRUE, 0);
-        g_listaCheia[idx] = true;
+        if (g_esperando >= 0 && g_esperando != idx) MostrarTecla(j, g_esperando, g_teclaLista[g_esperando]);
+        g_esperando = idx;
+        SetDlgItemTextW(j, ID_TECLA + idx, TR(L"Aperte a tecla...", L"Press a key..."));
     }
 
-    int TeclaDaLista(HWND j, int idx)
+    void ParouDeEsperar(HWND j, int vk)   // vk < 0: cancela (fica a de antes)
     {
-        if (!g_listaCheia[idx]) return g_teclaLista[idx];
-        int i = (int)SendDlgItemMessageW(j, ID_TECLA + idx, CB_GETCURSEL, 0, 0);
-        return i > 0 && i < (int)g_teclas.size() ? g_teclas[i] : 0;
+        const int idx = g_esperando;
+        if (idx < 0) return;
+        g_esperando = -1;
+        MostrarTecla(j, idx, vk < 0 ? g_teclaLista[idx] : vk);
     }
+
+    // Laco de mensagens: com um campo esperando, a proxima tecla / botao do mouse / roda vira a tecla dele (antes do
+    // IsDialogMessage: Esc, Enter e Tab tambem podem ser escolhidos). true = mensagem usada aqui.
+    bool CapturarTecla(HWND j, const MSG& m)
+    {
+        if (g_engolirSoltar && (m.message == WM_KEYUP || m.message == WM_SYSKEYUP))
+        {
+            g_engolirSoltar = 0;
+            return true;
+        }
+        if (g_esperando < 0)
+        {
+            // clique direito num campo: limpa
+            if (m.message == WM_RBUTTONUP && TeclaId(GetDlgCtrlID(m.hwnd)) && GetParent(m.hwnd) == j)
+            {
+                MostrarTecla(j, GetDlgCtrlID(m.hwnd) - ID_TECLA, 0);
+                return true;
+            }
+            return false;
+        }
+        int vk = 0;
+        switch (m.message)
+        {
+        case WM_KEYDOWN: case WM_SYSKEYDOWN:
+        {
+            vk = (int)m.wParam;
+            const UINT sc = (m.lParam >> 16) & 0xFF;
+            const bool ext = (m.lParam >> 24) & 1;
+            if (vk == VK_SHIFT) vk = (int)MapVirtualKeyW(sc, MAPVK_VSC_TO_VK_EX);
+            else if (vk == VK_CONTROL) vk = ext ? VK_RCONTROL : VK_LCONTROL;
+            else if (vk == VK_MENU) vk = ext ? VK_RMENU : VK_LMENU;
+            g_engolirSoltar = 1;
+            break;
+        }
+        case WM_KEYUP: case WM_SYSKEYUP: case WM_CHAR: case WM_SYSCHAR: return true;
+        case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: vk = VK_LBUTTON; break;
+        case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK: vk = VK_RBUTTON; break;
+        case WM_MBUTTONDOWN: case WM_MBUTTONDBLCLK: vk = VK_MBUTTON; break;
+        case WM_XBUTTONDOWN: case WM_XBUTTONDBLCLK: vk = GET_XBUTTON_WPARAM(m.wParam) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2; break;
+        case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP: case WM_XBUTTONUP: return true;
+        case WM_MOUSEWHEEL: break;
+        default: return false;
+        }
+        if (m.message == WM_MOUSEWHEEL) vk = GET_WHEEL_DELTA_WPARAM(m.wParam) > 0 ? 0x1000 : 0x1001;   // RODA_CIMA / RODA_BAIXO (input.cpp)
+        // tecla que a janela nao oferece (F1, F10, F12, Windows...): continua esperando
+        if (!vk || IndiceTecla(vk) <= 0) return true;
+        // a mesma tecla nao pode ficar em dois campos: o campo que ja tinha a tecla fica sem tecla e pisca vermelho
+        for (int o = 0; o < (int)g_teclaLista.size(); o++)
+            if (o != g_esperando && g_teclaLista[o] == vk)
+            {
+                MostrarTecla(j, o, 0);
+                if (g_perdeu >= 0 && g_perdeu != o) InvalidateRect(GetDlgItem(j, ID_TECLA + g_perdeu), nullptr, TRUE);
+                g_perdeu = o;
+                InvalidateRect(GetDlgItem(j, ID_TECLA + o), nullptr, TRUE);
+                SetTimer(j, TIMER_AVISO, 1200, nullptr);
+            }
+        ParouDeEsperar(j, vk);
+        return true;
+    }
+
     float g_escala = 1.0f;
 
     int S(int v) { return (int)(v * g_escala + 0.5f); }
@@ -95,12 +150,12 @@ namespace
 
     HWND Criar(HWND pai, const wchar_t* classe, const wchar_t* texto, DWORD estilo, int x, int y, int w, int h, int id)
     {
-        if (Caixa(id) || Botao(id)) estilo = (estilo & ~(BS_AUTOCHECKBOX | BS_DEFPUSHBUTTON)) | BS_OWNERDRAW;
+        if (Caixa(id) || Botao(id) || (id >= ID_TECLA && id < ID_SALVAR)) estilo = (estilo & ~(BS_AUTOCHECKBOX | BS_DEFPUSHBUTTON)) | BS_OWNERDRAW;
         HWND c = CreateWindowExW(0, classe, texto, WS_CHILD | WS_VISIBLE | estilo, S(x), S(y), S(w), S(h), pai,
                                  (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
         SendMessageW(c, WM_SETFONT, (WPARAM)g_fonte, TRUE);
         if (!wcscmp(classe, WC_COMBOBOXW)) tema::ListaEscura(c);
-        if (Botao(id)) tema::AcompanharMouse(c);
+        if (Botao(id) || (id >= ID_TECLA && id < ID_SALVAR)) tema::AcompanharMouse(c);
         return c;
     }
 
@@ -297,7 +352,7 @@ namespace
             // As ~40 listas de teclas levam ~0,4 s para criar (~7 ms cada lista do Windows): sao criadas logo depois que a
             // janela aparece (WM_CRIAR_TECLAS), para ela abrir na hora
             g_teclaLista.clear();
-            g_listaCheia.clear();
+            g_esperando = -1;
             size_t metade = (g_cfg.acoes.size() + 1) / 2;
             int yb = 416 + (int)metade * 30 + 14;
             Criar(j, L"BUTTON", TR(L"VOLTAR AO PADRÃO", L"RESTORE DEFAULTS"), WS_TABSTOP, 16, yb, 250, 36, ID_PADRAO);
@@ -332,11 +387,10 @@ namespace
                 if (!nome.empty()) nome[0] = towupper(nome[0]);
                 naOrdem(Criar(j, L"STATIC", nome.c_str(), SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS, x, y + 4, 250, 20, -1));
                 for (int k = 0; k < 2; k++)
-                    naOrdem(Criar(j, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, x + 254 + k * 136, y, 132, 400,
-                                  ID_TECLA + (int)a * 2 + k));   // itens: MostrarTecla / EncherLista
+                    naOrdem(Criar(j, L"BUTTON", L"", WS_TABSTOP, x + 254 + k * 136, y, 132, 26,
+                                  ID_TECLA + (int)a * 2 + k));   // clique e aperte a tecla (CapturarTecla)
             }
             g_teclaLista.assign(n * 2, 0);
-            g_listaCheia.assign(n * 2, false);
             MostrarConfig(j, g_cfgTeclas);
             SendMessageW(j, WM_SETREDRAW, TRUE, 0);
             RedrawWindow(j, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE);
@@ -345,6 +399,12 @@ namespace
         }
         case WM_TIMER:
         {
+            if (wp == TIMER_AVISO)   // o campo que perdeu a tecla deixa de piscar
+            {
+                KillTimer(j, TIMER_AVISO);
+                if (g_perdeu >= 0) { const int o = g_perdeu; g_perdeu = -1; InvalidateRect(GetDlgItem(j, ID_TECLA + o), nullptr, TRUE); }
+                return 0;
+            }
             // estado ao vivo; a cada ~2 s refaz as listas se um controle foi ligado/desligado
             for (int jog = 0; jog < 4; jog++)
             {
@@ -374,10 +434,9 @@ namespace
                 Marcar(j, id, !g_marca[id]);
                 return 0;
             }
-            if (int id = LOWORD(wp); id >= ID_TECLA && id < ID_TECLA + (int)g_listaCheia.size() &&
-                (HIWORD(wp) == CBN_SETFOCUS || HIWORD(wp) == CBN_DROPDOWN))
+            if (int id = LOWORD(wp); TeclaId(id) && HIWORD(wp) == BN_CLICKED)
             {
-                EncherLista(j, id - ID_TECLA);
+                Esperar(j, id - ID_TECLA);
                 return 0;
             }
             if (int id = LOWORD(wp); id >= ID_JOG && id < ID_JOG + 4 && HIWORD(wp) == CBN_SELCHANGE)
@@ -404,9 +463,30 @@ namespace
         {
             auto* d = (const DRAWITEMSTRUCT*)lp;
             if (Caixa((int)d->CtlID)) tema::DesenharCaixa(d, g_marca[d->CtlID], g_fonte);
+            else if (TeclaId((int)d->CtlID))
+            {
+                // campo de tecla: escuro com borda ambar (acesa com foco); esperando a tecla = vermelho como o Salvar
+                const int idx = (int)d->CtlID - ID_TECLA;
+                const bool esperando = idx == g_esperando || idx == g_perdeu, foco = (d->itemState & ODS_FOCUS) != 0;
+                RECT r = d->rcItem;
+                HBRUSH f = CreateSolidBrush(esperando ? tema::VERMELHO_CLARO : tema::CAMPO);
+                FillRect(d->hDC, &r, f); DeleteObject(f);
+                HBRUSH b = CreateSolidBrush(esperando || foco ? tema::AMBAR : tema::AMBAR_ESC);
+                FrameRect(d->hDC, &r, b);
+                if (esperando || foco) { RECT r2{ r.left + 1, r.top + 1, r.right - 1, r.bottom - 1 }; FrameRect(d->hDC, &r2, b); }
+                DeleteObject(b);
+                wchar_t t[64] = {}; GetWindowTextW(d->hwndItem, t, 64);
+                SetBkMode(d->hDC, TRANSPARENT);
+                SetTextColor(d->hDC, esperando ? RGB(255, 250, 240) : g_teclaLista[idx] ? tema::TEXTO : tema::TEXTO_FRACO);
+                HGDIOBJ antes = SelectObject(d->hDC, g_fonte);
+                RECT rt{ r.left + S(4), r.top, r.right - S(4), r.bottom };
+                DrawTextW(d->hDC, t, -1, &rt, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                SelectObject(d->hDC, antes);
+            }
             else tema::DesenharBotao(d, d->CtlID == ID_SALVAR, tema::FonteBotao());
             return TRUE;
         }
+        case WM_ACTIVATE: if (LOWORD(wp) == WA_INACTIVE) ParouDeEsperar(j, -1); break;   // trocou de janela: cancela
         case WM_LBUTTONDOWN: SetFocus(j); return 0;   // clique fora das caixas: tira a selecao (azul) da caixa com foco
         case WM_ERASEBKGND: return 1;   // o WM_PAINT pinta tudo (sem piscar)
         case WM_PAINT:
@@ -422,7 +502,7 @@ namespace
             tema::Secao(mem, S(16), S(12), r.right - S(16), TR(L"JOGADORES", L"PLAYERS"));
             tema::Secao(mem, S(16), S(196), r.right - S(16), TR(L"MOUSE", L"MOUSE"));
             tema::Secao(mem, S(16), S(260), r.right - S(16), TR(L"CONTROLE (ANALÓGICO DIREITO)", L"CONTROLLER (RIGHT STICK)"));
-            tema::Secao(mem, S(16), S(386), r.right - S(16), TR(L"TECLAS DO TECLADO E MOUSE  •  ATÉ 2 POR BOTÃO DO CONTROLE", L"KEYBOARD AND MOUSE KEYS  •  UP TO 2 PER CONTROLLER BUTTON"));
+            tema::Secao(mem, S(16), S(386), r.right - S(16), TR(L"TECLAS DO TECLADO E MOUSE  •  CLIQUE E APERTE A TECLA (CLIQUE DIREITO LIMPA)", L"KEYBOARD AND MOUSE KEYS  •  CLICK AND PRESS THE KEY (RIGHT CLICK CLEARS)"));
             BitBlt(dc, 0, 0, r.right, r.bottom, mem, 0, 0, SRCCOPY);
             SelectObject(mem, antes);
             DeleteObject(bmp); DeleteDC(mem);
@@ -479,6 +559,7 @@ namespace
         MSG m;
         while (GetMessageW(&m, nullptr, 0, 0) > 0)
         {
+            if (CapturarTecla(j, m)) continue;
             if (IsDialogMessageW(j, &m)) continue;   // Tab entre os campos, Enter = Salvar
             TranslateMessage(&m);
             DispatchMessageW(&m);

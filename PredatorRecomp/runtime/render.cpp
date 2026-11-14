@@ -12,6 +12,7 @@
 #pragma comment(lib, "dxgi.lib")
 
 void (*g_onGpuHang)(uint32_t) = nullptr;   // xenos_draw mostra o desenho que travou
+void AvisarPlacaTravou();   // gpu.cpp: mensagem na janela e fecha o jogo
 
 namespace render
 {
@@ -715,8 +716,14 @@ float4 ps(VSOut i) : SV_Target
         // Sem vsync do PC: o jogo ja se ritma pela interrupcao de vsync emulada (60 Hz). Esperar tambem o monitor
         // fazia os quadros perderem a vez e cairem para ~17 qps. Em janela (modelo flip) o Windows compoe a
         // imagem, entao nao ha "rasgos". FCRECOMP_VSYNC=1 volta a esperar o monitor.
-        static const bool vsync = getenv("FCRECOMP_VSYNC") != nullptr || OpcoesAtuais().vsync;   // opcao do launcher
+        static const bool vsyncTeste = getenv("FCRECOMP_VSYNC") != nullptr;
+        const bool vsync = vsyncTeste || OpcoesAtuais().vsync;   // opcao do launcher (muda na hora em OPCOES DE VIDEO)
         LogD3DMessages();
+        // teste do aviso de placa parada: FCRECOMP_TESTE_PLACA=N derruba a placa na N-esima imagem
+        if (static const uint64_t teste = strtoull(getenv("FCRECOMP_TESTE_PLACA") ? getenv("FCRECOMP_TESTE_PLACA") : "0", nullptr, 10);
+            teste)
+            if (static uint64_t imagens = 0; ++imagens == teste)
+                if (ComPtr<ID3D12Device5> d5; SUCCEEDED(g_device.As(&d5))) { Log("[render] teste: derrubando a placa"); d5->RemoveDevice(); }
         HRESULT phr = texture ? g_swapChain->Present(vsync ? 1 : 0, 0) : S_OK;   // sem textura: a janela fica como esta
         if (static int n = 0; perf::AvLog() && n++ < 6) Log("[av] %.1f ms: imagem %d entregue ao Windows (Present)", perf::Now(), n);
         if (FAILED(phr))
@@ -725,8 +732,10 @@ float4 ps(VSOut i) : SV_Target
             if (!logged)
             {
                 logged = true;
+                const HRESULT motivo = g_device->GetDeviceRemovedReason();
                 Log("[render] a placa de video foi removida/reiniciada: Present=%08X motivo=%08X",
-                    (unsigned)phr, (unsigned)g_device->GetDeviceRemovedReason());
+                    (unsigned)phr, (unsigned)motivo);
+                std::string pista;   // o que o DRED achou (vai para o diagnostico.txt)
                 ComPtr<ID3D12DeviceRemovedExtendedData> dred;
                 D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT crumbs{};
                 if (SUCCEEDED(g_device->QueryInterface(IID_PPV_ARGS(&dred))) && SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&crumbs)))
@@ -740,12 +749,31 @@ float4 ps(VSOut i) : SV_Target
                             if (n->pCommandHistory[i] == D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED) draws++;
                         Log("[render] DRED: lista parou na operacao %u de %u (op=%d), depois de %u desenhos completos",
                             done, n->BreadcrumbCount, (int)n->pCommandHistory[done], draws);
+                        char b[160];
+                        snprintf(b, sizeof(b), "lista parou na operacao %u de %u (op=%d), depois de %u desenhos; ", done,
+                                 n->BreadcrumbCount, (int)n->pCommandHistory[done], draws);
+                        pista += b;
                         if (g_onGpuHang) g_onGpuHang(draws);
                     }
                 }
                 D3D12_DRED_PAGE_FAULT_OUTPUT pf{};
                 if (dred && SUCCEEDED(dred->GetPageFaultAllocationOutput(&pf)) && pf.PageFaultVA)
+                {
                     Log("[render] DRED: falha de pagina no endereco da GPU %llX", (unsigned long long)pf.PageFaultVA);
+                    char b[96]; snprintf(b, sizeof(b), "falha de pagina no endereco da GPU %llX; ", (unsigned long long)pf.PageFaultVA);
+                    pista += b;
+                }
+                // Antes so o log contava (linha perdida no meio de milhares; bug relatado como "crash sem nada no log"):
+                // agora vai para o topo do diagnostico.txt e a janela avisa e fecha (a imagem ficava congelada com o
+                // jogo rodando por baixo).
+                char chave[200];
+                snprintf(chave, sizeof(chave), "a placa de video parou (Present=%08X motivo=%08X%s)",
+                         (unsigned)phr, (unsigned)motivo, motivo == (HRESULT)0x887A0001 ? " = chamada invalida do recomp; FCRECOMP_D3DDEBUG=1 mostra qual" :
+                         motivo == (HRESULT)0x887A0006 ? " = travou" :
+                         motivo == (HRESULT)0x887A0007 ? " = driver reiniciado" : motivo == (HRESULT)0x887A0020 ? " = erro do driver" : "");
+                diag::Note(diag::Crash, chave, pista.empty() ? "DRED: nenhum comando pela metade (sem pista de qual desenho)" : "DRED: " + pista);
+                diag::WriteReport("placa de video travou");
+                AvisarPlacaTravou();
             }
         }
         g_fenceValues[g_frame] = g_nextFence;

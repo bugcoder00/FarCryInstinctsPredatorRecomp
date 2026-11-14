@@ -1,4 +1,4 @@
-FAR CRY INSTINCTS PREDATOR RECOMP 0.1.3
+FAR CRY INSTINCTS PREDATOR RECOMP 0.1.4
 =======================================
 
 Versao para PC de Far Cry Instincts Predator (Xbox 360), feita por recompilacao estatica.
@@ -49,9 +49,32 @@ CONTROLES
 - Controles: DualSense e DualShock 4 (USB ou Bluetooth, sem programas extras) e controles de Xbox.
 - Teclado e mouse (padrao): W A S D andar, mouse olhar, botao esquerdo atirar, botao direito mirar,
   Espaco = A (pular), T = B, R = X, F = Y, Q = LB, E = RB, Enter = Start, Esc = Back.
+- Nos menus o mouse vira um ponteiro: passe sobre uma opcao e ela fica escolhida na hora, clique esquerdo
+  confirma, clique direito volta e a rodinha sobe/desce. Vale tambem nas telas com valores (Opcoes do
+  controle), na personalizacao do personagem do multijogador e no editor de mapas. Numa troca de tela o
+  cursor fica onde esta. Com a janela do F1 aberta o mouse fica solto. Apertou o controle, a seta some;
+  mexeu ou clicou o mouse, ela volta.
+- Com o jogador 1 no teclado, os icones dos botoes nos textos do jogo viram as teclas configuradas
+  (ex.: Espaco no lugar do A; mouse no lugar dos gatilhos), e a tela "Configuracao do controle" mostra
+  um teclado e um mouse com o aviso "Aperte F1 para ver ou mudar os controles". Um controle ligado
+  para o jogador 2 nao muda isso; se o jogador 1 passar a usar um controle, voltam os botoes e a foto
+  do controle. Com "Juntar" ligado (teclado e mouse no jogador 1 e um controle no jogador 2), os icones seguem o
+  que voce usou por ultimo: apertou no controle, aparecem os botoes; mexeu no teclado ou no mouse,
+  aparecem as teclas.
+- No editor de mapas o mouse gira a camera, e mexer o mouse para frente e para tras aproxima e afasta
+  (zoom). Na ferramenta de objetos, segure T (o "GIRAR") e mexa o mouse para os lados para girar o
+  objeto. Em "Entrar no mapa" o mouse volta a mirar como no jogo. O ponteiro tambem funciona no menu
+  de pausa do editor (Enter dentro do mapa). Em "Controles" desse menu (mapa do controle), com o
+  teclado aparece o desenho do teclado e cada texto mostra o desenho da tecla no fim (ex.: "TESTAR MAPA:"
+  com a tecla TAB desenhada).
 - Os jogadores 1 a 4 escolhem seus dispositivos no botao "Controles" (tela dividida ate 4 pessoas):
   teclado e mouse, "Controle" (o primeiro que estiver ligado) ou um controle ligado (DualSense, Xbox...).
   O mesmo dispositivo nao pode ficar em dois jogadores.
+
+- No menu do perfil (Opcoes) ha "OPCOES DE VIDEO": resolucao interna, sombras, suavizacao, quadros por
+  segundo e sincronia vertical, as mesmas opcoes do launcher (o que mudar la fica gravado para o launcher).
+  Tudo muda na hora (na resolucao interna e nas sombras a imagem pode piscar uma vez). Tamanho da janela e
+  formato da imagem continuam no launcher.
 
 PERFIS
 ------
@@ -61,11 +84,14 @@ principal ("User 1") usa a pasta "save"; os outros ficam em "save\perfis\<nome>"
 
 TECLAS DURANTE O JOGO
 ---------------------
-F1          configurar controles
+F1          configurar controles (para trocar uma tecla: clique no campo e aperte a tecla, o botao
+            do mouse ou gire a roda; clique direito no campo deixa sem tecla; se a tecla ja estava
+            em outra acao, ela sai de la: aquele campo pisca vermelho e fica sem tecla)
 F2          soltar/prender o mouse na janela
 + e -       sensibilidade do mouse
 Alt+Enter   tela cheia / janela
 F12         guardar um relatorio de problema (pasta "bugs") quando algo der errado
+            (se a placa de video parar, o jogo cria essa pasta sozinho e mostra onde ela ficou)
 
 CODIGOS DE TRAPACA: no menu principal, MENU DE TRAPACAS abre uma caixinha para digitar
 o codigo com o teclado (Enter confirma, Esc ou B no controle cancela).
@@ -136,4 +162,4 @@ controles.ini      controles
 fcrecomp_log.txt   registro (mande junto quando relatar um problema)
 
                                    Autor: bugcoder00
-                                      Versao 0.1.3
+                                      Versao 0.1.4

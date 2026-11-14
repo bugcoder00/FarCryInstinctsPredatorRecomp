@@ -50,6 +50,7 @@ namespace diag
 
     // F9: o quadro a capturar (0 = nenhum). Captura(frame) responde se este quadro esta sendo capturado.
     void RequestCapture();
+    void RequestMemDump();   // copia a memoria do jogo no proximo quadro (como o F11)
     void CaptureAt(uint64_t frame);   // captura um quadro escolhido (ex.: N quadros depois do inicio da missao)
     bool Capturing(uint64_t frame);
     std::string CaptureDir(uint64_t frame);   // pasta da captura (criada na primeira chamada)

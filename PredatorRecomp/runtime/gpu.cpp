@@ -9,6 +9,7 @@ void InputInit(HWND hwnd);         // input.cpp: mouse e controles.ini
 bool InputWindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result);
 std::string InputStatus();
 bool BugKey(unsigned vk);          // content.cpp: F12 = pacote do bug
+std::wstring PacoteBugPlacaParada(const std::string& explicacao);   // content.cpp: pasta bugs\bug_N para a placa parada
 std::string BugStatus();
 void ProfilerRegisterThread(const char* name);   // profiler.cpp
 void StartFreezeWatch();   // content.cpp: vigia de travamento
@@ -22,6 +23,7 @@ std::atomic<uint64_t> g_missionStartFrame{ 0 };   // quadro em que a fase comeco
 #include "xenos_draw.h"
 #include <windows.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 #include <atomic>
 #include <chrono>
 #include <vector>
@@ -1493,6 +1495,8 @@ namespace
     // Camada por cima da janela antiga com a tela de carregamento. Sem moldura, sem foco e fora da barra de tarefas;
     // some quando o processo fecha.
     constexpr UINT WM_COBRIR = WM_APP + 20;
+    constexpr UINT WM_PLACA_TRAVOU = WM_APP + 21;   // render.cpp: a placa de video parou (AvisarPlacaTravou)
+    std::atomic<bool> g_placaTravou{ false };
     LRESULT CALLBACK ProcCobertura(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     {
         if (msg == WM_PAINT)
@@ -1595,6 +1599,41 @@ namespace
         {
         // tela de preparacao ate o 1o quadro do jogo (com 100% entre o fim da preparacao e o video de abertura)
         case WM_COBRIR: Cobrir(hwnd); return 0;
+        case WM_PLACA_TRAVOU:
+        {
+            // a placa de video parou (render.cpp): a imagem ficaria congelada com o jogo rodando por baixo. Avisa e fecha
+            // (o diagnostico.txt ja foi escrito com o motivo). Sai da tela cheia antes para a mensagem aparecer.
+            static bool avisado = false;
+            if (avisado) return 0;
+            avisado = true;
+            g_placaTravou = true;
+            ClipCursor(nullptr);
+            // pasta com tudo para investigar (log, diagnostico, foto da tela, save atual): o jogador so envia a pasta
+            const std::wstring pasta = PacoteBugPlacaParada(
+                "A placa de video parou (Present falhou) e o jogo foi fechado com um aviso.\n"
+                "Veja diagnostico.txt (secao TRAVAMENTOS) e no fcrecomp_log.txt a linha \"[render] a placa de video foi removida\".\n"
+                "O save desta pasta tem o ultimo checkpoint antes do problema (tools\\carregar_bug.ps1 volta nele).\n");
+            ShowWindow(hwnd, SW_MINIMIZE);
+            Log("[gpu] placa de video parada: aviso na tela (pacote em %ls)", pasta.c_str());
+            std::wstring texto = TR(
+                L"A placa de vídeo parou de responder e o jogo não pode continuar. O jogo será fechado; o seu "
+                L"último checkpoint salvo continua no save.\n\n"
+                L"Para ajudar a corrigir, o jogo criou esta pasta com os registros e o seu save:\n\n",
+                L"The graphics card stopped responding and the game cannot continue. The game will close; your "
+                L"last saved checkpoint is still in the save.\n\n"
+                L"To help fix it, the game created this folder with the logs and your save:\n\n");
+            texto += pasta;
+            texto += TR(L"\n\nCompacte essa pasta (zip) e envie para quem cuida do recomp (ex.: numa issue do GitHub).\n\n"
+                        L"Abrir a pasta agora?",
+                        L"\n\nZip this folder and send it to the recomp developers (e.g. in a GitHub issue).\n\n"
+                        L"Open the folder now?");
+            const int resp = MessageBoxW(nullptr, texto.c_str(), L"Far Cry Instincts Predator Recomp",
+                                         MB_YESNO | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
+            Log("[gpu] aviso fechado (resposta %d, erro %lu)", resp, resp ? 0ul : GetLastError());
+            if (resp == IDYES) ShellExecuteW(nullptr, L"explore", pasta.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            DestroyWindow(hwnd);
+            return 0;
+        }
         case WM_PAINT:
             if (g_swapCount == 0) { PaintPreparation(hwnd); return 0; }
             break;
@@ -1659,7 +1698,7 @@ namespace
             break;
         case WM_DESTROY:
             Log("[gpu] janela fechada, encerrando");
-            diag::WriteReport("janela fechada");
+            diag::WriteReport(g_placaTravou ? "placa de video travou" : "janela fechada");
             RedeEncerrar();   // fecha as portas abertas no roteador (rede.cpp)
             // espera a placa de video terminar antes de sair (evita recursos presos no driver)
             if (g_drawReady) { g_drawReady = false; Sleep(100); xdraw::Shutdown(); }
@@ -1825,6 +1864,13 @@ namespace
 }
 
 HWND GetGameWindow() { return g_window; }
+// render.cpp: a placa de video parou (Present falhou). A janela mostra o aviso e fecha o jogo (thread da janela).
+// FCRECOMP_PLACATRAVOU_SEMFECHAR=1: so anota (investigacao com a imagem congelada).
+void AvisarPlacaTravou()
+{
+    if (getenv("FCRECOMP_PLACATRAVOU_SEMFECHAR")) return;
+    if (g_window) PostMessageW(g_window, WM_PLACA_TRAVOU, 0, 0);
+}
 
 // Fechamento pelo console (X do console, Ctrl+C, logoff): libera a GPU antes de sair
 static BOOL WINAPI ConsoleCtrl(DWORD)
@@ -2101,12 +2147,12 @@ float AspectoTela()
 
 int ModoFps()
 {
-    static const int modo = [] {
+    static const int teste = [] {
         if (const char* e = getenv("FCRECOMP_FPS")) { int n = atoi(e); return n == 30 ? 0 : n == 60 ? 1 : 2; }
         if (const char* e = getenv("FCRECOMP_FPS60")) return atoi(e) != 0 ? 1 : 0;
-        return OpcoesAtuais().fps;
+        return -1;
     }();
-    return modo;
+    return teste >= 0 ? teste : OpcoesAtuais().fps;   // a opcao muda na hora em OPCOES DE VIDEO (menu_video.cpp)
 }
 // a mesma funcao no editor de mapas (ige.xex) e sub_826460B0 (12/11: o editor ficava a 30 FPS com a opcao em 60)
 #ifdef PREDATOR_EDITOR

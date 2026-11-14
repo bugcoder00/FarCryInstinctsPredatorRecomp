@@ -1,4 +1,4 @@
-FAR CRY INSTINCTS PREDATOR RECOMP 0.1.3
+FAR CRY INSTINCTS PREDATOR RECOMP 0.1.4
 =======================================
 
 PC version of Far Cry Instincts Predator (Xbox 360), made by static recompilation.
@@ -49,9 +49,32 @@ CONTROLS
 - Controllers: DualSense and DualShock 4 (USB or Bluetooth, no extra programs) and Xbox controllers.
 - Keyboard and mouse (default): W A S D move, mouse look, left button shoot, right button aim,
   Space = A (jump), T = B, R = X, F = Y, Q = LB, E = RB, Enter = Start, Esc = Back.
+- In menus the mouse becomes a pointer: hover an option and it is selected right away, left click
+  confirms, right click goes back and the wheel moves up/down. It also works on screens with values
+  (Controller options), on the multiplayer character customization and in the map editor. When the
+  screen changes the cursor stays where it is. With the F1 window open the mouse is free. Press the
+  controller and the arrow hides; move or click the mouse and it comes back.
+- With player 1 on the keyboard, the button icons in the game texts become the configured keys
+  (e.g. Space instead of A; the mouse instead of the triggers), and the "Controller setup" screen shows
+  a keyboard and a mouse with "Press F1 to see or change the controls". A controller connected for
+  player 2 does not change this; if player 1 switches to a controller, the buttons and the controller
+  picture come back. With "Merge" on (keyboard and mouse on player 1 and a controller on player 2), the
+  icons follow what you used last: press the controller and its buttons show; use the keyboard or
+  mouse and the keys show.
+- In the map editor the mouse turns the camera, and moving the mouse forward and back zooms in and
+  out. In the object tool, hold T (the "ROTATE") and move the mouse sideways to rotate the object. In
+  "Jump in map" the mouse aims like in the game again. The pointer also works in the editor's pause
+  menu (Enter inside the map). In that menu's "Controls" (controller map), with the keyboard a
+  keyboard picture shows and each text ends with a picture of its key (e.g. "TEST MAP:" with the TAB
+  key drawn).
 - Players 1 to 4 choose their devices with the "Controls" button (split screen for up to 4 people):
   keyboard and mouse, "Controller" (the first one connected) or a connected controller (DualSense,
   Xbox...). The same device cannot be used by two players.
+
+- The profile menu (Options) has "VIDEO OPTIONS": internal resolution, shadows, anti-aliasing, frames
+  per second and vertical sync, the same options as the launcher (changes there are saved for the
+  launcher too). Everything changes right away (with internal resolution and shadows the image may
+  flicker once). Window size and aspect ratio stay in the launcher.
 
 PROFILES
 --------
@@ -61,11 +84,14 @@ To create a profile, type a new name (up to 15 letters, no accents) and click Pl
 
 KEYS DURING THE GAME
 --------------------
-F1          controller settings
+F1          controller settings (to change a key: click the field and press the key, the mouse
+            button or turn the wheel; right click on the field leaves it empty; if the key was already
+            used by another action it moves: that field flashes red and is left empty)
 F2          release/capture the mouse in the window
 + and -     mouse sensitivity
 Alt+Enter   full screen / window
 F12         save a problem report ("bugs" folder) when something goes wrong
+            (if the graphics card stops, the game creates this folder by itself and shows where it is)
 
 CHEAT CODES: in the main menu, CHEATS MENU opens a small box to type the code with the
 keyboard (Enter confirms, Esc or B on the controller cancels).
@@ -136,4 +162,4 @@ controles.ini      controls
 fcrecomp_log.txt   log (send it along when reporting a problem)
 
                                    Author: bugcoder00
-                                     Version 0.1.3
+                                     Version 0.1.4

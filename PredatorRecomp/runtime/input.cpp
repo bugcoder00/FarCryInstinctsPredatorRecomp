@@ -11,6 +11,7 @@
 #include "controles.h"
 #include "diag.h"
 #include "perf.h"
+#include "menu_mouse.h"
 #include <windows.h>
 #include <xinput.h>
 #include <atomic>
@@ -261,13 +262,24 @@ namespace
     {
         std::ofstream f(g_iniPath);
         char sens[32]; snprintf(sens, sizeof(sens), "%.2f", g_sens.load());
-        f << "; Controles do Far Cry Instincts Predator Recomp. Use a janela de configuracao (F1 no jogo ou\n"
-             "; \"Configurar controles.bat\") em vez de editar aqui. Apague este arquivo para voltar ao padrao.\n"
-             ";\n"
-             "; Dispositivos: teclado, auto (o controle usado por ultimo), controle1-controle4 (1o-4o controle ligado),\n"
-             "; sony1-sony4 (DualSense/DualShock 4),\n"
-             "; xbox1-xbox4 (controles XInput), nenhum.\n"
-             "; Nomes de teclas: A-Z, 0-9, F1-F12, ESPACO, ENTER, ESC, TAB, BACKSPACE, SHIFT_ESQ, SHIFT_DIR, CTRL_ESQ,\n"
+        // os nomes (chaves, dispositivos, teclas) sao os mesmos nas duas versoes; so os comentarios mudam de idioma
+        f << TR("; Controles do Far Cry Instincts Predator Recomp. Use a janela de configuracao (F1 no jogo ou\n"
+                "; \"Configurar controles.bat\") em vez de editar aqui. Apague este arquivo para voltar ao padrao.\n"
+                ";\n"
+                "; Dispositivos: teclado, auto (o controle usado por ultimo), controle1-controle4 (1o-4o controle ligado),\n"
+                "; sony1-sony4 (DualSense/DualShock 4),\n"
+                "; xbox1-xbox4 (controles XInput), nenhum.\n"
+                "; Nomes de teclas: ",
+                "; Far Cry Instincts Predator Recomp controls. Use the settings window (F1 in the game or\n"
+                "; \"Configurar controles.bat\") instead of editing here. Delete this file to go back to the defaults.\n"
+                "; The names below (sections, settings, devices and keys) are the same in both versions of the game.\n"
+                ";\n"
+                "; Devices: teclado (keyboard and mouse), auto (the last used controller), controle1-controle4\n"
+                "; (1st-4th connected controller), sony1-sony4 (DualSense/DualShock 4), xbox1-xbox4 (XInput\n"
+                "; controllers), nenhum (none).\n"
+                "; Key names (ESPACO = space, SETA = arrow, ESQ/DIR = left/right, MAIS/MENOS = plus/minus,\n"
+                "; VIRGULA/PONTO = comma/period, RODA_CIMA/RODA_BAIXO = mouse wheel up/down):\n; ")
+          << "A-Z, 0-9, F1-F12, ESPACO, ENTER, ESC, TAB, BACKSPACE, SHIFT_ESQ, SHIFT_DIR, CTRL_ESQ,\n"
              "; CTRL_DIR, ALT_ESQ, ALT_DIR, CAPSLOCK, SETA_CIMA, SETA_BAIXO, SETA_ESQUERDA, SETA_DIREITA, INSERT, DELETE,\n"
              "; HOME, END, PGUP, PGDN, NUM0-NUM9, NUM_MAIS, NUM_MENOS, MAIS, MENOS, VIRGULA, PONTO,\n"
              "; MOUSE_ESQ, MOUSE_DIR, MOUSE_MEIO, MOUSE4, MOUSE5, RODA_CIMA, RODA_BAIXO.\n"
@@ -276,22 +288,29 @@ namespace
              "jogador2 = " << g_jogador[1] << "\n"
              "jogador3 = " << g_jogador[2] << "\n"
              "jogador4 = " << g_jogador[3] << "\n"
-             "; 1 = o dispositivo do jogador 2 tambem controla o jogador 1 (jogo de 1 pessoa)\n"
-             "juntar = " << (g_juntar ? 1 : 0) << "\n"
+          << TR("; 1 = o dispositivo do jogador 2 tambem controla o jogador 1 (jogo de 1 pessoa)\n",
+                "; 1 = player 2's device also controls player 1 (single player game)\n")
+          << "juntar = " << (g_juntar ? 1 : 0) << "\n"
              "\n[controle]\n"
-             "; 1 = o analogico direito gira a camera direto, com curva de precisao (como o mouse); 0 = como o jogo\n"
-             "camera_direta = " << (g_padDireto ? 1 : 0) << "\n"
-             "; sensibilidade do analogico direito (0.2 a 5): horizontal e vertical\n"
-             "velocidade_camera = " << g_padVel.load() << "\n"
+          << TR("; 1 = o analogico direito gira a camera direto, com curva de precisao (como o mouse); 0 = como o jogo\n",
+                "; 1 = the right stick turns the camera directly, with a precision curve (like the mouse); 0 = like the game\n")
+          << "camera_direta = " << (g_padDireto ? 1 : 0) << "\n"
+          << TR("; sensibilidade do analogico direito (0.2 a 5): horizontal e vertical\n",
+                "; right stick sensitivity (0.2 to 5): horizontal and vertical\n")
+          << "velocidade_camera = " << g_padVel.load() << "\n"
              "velocidade_camera_vertical = " << g_padVelV.load() << "\n"
-             "; multiplica a sensibilidade com o gatilho esquerdo apertado, mirando (0.1 a 2)\n"
-             "sensibilidade_mirando = " << g_padMira.load() << "\n"
-             "; parte do analogico que nao gira a camera (0 a 0.5)\n"
-             "zona_morta_camera = " << g_padZona.load() << "\n"
-             "; giro extra com o analogico no fim do curso, crescendo em ~0,3 s (0 a 2)\n"
-             "aceleracao_camera = " << g_padAcel.load() << "\n"
-             "; 0 = resposta na hora; ate 0.9 = o giro segue o analogico devagar (mais suave)\n"
-             "suavizacao_camera = " << g_padSuave.load() << "\n"
+          << TR("; multiplica a sensibilidade com o gatilho esquerdo apertado, mirando (0.1 a 2)\n",
+                "; multiplies the sensitivity while the left trigger is held, aiming (0.1 to 2)\n")
+          << "sensibilidade_mirando = " << g_padMira.load() << "\n"
+          << TR("; parte do analogico que nao gira a camera (0 a 0.5)\n",
+                "; part of the stick that does not turn the camera (0 to 0.5)\n")
+          << "zona_morta_camera = " << g_padZona.load() << "\n"
+          << TR("; giro extra com o analogico no fim do curso, crescendo em ~0,3 s (0 a 2)\n",
+                "; extra turning with the stick fully pushed, growing over ~0.3 s (0 to 2)\n")
+          << "aceleracao_camera = " << g_padAcel.load() << "\n"
+          << TR("; 0 = resposta na hora; ate 0.9 = o giro segue o analogico devagar (mais suave)\n",
+                "; 0 = instant response; up to 0.9 = the turning follows the stick slowly (smoother)\n")
+          << "suavizacao_camera = " << g_padSuave.load() << "\n"
              "\n[mouse]\n"
              "camera_com_mouse = " << (g_mouse.camera ? 1 : 0) << "\n"
              "sensibilidade = " << sens << "\n"
@@ -400,6 +419,7 @@ namespace
 
     // ------------------------------------------------------------ mouse (Raw Input: movimento sem aceleracao do Windows)
     std::atomic<bool> g_captured{ false };
+    std::atomic<bool> g_ponteiro{ false };   // ponteiro dos menus (menu_mouse.cpp): cursor visivel, preso na janela
     std::atomic<bool> g_releasedByUser{ false };
     std::atomic<ULONGLONG> g_wheelUpUntil{ 0 }, g_wheelDownUntil{ 0 };
     std::atomic<ULONGLONG> g_sensShownUntil{ 0 };
@@ -418,9 +438,21 @@ namespace
         ClipCursor(&clip);
     }
 
+    // ponteiro dos menus: o cursor anda livre, mas so dentro da imagem da janela
+    void ClipToClient(HWND hwnd)
+    {
+        RECT r; GetClientRect(hwnd, &r);
+        POINT a{ r.left, r.top }, b{ r.right, r.bottom };
+        ClientToScreen(hwnd, &a); ClientToScreen(hwnd, &b);
+        RECT clip{ a.x, a.y, b.x, b.y };
+        ClipCursor(&clip);
+    }
+
     void Capture(HWND hwnd, bool on)
     {
-        if (on)
+        if (on && g_ponteiro)
+            ClipToClient(hwnd);
+        else if (on)
         {
             ClipToCenter(hwnd);
             SetCursor(nullptr);
@@ -432,10 +464,11 @@ namespace
 
     bool Key(int vk)
     {
+        if ((vk == VK_RODA_CIMA || vk == VK_RODA_BAIXO) && g_ponteiro) return false;
         if (vk == VK_RODA_CIMA) return GetTickCount64() < g_wheelUpUntil;
         if (vk == VK_RODA_BAIXO) return GetTickCount64() < g_wheelDownUntil;
         bool mouseButton = vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2;
-        if (mouseButton && !g_captured) return false;   // cliques com o cursor solto nao viram tiro
+        if (mouseButton && (!g_captured || g_ponteiro)) return false;   // cliques com o cursor solto nao viram tiro
         return (GetAsyncKeyState(vk) & 0x8000) != 0;
     }
 
@@ -482,14 +515,28 @@ namespace
     bool MiraDireta()
     {
 #ifdef PREDATOR_EDITOR
-        return g_directLook && GetTickCount64() - g_miraTick.load() < 250;
+        // o editor chama o giro do jogador tambem no modo de edicao (com a camera voando do editor): ai o painel do modo
+        // de edicao esta na tela e o mouse fica no analogico direito (camera do editor)
+        return g_directLook && GetTickCount64() - g_miraTick.load() < 250 && !MenuMouseEditorEdicao();
 #else
         return g_directLook;
 #endif
     }
 
+    // "juntar" com teclado e controle no jogador 1: o ultimo usado decide os icones (InputIconesTeclado)
+    std::atomic<ULONGLONG> g_usoTeclado{ 0 }, g_usoPad{ 0 };
+    // seta do ponteiro escondida: um controle foi apertado (o menu e dele); mexer ou clicar o mouse mostra de novo.
+    // O cursor e trocado na thread da janela (WM_SETCURSOR mandado para ela).
+    std::atomic<bool> g_setaEscondida{ false };
+    void MostrarSeta(bool v)
+    {
+        if (g_setaEscondida.exchange(!v) == !v) return;
+        if (HWND w = GetGameWindow()) PostMessageW(w, WM_SETCURSOR, (WPARAM)w, MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+    }
+
     void AddMouseMove(long dx, long dy)
     {
+        if (std::abs(dx) + std::abs(dy) > 2) { g_usoTeclado = GetTickCount64(); MostrarSeta(true); }
         g_lookDX += dx; g_lookDY += dy;
         std::lock_guard lock(g_mouseMutex);
         int64_t now = Qpc(), keep = (int64_t)(0.25 * QpcFreq());
@@ -506,7 +553,7 @@ namespace
         static std::unordered_map<uint32_t, Reader> readers;
         std::lock_guard rl(readersMutex);
         Reader& rd = readers[caller];
-        if (!g_mouse.camera || !g_captured || !Focused()) { rd = {}; return; }
+        if (!g_mouse.camera || !g_captured || g_ponteiro || !Focused()) { rd = {}; return; }
         if (HWND w = GetGameWindow()) ClipToCenter(w);   // o Windows pode soltar o cursor (ex.: outra janela): prende de novo
         if (MiraDireta()) return;   // mira direta: o mouse vai direto para o giro da camera (sub_8228BC78)
 
@@ -540,8 +587,272 @@ namespace
             int m = (int)std::lround(v * 32767.0f);
             if (std::abs(m) > std::abs((int)axis)) axis = (SHORT)std::clamp(m, -32767, 32767);
         };
+#ifdef PREDATOR_EDITOR
+        // Editor de mapas: o mouse e o analogico direito (girar a camera; frente/tras = zoom). Segurando B ("GIRAR",
+        // teclas T/Esc) nas ferramentas de objeto, o jogo gira o objeto com o analogico esquerdo: ai o mouse para os
+        // lados gira o objeto (e a camera fica parada).
+        if (g.wButtons & XINPUT_GAMEPAD_B) { mix(g.sThumbLX, rd.outX); return; }
+#endif
         mix(g.sThumbRX, rd.outX);
         mix(g.sThumbRY, rd.outY);
+    }
+
+    // ------------------------------------------------------------ ponteiro nos menus (menu_mouse.cpp)
+    // Ligado quando o jogo desenha uma lista de menu com item escolhido e a camera do jogador nao esta girando.
+    // Passar o mouse sobre um item: ele fica escolhido na hora (MenuMouseEscolher; nos menus achados so pela cor, aperta
+    // cima/baixo ate chegar). Clique esquerdo: escolhe e aperta A (numa linha com valor, SIM/NAO..., o A abre a lista de
+    // valores, que tambem funciona com o mouse). Clique direito: B. Roda: cima/baixo. O cursor nao e mexido pelo ponteiro:
+    // numa troca de tela ele fica onde esta. FCRECOMP_SEMPONTEIRO=1 desliga.
+    bool CursorNoJogo(float& ux, float& uy)
+    {
+        HWND w = GetGameWindow();
+        if (!w) return false;
+        POINT p; RECT r;
+        if (!GetCursorPos(&p) || !ScreenToClient(w, &p) || !GetClientRect(w, &r) || r.right <= 0 || r.bottom <= 0) return false;
+        if (p.x < 0 || p.y < 0 || p.x >= r.right || p.y >= r.bottom) return false;
+        MenuMouseParaJogo((p.x + 0.5f) / r.right, (p.y + 0.5f) / r.bottom, (float)r.right, (float)r.bottom, ux, uy);
+        return true;
+    }
+
+    // Seta do ponteiro com o visual do jogo: ambar como o launcher, contorno escuro e sombra, desenhada aqui (sem arquivo)
+    // em 32 px a 100% de escala do Windows (cresce com a escala do monitor). Ponta da seta = ponto do clique.
+    HCURSOR CursorDoJogo(HWND hwnd)
+    {
+        static HCURSOR cur = nullptr;
+        static UINT dpiFeito = 0;
+        const UINT dpi = std::max(96u, GetDpiForWindow(hwnd));
+        if (cur && dpi == dpiFeito) return cur;
+        const int S = std::clamp((int)(32 * dpi / 96), 32, 96);
+        // contorno da seta (unidades do tamanho S): ponta em (0,0)
+        static const float P[][2] = { { 0.04f, 0.03f }, { 0.04f, 0.80f }, { 0.24f, 0.62f }, { 0.38f, 0.93f }, { 0.51f, 0.87f },
+                                      { 0.37f, 0.57f }, { 0.64f, 0.57f } };
+        const int N = sizeof(P) / sizeof(P[0]);
+        auto dentro = [&](float x, float y) {
+            bool c = false;
+            for (int i = 0, j = N - 1; i < N; j = i++)
+                if ((P[i][1] > y) != (P[j][1] > y) && x < (P[j][0] - P[i][0]) * (y - P[i][1]) / (P[j][1] - P[i][1]) + P[i][0]) c = !c;
+            return c;
+        };
+        auto borda = [&](float x, float y) {   // distancia ate o contorno
+            float m = 1e9f;
+            for (int i = 0, j = N - 1; i < N; j = i++)
+            {
+                float ax = P[j][0], ay = P[j][1], bx = P[i][0], by = P[i][1], dx = bx - ax, dy = by - ay;
+                float t = std::clamp(((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy), 0.0f, 1.0f);
+                m = std::min(m, std::hypot(x - ax - t * dx, y - ay - t * dy));
+            }
+            return m;
+        };
+        const float esp = 1.6f / 32.0f;   // espessura do contorno
+        std::vector<uint32_t> px((size_t)S * S, 0);
+        for (int y = 0; y < S; y++)
+            for (int x = 0; x < S; x++)
+            {
+                float r = 0, g = 0, b = 0, a = 0;   // 4x4 amostras por pixel (bordas suaves)
+                for (int sy = 0; sy < 4; sy++)
+                    for (int sx = 0; sx < 4; sx++)
+                    {
+                        const float fx = (x + (sx + 0.5f) / 4) / S, fy = (y + (sy + 0.5f) / 4) / S;
+                        const bool in = dentro(fx, fy);
+                        const float d = borda(fx, fy);
+                        if (in && d > esp)
+                        {
+                            // ambar em cima, laranja queimado embaixo, com um brilho na diagonal
+                            const float t = std::clamp(fy / 0.9f, 0.0f, 1.0f), brilho = fx < fy * 0.35f + 0.10f ? 0.12f : 0.0f;
+                            r += (236 - 60 * t) / 255.0f + brilho; g += (174 - 80 * t) / 255.0f + brilho; b += (52 - 22 * t) / 255.0f + brilho; a += 1;
+                        }
+                        else if (in || d <= esp) { r += 16 / 255.0f; g += 14 / 255.0f; b += 11 / 255.0f; a += 1; }
+                        else if (dentro(fx - 0.05f, fy - 0.06f)) a += 0.35f;   // sombra
+                    }
+                if (a <= 0) continue;
+                const float k = 1.0f / 16;
+                auto c8 = [](float v) { return (uint32_t)std::clamp(v * 255.0f + 0.5f, 0.0f, 255.0f); };
+                const float al = a * k, inv = a > 0 ? 1.0f / a : 0;
+                px[(size_t)y * S + x] = c8(al) << 24 | c8(r * inv) << 16 | c8(g * inv) << 8 | c8(b * inv);
+            }
+        BITMAPV5HEADER bh{};
+        bh.bV5Size = sizeof(bh); bh.bV5Width = S; bh.bV5Height = -S; bh.bV5Planes = 1; bh.bV5BitCount = 32;
+        bh.bV5Compression = BI_BITFIELDS; bh.bV5RedMask = 0x00FF0000; bh.bV5GreenMask = 0x0000FF00; bh.bV5BlueMask = 0x000000FF;
+        bh.bV5AlphaMask = 0xFF000000;
+        void* bits = nullptr;
+        HDC dc = GetDC(nullptr);
+        HBITMAP cor = CreateDIBSection(dc, (BITMAPINFO*)&bh, DIB_RGB_COLORS, &bits, nullptr, 0);
+        ReleaseDC(nullptr, dc);
+        if (!cor || !bits) { Log("[input] seta do ponteiro: CreateDIBSection falhou (%lu)", GetLastError()); return LoadCursor(nullptr, IDC_ARROW); }
+        memcpy(bits, px.data(), px.size() * 4);
+        HBITMAP mascara = CreateBitmap(S, S, 1, 1, nullptr);
+        ICONINFO ii{ FALSE, (DWORD)(0.04f * S), (DWORD)(0.03f * S), mascara, cor };
+        HCURSOR novo = CreateIconIndirect(&ii);
+        DeleteObject(cor); DeleteObject(mascara);
+        if (!novo) { Log("[input] seta do ponteiro: CreateIconIndirect falhou (%lu)", GetLastError()); return LoadCursor(nullptr, IDC_ARROW); }
+        Log("[input] seta do ponteiro criada: %d px (%u dpi)", S, dpi);
+        if (cur) DestroyCursor(cur);
+        cur = novo; dpiFeito = dpi;
+        return cur;
+    }
+
+    bool Dentro(const MenuItem& it, float ux, float uy) { return ux >= it.x0 && ux < it.x1 && uy >= it.y0 && uy < it.y1; }
+
+    bool AcharItem(const MenuQuadro& q, float ux, float uy, const MenuLista*& lista, int& item)
+    {
+        for (auto& l : q.listas)
+            for (int i = 0; i < (int)l.itens.size(); i++)
+                if (Dentro(l.itens[i], ux, uy)) { lista = &l; item = i; return true; }
+        return false;
+    }
+
+    bool g_cliqueAntes = false, g_direitoAntes = false;
+    // onde o cursor estava (na area da janela) quando o ponteiro desligou numa troca de tela: se ele religar sem a camera
+    // do jogador ter girado no meio, o cursor volta para la (desligado, o mouse fica preso no centro da janela)
+    POINT g_cursorGuardado{ -1, -1 };
+    ULONGLONG g_desligouEm = 0;
+
+    void PonteiroMenu(XINPUT_GAMEPAD& g, GuestCpu& ctx)
+    {
+        static const bool desligado = getenv("FCRECOMP_SEMPONTEIRO") != nullptr;
+        static const bool plog = getenv("FCRECOMP_PONTEIROLOG") != nullptr;
+        static uint64_t comLista = 0;
+        HWND hw = GetGameWindow();
+        const MenuQuadro q = MenuMouseQuadro();
+#ifdef PREDATOR_EDITOR
+        // no editor so os menus de tela cheia (com o rodape (A)/(B) embaixo): a lista de objetos dentro do mapa (sem
+        // rodape; as dicas (Y)/(B)/(A) ficam no alto) nao liga o ponteiro, o mouse continua na camera
+        bool rodapeEmbaixo = false;
+        for (auto& r : q.rodape) rodapeEmbaixo |= r.y0 >= 380;
+        if (!q.listas.empty() && rodapeEmbaixo) comLista = q.troca;
+#else
+        if (!q.listas.empty()) comLista = q.troca;
+#endif
+        const bool foco = hw && Focused();
+        // 60 quadros (2 s) sem lista: tela de carregamento, fase... (a troca entre dois menus leva ~20 quadros)
+#ifdef PREDATOR_EDITOR
+        // no editor o giro do jogador continua sendo chamado atras do menu de pausa (e no modo de edicao): quem separa
+        // menu de jogo e o rodape (A)/(B) embaixo, exigido acima; voltou o painel do modo de edicao = o menu fechou
+        const bool semGiro = !MenuMouseEditorEdicao();
+#else
+        const bool semGiro = GetTickCount64() - g_miraTick.load() > 300;
+#endif
+        const bool menu = !desligado && foco && g_captured && !g_releasedByUser && comLista && q.troca - comLista <= 60 &&
+                          semGiro;
+        if (menu != g_ponteiro)
+        {
+            g_ponteiro = menu;
+            Log("[input] ponteiro do menu %s", menu ? "ligado" : "desligado");
+            if (!menu)
+            {
+                POINT p;
+                if (foco && GetCursorPos(&p) && ScreenToClient(hw, &p)) g_cursorGuardado = p;
+                else g_cursorGuardado = { -1, -1 };   // outra janela na frente (F1, Alt+Tab): o cursor e do usuario
+                g_desligouEm = GetTickCount64();
+            }
+            // muda o jeito de prender (centro <-> area da janela); sem foco (janela do F1, Alt+Tab) o mouse fica solto
+            if (foco && g_captured) Capture(hw, true);
+            if (menu && g_cursorGuardado.x >= 0 && g_miraTick.load() < g_desligouEm)
+            {
+                POINT p = g_cursorGuardado;
+                ClientToScreen(hw, &p);
+                SetCursorPos(p.x, p.y);
+                if (plog) Log("[ponteiro] cursor de volta em %ld,%ld", g_cursorGuardado.x, g_cursorGuardado.y);
+            }
+            if (menu) g_cursorGuardado = { -1, -1 };
+            g_cliqueAntes = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;   // botao ja apertado (tiro) nao vira clique
+            g_direitoAntes = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+        }
+        // pulso de um botao: apertado por 2 quadros, solto por 2 (o menu reage a cada aperto)
+        static WORD pulso = 0;
+        static uint64_t pulsoIni = 0;
+        static bool temAlvo = false, clicar = false;
+        static float alvoX = 0, alvoY = 0, ultX = -1, ultY = -1;
+        static int tentativas = 0, ultimoSinal = 0;
+        static bool cliquePend = false, direitoPend = false;
+        // cliques sao guardados mesmo durante um pulso (um clique rapido dura menos que um pulso)
+        {
+            const bool c = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0, d = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+            if (menu && c && !g_cliqueAntes) { cliquePend = true; MostrarSeta(true); }
+            if (menu && d && !g_direitoAntes) { direitoPend = true; MostrarSeta(true); }
+            g_cliqueAntes = c; g_direitoAntes = d;
+        }
+        if (pulso)
+        {
+            if (q.troca < pulsoIni + 2) { g.wButtons |= pulso; return; }
+            if (q.troca < pulsoIni + 4) return;
+            pulso = 0;
+        }
+        if (!menu) { temAlvo = clicar = cliquePend = direitoPend = false; return; }
+
+        if (g.wButtons) { temAlvo = clicar = cliquePend = direitoPend = false; return; }   // controle/teclado mandam
+        auto pulsar = [&](WORD b) { pulso = b; pulsoIni = q.troca; g.wButtons |= b; };
+
+        float ux, uy;
+        const bool noJogo = CursorNoJogo(ux, uy);
+        const bool cliqueNovo = cliquePend, direitoNovo = direitoPend;
+        cliquePend = direitoPend = false;
+
+        if (direitoNovo) { temAlvo = clicar = false; pulsar(XINPUT_GAMEPAD_B); return; }
+        const ULONGLONG agora = GetTickCount64();
+        if (agora < g_wheelUpUntil) { g_wheelUpUntil = 0; temAlvo = clicar = false; pulsar(XINPUT_GAMEPAD_DPAD_UP); return; }
+        if (agora < g_wheelDownUntil) { g_wheelDownUntil = 0; temAlvo = clicar = false; pulsar(XINPUT_GAMEPAD_DPAD_DOWN); return; }
+
+        if (noJogo)
+        {
+            const MenuLista* l; int i;
+            const bool mexeu = std::fabs(ux - ultX) + std::fabs(uy - ultY) >= 1.0f;
+            ultX = ux; ultY = uy;
+            if (cliqueNovo)
+            {
+                if (AcharItem(q, ux, uy, l, i))
+                {
+                    temAlvo = clicar = true; alvoX = ux; alvoY = uy; tentativas = 0; ultimoSinal = 0;
+                }
+                else
+                {
+                    // rodape "(B) VOLTAR" / "(A) ESCOLHER": o botao desenhado no texto
+                    bool feito = false;
+                    for (auto& r : q.rodape)
+                        if (Dentro(r, ux, uy)) { pulsar(r.botao == 0x03C0 ? XINPUT_GAMEPAD_B : XINPUT_GAMEPAD_A); feito = true; break; }
+                    if (!feito && q.listas.empty()) pulsar(XINPUT_GAMEPAD_A);   // tela sem lista ("aperte A")
+                    return;
+                }
+            }
+            else if (mexeu && AcharItem(q, ux, uy, l, i)) { temAlvo = true; alvoX = ux; alvoY = uy; tentativas = 0; ultimoSinal = 0; }
+        }
+        if (!temAlvo) return;
+        const MenuLista* l; int i;
+        if (!AcharItem(q, alvoX, alvoY, l, i) || l->escolhido < 0) { temAlvo = clicar = false; return; }
+        if (i != l->escolhido && l->lista && l->itens[i].obj && tentativas == 0)
+        {
+            // menu do jogo: a opcao fica escolhida na hora (sem andar pelas do meio)
+            if (MenuMouseEscolher(ctx, l->lista, l->itens[i].obj, l->itens[i].sub))
+            {
+                if (clicar) pulsar(XINPUT_GAMEPAD_A);
+                temAlvo = clicar = false;
+                return;
+            }
+            if (plog) Log("[ponteiro] nao deu para escolher direto: anda com o direcional");
+        }
+        if (i == l->escolhido)
+        {
+            // depois de andar na lista, espera a barra do item escolhido parar (o menu ignora o A enquanto ela anda)
+            if (clicar && tentativas > 0 && q.troca < pulsoIni + 12) return;
+            if (clicar) pulsar(XINPUT_GAMEPAD_A);
+            temAlvo = clicar = false;
+            return;
+        }
+        // o menu nao respondeu ao ultimo aperto (lista que nao e a da frente): desiste
+        static int escolhidoAntes = -1;
+        if (tentativas > 0 && l->escolhido == escolhidoAntes) { temAlvo = clicar = false; return; }
+        escolhidoAntes = l->escolhido;
+        // anda um item na direcao do alvo
+        const MenuItem& a = l->itens[i];
+        const MenuItem& e = l->itens[l->escolhido];
+        const int dy = (a.y0 + a.y1) - (e.y0 + e.y1), dx = (a.x0 + a.x1) - (e.x0 + e.x1);
+        int sinal; WORD b;
+        if (std::abs(dy) >= std::abs(dx)) { sinal = dy > 0 ? 1 : -1; b = dy > 0 ? XINPUT_GAMEPAD_DPAD_DOWN : XINPUT_GAMEPAD_DPAD_UP; }
+        else { sinal = dx > 0 ? 2 : -2; b = dx > 0 ? XINPUT_GAMEPAD_DPAD_RIGHT : XINPUT_GAMEPAD_DPAD_LEFT; }
+        // passou do alvo (item que o menu pula) ou demorou demais: desiste
+        if ((ultimoSinal && sinal != ultimoSinal) || ++tentativas > 16) { temAlvo = clicar = false; return; }
+        ultimoSinal = sinal;
+        pulsar(b);
     }
 
     void ChangeSensitivity(float factor)
@@ -643,7 +954,13 @@ bool InputWindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& resu
         if (g_captured) Capture(hwnd, true);   // atualiza a area em que o cursor fica preso
         return false;
     case WM_SETCURSOR:
-        if (g_captured && LOWORD(lp) == HTCLIENT) { SetCursor(nullptr); result = TRUE; return true; }
+        // no modo ponteiro o cursor fica preso na area do jogo, mas o Windows as vezes manda hit=HTCAPTION (borda/titulo
+        // calculado errado): se cair no DefWindowProc ele poe a seta padrao e nao manda outro WM_SETCURSOR. Sempre a nossa.
+        if (g_captured && (LOWORD(lp) == HTCLIENT || g_ponteiro))
+        {
+            SetCursor(g_ponteiro && !g_setaEscondida ? CursorDoJogo(hwnd) : nullptr);
+            result = TRUE; return true;
+        }
         return false;
     case WM_KEYDOWN:
     {
@@ -955,6 +1272,19 @@ namespace
                     diag::RequestCapture();
                 }
         }
+        // FCRECOMP_ROTEIROMEM=etapa:tique[,...]: copia a memoria do jogo (como o F11) nesses tiques da repeticao
+        static const char* mems = getenv("FCRECOMP_ROTEIROMEM");
+        if (mems && Repetindo())
+        {
+            const int etapa = Etapa();
+            const int64_t tq = TiqueRoteiro();
+            for (const char* p = mems; p && *p; p = strchr(p, ',') ? strchr(p, ',') + 1 : nullptr)
+                if (atoi(p) == etapa && strchr(p, ':') && atoll(strchr(p, ':') + 1) == tq)
+                {
+                    Log("[roteiro] memoria pedida no tique %lld", (long long)tq);
+                    diag::RequestMemDump();
+                }
+        }
     }
 
     // leitura do controle 1 (thread do jogo): relogio, repeticao e gravacao
@@ -1251,6 +1581,7 @@ bool AoVivoPular(uint64_t vsHash, uint64_t psHash)
 std::atomic<uint32_t> g_dbgLeituras{ 0 }, g_dbgMiras{ 0 };
 void InputOnSwap()
 {
+    MenuMouseTroca();   // menu_mouse.cpp: listas de menu do quadro que acabou
     uint64_t troca = ++g_trocas;
     AoVivoLer(troca);
     if (g_fotoArmada.exchange(false))
@@ -1315,6 +1646,12 @@ KFUNC(XamInputGetState)
         XINPUT_GAMEPAD p{};
         if (devs[i] == "nenhum" || !PadLer(devs[i], p)) continue;
         connected = true;
+        {
+            const bool usou = p.wButtons || p.bLeftTrigger > 40 || p.bRightTrigger > 40 || std::abs((int)p.sThumbLX) > 12000 ||
+                              std::abs((int)p.sThumbLY) > 12000 || std::abs((int)p.sThumbRX) > 12000 || std::abs((int)p.sThumbRY) > 12000;
+            if (usou && user == 0) g_usoPad = GetTickCount64();
+            if (usou && g_ponteiro) MostrarSeta(false);   // controle mexendo no menu: a seta some
+        }
         // junta com o que ja tem: botoes somados, o maior gatilho/analogico vence
         g.wButtons |= p.wButtons;
         g.bLeftTrigger = std::max(g.bLeftTrigger, p.bLeftTrigger);
@@ -1324,6 +1661,13 @@ KFUNC(XamInputGetState)
     }
     // o jogador 1 sempre aparece ligado (o jogo pede o controle 1 na tela de inicio)
     if (!connected && user != 0) { Ret(ctx, 0x48F); return; }
+    if (keyboard && user == 0)
+    {
+        XINPUT_GAMEPAD kb{};
+        ReadKeyboard(kb);
+        if (kb.wButtons || kb.bLeftTrigger || kb.bRightTrigger || kb.sThumbLX || kb.sThumbLY || kb.sThumbRX || kb.sThumbRY)
+            g_usoTeclado = GetTickCount64();
+    }
     if (keyboard) ReadKeyboard(g);
     // giro maximo da camera aumentado no lua.dat (fs.cpp): o analogico direito do controle/teclado e reduzido na mesma
     // proporcao depois da zona morta, para continuar com a mesma velocidade
@@ -1339,6 +1683,7 @@ KFUNC(XamInputGetState)
     if (keyboard) ReadMouse(g, (uint32_t)Lr(ctx));
     // com a caixa de digitacao aberta o jogo nao recebe o controle (como o teclado virtual do Xbox)
     if (TecladoAberto()) g = XINPUT_GAMEPAD{};
+    if (user == 0 && keyboard && !TecladoAberto()) PonteiroMenu(g, ctx);
     if (user == 0)
     {
         g_dbgLeituras++;
@@ -1405,6 +1750,52 @@ static bool TecladoNoUsuario(uint32_t u)
     std::lock_guard lock(g_cfgMutex);
     if (u == 0) return g_jogador[0] == "teclado" || (g_juntar && g_jogador[1] == "teclado");
     return ((u == 1 && !g_juntar) || u == 2 || u == 3) && g_jogador[u] == "teclado";
+}
+
+// icones_teclado.cpp: desenhar teclas no lugar dos icones do controle? (jogador 1 no teclado e nenhum controle DELE ligado)
+bool InputIconesTeclado()
+{
+    static std::atomic<ULONGLONG> prox{ 0 };
+    static std::atomic<bool> valor{ false }, ambos{ false };
+    ULONGLONG t = GetTickCount64();
+    if (t >= prox)
+    {
+        prox = t + 500;
+        EnsureConfig();
+        // so os dispositivos do jogador 1 contam (o 1 e, com "juntar", o do 2): um controle ligado que e do jogador 2
+        // nao troca os icones do jogador 1 no teclado
+        std::vector<std::string> devs;
+        {
+            std::lock_guard lock(g_cfgMutex);
+            devs.push_back(g_jogador[0]);
+            if (g_juntar) devs.push_back(g_jogador[1]);
+        }
+        const std::vector<PadInfo> ligados = PadsLigados();
+        bool teclado = false, pad = false;
+        for (auto& d : devs)
+        {
+            if (d == "teclado") teclado = true;
+            else if (d == "auto") pad |= !ligados.empty();
+            else if (d != "nenhum") for (auto& l : ligados) pad |= l.id == d;
+        }
+        valor = teclado && !pad;
+        // "juntar" com teclado e mouse e um controle ligado: os icones seguem o que foi usado por ultimo
+        ambos = teclado && pad;
+    }
+    if (ambos) return g_usoTeclado.load() >= g_usoPad.load();
+    return valor;
+}
+
+// icones_teclado.cpp: teclas de uma acao do controles.ini ("A", "LT", "CIMA"...), na ordem configurada
+std::vector<std::string> InputTeclasDaAcao(const char* acao)
+{
+    EnsureConfig();
+    std::vector<std::string> v;
+    std::lock_guard lock(g_cfgMutex);
+    for (auto& a : g_actions)
+        if (!strcmp(a.name, acao))
+            for (int k : a.keys) v.push_back(KeyNameOf(k));
+    return v;
 }
 
 // content.cpp: o usuario aparece conectado (perfil "Jogador"/"Jogador 2/3/4")? Jogador 2 so quando separado do 1;
@@ -1693,6 +2084,26 @@ std::string InputNomeTecla(int vk)
     if (IDIOMA_INGLES)   // nome em ingles so para mostrar (o controles.ini guarda o nome de sempre)
         for (auto& k : KEY_NAMES) if (k.vk == vk && k.en) return k.en;
     return KeyNameOf(vk);
+}
+
+// menu_mouse.cpp (mapa do controle do editor): teclas de uma acao como texto ("TAB", "MOUSE ESQ/CTRL ESQ"), ate max
+std::string InputTeclasTexto(const char* acao, int max)
+{
+    EnsureConfig();
+    std::vector<int> ks;
+    {
+        std::lock_guard lock(g_cfgMutex);
+        for (auto& a : g_actions)
+            if (!strcmp(a.name, acao)) ks = a.keys;
+    }
+    std::string r;
+    for (int i = 0; i < (int)ks.size() && i < max; i++)
+    {
+        std::string n = InputNomeTecla(ks[i]);
+        for (auto& c : n) if (c == '_') c = ' ';   // a fonte do jogo pode nao ter o "_"
+        r += (r.empty() ? "" : "/") + n;
+    }
+    return r;
 }
 
 std::vector<int> InputTodasTeclas()

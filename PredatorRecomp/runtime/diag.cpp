@@ -225,6 +225,8 @@ namespace diag
         Log("[diag] memoria do jogo copiada para %s (%zu regioes, %zu MB)", dir.c_str(), files, total >> 20);
     }
 
+    void RequestMemDump() { g_memDumpRequest = true; }
+
     std::string Status()
     {
         std::string s;

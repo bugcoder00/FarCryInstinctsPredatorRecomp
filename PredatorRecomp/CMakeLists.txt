@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(PredatorRecomp
-    VERSION 0.1.3
+    VERSION 0.1.4
     DESCRIPTION "Recompilador estatico de CPU e GPU (ferramenta CLI)"
     LANGUAGES CXX)
 

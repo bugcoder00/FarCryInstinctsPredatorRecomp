@@ -18,6 +18,7 @@ bool FotoReinicioPixels(std::vector<uint8_t>& bgra, uint32_t& w, uint32_t& h);  
 static const bool g_statsOn = std::getenv("FCRECOMP_STATS") != nullptr;   // estatisticas so quando pedidas (custam tempo)
 #include "xenos_draw.h"
 #include "xenos_translate.h"
+#include "icones_teclado.h"
 #include "opcoes.h"
 #include "render.h"
 #include "guest.h"
@@ -1401,6 +1402,10 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
                 if (end > 0x20000000) { levels = L; break; }
             }
             lv.resize(levels);
+            // icones do controle na fonte -> teclas do teclado (so mexe nas folhas de icones; icones_teclado.cpp)
+            IconesTecladoTextura(Phys(base), base & 0x1FFFFFFF, width, height, format, endian, tiled, pitchBlocks, g_frameNumber);
+            // foto do controle da tela de configuracao -> desenho do teclado e mouse (icones_teclado.cpp)
+            ControleImagemTextura(Phys(base), base & 0x1FFFFFFF, width, height, format, endian, tiled, pitchBlocks, g_frameNumber);
             const uint8_t* src = Phys(base);
 
             uint64_t key = ((uint64_t)base << 32) ^ ((uint64_t)format << 26) ^ ((uint64_t)width << 13) ^ height ^ ((uint64_t)levels << 58);
@@ -2683,26 +2688,61 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             Log("[draw] aquecimento: %u superficies e %u pipelines recriados em %.0f ms (%u falharam)", surfaces, pipelines, perf::Now() - t0, failed);
     }
 
+    uint32_t SombraMeios();
+    void RecarregarSuavizacao() { g_aaLevel = -1; }
+
+    // Resolucao interna / sombras mudadas no jogo (OPCOES DE VIDEO): no fim do quadro (PresentFrame) a placa termina o
+    // que tem na fila e todas as imagens no tamanho antigo (superficies da EDRAM, resolves, montagens, imagem
+    // persistida, copias para a memoria) sao soltas; no quadro seguinte sao recriadas no tamanho novo (cada uma guarda
+    // os seus "meios"). Um quadro pode sair sem parte da imagem.
+    namespace { std::atomic<bool> g_trocarEscala{ false }; ComPtr<ID3D12Resource> g_fbTex; D3D12_RESOURCE_STATES g_fbState; }
+    void PedirNovaEscala() { g_trocarEscala = true; }
+    namespace
+    {
+        void TrocarEscala()
+        {
+            const uint32_t m = EscalaMeios(), s = SombraMeios();
+            if (m == g_meios && s == g_sombraMeios) return;
+            const double t0 = perf::Now();
+            render::WaitIdle();
+            g_pendingWritebacks.clear();
+            g_resolved.clear();
+            g_resolvePool.clear();
+            g_composed.clear();
+            g_colorSurfaces.clear();
+            g_depthSurfaces.clear();
+            g_persisted.Reset();
+            g_aaScene.Reset();
+            g_fbTex.Reset();
+            g_surfaceBytes = 0;
+            g_meios = m;
+            g_sombraMeios = s;
+            Log("[draw] resolucao interna agora %.1fx (%ux%u), mapa de sombras %.1fx (troca em %.0f ms)", m / 2.0, Px(1280), Px(720), s / 2.0, perf::Now() - t0);
+        }
+    }
+
+    // (lidas da opcao a cada chamada: OPCOES DE VIDEO muda no jogo; o desenho troca so entre quadros, TrocarEscala)
     uint32_t EscalaMeios()
     {
-        static const uint32_t meios = [] {
+        static const uint32_t teste = [] {
             if (const char* e = getenv("FCRECOMP_ESCALA"))   // testes: 1, 1.5, 2 ou 3
                 return (uint32_t)std::clamp<long>(std::lround(atof(e) * 2), 2, 6);
-            static const uint32_t MEIOS[] = { 2, 3, 4, 6 };   // opcao do launcher: 1x, 1,5x, 2x, 3x (4K)
-            return MEIOS[std::clamp(OpcoesAtuais().escala, 0, 3)];
+            return 0u;
         }();
-        return meios;
+        static const uint32_t MEIOS[] = { 2, 3, 4, 6 };   // opcao do launcher: 1x, 1,5x, 2x, 3x (4K)
+        return teste ? teste : MEIOS[std::clamp(OpcoesAtuais().escala, 0, 3)];
     }
 
     // Mapa de sombras em meios: opcao "sombras" (0 = como a tela, 1 = 2x, 2 = 3x) ou FCRECOMP_SOMBRAS=1|2|3 (vezes)
     uint32_t SombraMeios()
     {
-        static const uint32_t meios = [] {
+        static const uint32_t teste = [] {
             if (const char* e = getenv("FCRECOMP_SOMBRAS"))
                 return (uint32_t)std::clamp<long>(std::lround(atof(e) * 2), 2, 6);
-            int s = std::clamp(OpcoesAtuais().sombras, 0, 2);
-            return s ? (uint32_t)(s + 1) * 2 : 2u;
+            return 0u;
         }();
+        const int s = std::clamp(OpcoesAtuais().sombras, 0, 2);
+        const uint32_t meios = teste ? teste : s ? (uint32_t)(s + 1) * 2 : 2u;
         return std::max(meios, EscalaMeios());
     }
 
@@ -4254,8 +4294,8 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             // pedaco vem do endereco: procuramos (x, y) multiplos de 32 cujo deslocamento tiled bate.
             // Na placa a imagem tem Px(1280) x Px(720) (resolucao interna).
             auto* list = render::FrameList();
-            static ComPtr<ID3D12Resource> fbTex;
-            static D3D12_RESOURCE_STATES fbState;
+            auto& fbTex = g_fbTex;   // recriada quando a resolucao interna muda (TrocarEscala)
+            auto& fbState = g_fbState;
             if (!fbTex)
             {
                 D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
@@ -4395,6 +4435,12 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         }
         assinc::g_esperaQuadro = 0;
         g_lastResolve = nullptr;
+        // teste: FCRECOMP_TROCAESCALA=quadro:escala:sombras (opcoes 0..3 e 0..2) troca nesse quadro, como OPCOES DE VIDEO
+        if (static const char* t = getenv("FCRECOMP_TROCAESCALA"); t)
+            for (const char* p = t; p && *p; p = strchr(p, ','), p = p ? p + 1 : nullptr)
+                if (int q = 0, e = 0, so = 0; sscanf(p, "%d:%d:%d", &q, &e, &so) == 3 && (uint64_t)q == g_frameNumber)
+                { OpcoesAtuais().escala = e; OpcoesAtuais().sombras = so; g_trocarEscala = true; }
+        if (g_trocarEscala.exchange(false)) TrocarEscala();
         g_usedPersistThisFrame = false;
         g_fullResolveThisFrame = false;
         g_drawsThisFrame = 0;

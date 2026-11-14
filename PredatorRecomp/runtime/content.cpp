@@ -645,7 +645,9 @@ namespace
         if (ec) Log("[bug] erro ao copiar %s: %s", from.string().c_str(), ec.message().c_str());
     }
 
-    void MakeBugPackage(std::string freezeReport)
+    // motivo: texto do relatorio (nullptr = F12/vigia); capturar = espera a captura do quadro (nao com a placa parada).
+    // Devolve a pasta do pacote (caminho completo).
+    fs::path MakeBugPackage(std::string freezeReport, const char* motivo = nullptr, bool capturar = true)
     {
         std::error_code ec;
         fs::create_directories("bugs", ec);
@@ -654,8 +656,8 @@ namespace
         fs::path dir = "bugs\\bug_" + std::to_string(n);
         fs::create_directories(dir, ec);
         uint64_t frame = diag::CurrentFrame();
-        diag::CaptureAt(frame + 2);
-        Log("[bug] %s: pacote do bug %d em %s (quadro %llu)", freezeReport.empty() ? "F12" : "vigia", n, fs::absolute(dir).string().c_str(), (unsigned long long)frame);
+        if (capturar) diag::CaptureAt(frame + 2);
+        Log("[bug] %s: pacote do bug %d em %s (quadro %llu)", motivo ? motivo : freezeReport.empty() ? "F12" : "vigia", n, fs::absolute(dir).string().c_str(), (unsigned long long)frame);
         if (!freezeReport.empty()) std::ofstream(dir / "travamento.txt") << freezeReport;
 
         fs::path save; std::string name;
@@ -672,7 +674,7 @@ namespace
         SalvarImagemDaJanela((dir / "tela.bmp").wstring());
         auto gravarEstado = [&] {
             std::ofstream(dir / "threads.txt") << ::DescribeThreads();   // thread.cpp
-            diag::WriteReport(freezeReport.empty() ? "F12 (pacote do bug)" : "vigia (tela parada)");
+            diag::WriteReport(motivo ? motivo : freezeReport.empty() ? "F12 (pacote do bug)" : "vigia (tela parada)");
             fs::copy_file("diagnostico.txt", dir / "diagnostico.txt", fs::copy_options::overwrite_existing, ec);
             fs::copy_file("fcrecomp_log.txt", dir / "fcrecomp_log.txt", fs::copy_options::overwrite_existing, ec);
         };
@@ -681,6 +683,8 @@ namespace
         // captura do quadro (desenhos e resolves): so se o jogo ainda esta desenhando. Espera os arquivos pararem de
         // aparecer; desiste se nenhum quadro novo chegar em 1,5 s (travado) ou depois de 20 s.
         fs::path cap = "diag\\quadro_" + std::to_string(frame + 2);
+        if (capturar)
+        {
         size_t last = 0; int still = 0, parado = 0;
         uint64_t quadroAntes = diag::CurrentFrame();
         for (int i = 0; i < 100 && still < 8 && parado < 8; i++)
@@ -697,6 +701,7 @@ namespace
         if (fs::exists(cap)) CopyTree(cap, dir / "quadro");
         else Log("[bug] sem captura do quadro (o jogo nao desenhou quadros novos): o pacote tem a foto da janela (tela.bmp)");
         gravarEstado();   // de novo, com o que aconteceu durante a espera
+        }
 
         // fase atual: o ultimo arquivo de fase aberto (linhas "[fs] abriu: ...\levels\...")
         std::string level;
@@ -729,7 +734,19 @@ namespace
         g_bugShownUntil = GetTickCount64() + 8000;
         Log("[bug] pacote do bug %d pronto%s", n, save.empty() ? " (sem jogo salvo ativo: use CREATE NEW GAME)" : "");
         g_bugBusy = false;
+        return fs::absolute(dir, ec);
     }
+}
+
+// gpu.cpp: a placa de video parou. Pacote do bug na hora (sem captura do quadro: a placa nao desenha mais), com
+// placa_parada.txt explicando; devolve a pasta para a mensagem pedir ao jogador.
+std::wstring PacoteBugPlacaParada(const std::string& explicacao)
+{
+    for (int i = 0; i < 100 && g_bugBusy.exchange(true); i++) Sleep(100);   // F12/vigia gravando: espera ate 10 s
+    fs::path dir = MakeBugPackage(explicacao, "placa de video travou", false);
+    std::error_code ec;
+    fs::rename(dir / "travamento.txt", dir / "placa_parada.txt", ec);
+    return dir.wstring();
 }
 
 // Tecla na janela do jogo (gpu.cpp). F12 = pacote do bug.
@@ -742,7 +759,7 @@ bool BugKey(unsigned vk)
         g_bugMsg = "  [gravando o pacote do bug...]";
     }
     g_bugShownUntil = GetTickCount64() + 60000;
-    std::thread(MakeBugPackage, std::string()).detach();
+    std::thread([] { MakeBugPackage(std::string()); }).detach();
     return true;
 }
 

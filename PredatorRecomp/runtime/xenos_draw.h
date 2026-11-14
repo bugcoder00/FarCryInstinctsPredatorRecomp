@@ -24,6 +24,8 @@ namespace xdraw
 
     // Resolucao interna em meios (2 = 1x, 3 = 1,5x, 4 = 2x): opcao "escala" do launcher ou FCRECOMP_ESCALA
     uint32_t EscalaMeios();
+    void RecarregarSuavizacao();
+    void PedirNovaEscala();        // resolucao interna/sombras mudaram (OPCOES DE VIDEO): troca no fim do quadro   // a opcao antisserrilhado mudou (OPCOES DE VIDEO no jogo): vale no proximo quadro
     bool Init();
     // Progresso do aquecimento do Init para o titulo da janela ("" quando acabou)
     std::string WarmUpStatus();

@@ -19,7 +19,7 @@
 #include <dxgi.h>
 
 // versao mostrada no titulo do launcher e nas instrucoes (trocar a cada pacote novo)
-#define VERSAO_RECOMP L"0.1.3"
+#define VERSAO_RECOMP L"0.1.4"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -90,27 +90,27 @@ void OpcoesCarregar(const std::filesystem::path& exeDir)
 void OpcoesSalvar()
 {
     std::ofstream f(g_arquivo);
-    f << "; Opcoes do Far Cry Instincts Predator Recomp (use o launcher: abra o PredatorGame.exe segurando Shift)\n"
+    f << TR("; Opcoes do Far Cry Instincts Predator Recomp (use o launcher: abra o PredatorGame.exe segurando Shift)\n", "; Far Cry Instincts Predator Recomp options (use the launcher: open PredatorGame.exe holding Shift). The setting names are the same in both versions\n")
       << "pasta_jogo = " << Utf8(g_op.pastaJogo) << "\n"
-      << "; 0 = automatico, 1 = 1280x720, 2 = 1600x900, 3 = 1920x1080, 4 = 2560x1440\n"
+      << TR("; 0 = automatico, 1 = 1280x720, 2 = 1600x900, 3 = 1920x1080, 4 = 2560x1440\n", "; window size (janela): 0 = automatic, 1 = 1280x720, 2 = 1600x900, 3 = 1920x1080, 4 = 2560x1440; tela_cheia = full screen\n")
       << "janela = " << g_op.janela << "\n"
       << "tela_cheia = " << g_op.telaCheia << "\n"
-      << "; antisserrilhado: 0 desligado, 1 leve, 2 medio, 3 forte\n"
+      << TR("; antisserrilhado: 0 desligado, 1 leve, 2 medio, 3 forte\n", "; anti-aliasing (antisserrilhado): 0 off, 1 low, 2 medium, 3 high\n")
       << "antisserrilhado = " << g_op.antisserrilhado << "\n"
-      << "; resolucao interna (o jogo desenha em mais pixels): 0 = 1x 1280x720, 1 = 1,5x 1920x1080, 2 = 2x 2560x1440, 3 = 3x 3840x2160 (4K)\n"
+      << TR("; resolucao interna (o jogo desenha em mais pixels): 0 = 1x 1280x720, 1 = 1,5x 1920x1080, 2 = 2x 2560x1440, 3 = 3x 3840x2160 (4K)\n", "; internal resolution (escala; the game draws more pixels): 0 = 1x 1280x720, 1 = 1.5x 1920x1080, 2 = 2x 2560x1440, 3 = 3x 3840x2160 (4K)\n")
       << "escala = " << g_op.escala << "\n"
-      << "; formato da imagem: 0 = 16:9 (como o original), 1 = o do monitor (ultrawide 21:9 / 32:9, experimental), 2 = 16:9 com barras pretas (sem esticar)\n"
+      << TR("; formato da imagem: 0 = 16:9 (como o original), 1 = o do monitor (ultrawide 21:9 / 32:9, experimental), 2 = 16:9 com barras pretas (sem esticar)\n", "; aspect ratio (formato): 0 = 16:9 (like the original), 1 = the monitor's (ultrawide 21:9 / 32:9, experimental), 2 = 16:9 with black bars (not stretched)\n")
       << "formato = " << g_op.formato << "\n"
-      << "; qualidade das sombras (mapa de sombras maior, bordas mais definidas): 0 = normal, 1 = alta 2x, 2 = muito alta 3x\n"
+      << TR("; qualidade das sombras (mapa de sombras maior, bordas mais definidas): 0 = normal, 1 = alta 2x, 2 = muito alta 3x\n", "; shadow quality (sombras; bigger shadow map, sharper edges): 0 = normal, 1 = high 2x, 2 = very high 3x; vsync = vertical sync\n")
       << "sombras = " << g_op.sombras << "\n"
       << "vsync = " << g_op.vsync << "\n"
-      << "; quadros por segundo: 0 = 30 (como o original), 1 = 60, 2 = sem limite (experimental)\n"
+      << TR("; quadros por segundo: 0 = 30 (como o original), 1 = 60, 2 = sem limite (experimental)\n", "; frames per second (fps): 0 = 30 (like the original), 1 = 60, 2 = unlocked (experimental); mostrar_registro = log window, abrir_direto = skip the launcher\n")
       << "fps = " << g_op.fps << "\n"
       << "mostrar_registro = " << g_op.mostrarRegistro << "\n"
       << "abrir_direto = " << g_op.pularLauncher << "\n"
-      << "; SYSTEM LINK pela internet: IP (ou nome) do PC de quem criou a partida; vazio = so rede local\n"
+      << TR("; SYSTEM LINK pela internet: IP (ou nome) do PC de quem criou a partida; vazio = so rede local\n", "; SYSTEM LINK over the internet (ip_anfitriao): IP (or name) of the PC that created the match; empty = local network only\n")
       << "ip_anfitriao = " << g_op.ipAnfitriao << "\n"
-      << "; perfil (jogos salvos em save\\perfis\\<nome>); vazio = o principal (pasta save)\n"
+      << TR("; perfil (jogos salvos em save\\perfis\\<nome>); vazio = o principal (pasta save)\n", "; profile (perfil; saved games in save\\perfis\\<name>); empty = the main one (save folder)\n")
       << "perfil = " << g_op.perfil << "\n";
 }
 
