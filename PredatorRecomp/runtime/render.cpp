@@ -482,7 +482,16 @@ float4 ps(VSOut i) : SV_Target
             Log("[render] sombreamento de taxa variavel (particulas 2x2): %s", l ? "ligado" : "a placa nao tem (ou FCRECOMP_SEMVRS)");
             return l;
         }();
-        return l5;
+        // a lista pode ter sido recriada depois de um quadro descartado (bug 40): pega a interface da lista nova
+        static ID3D12GraphicsCommandList* de = g_list.Get();
+        static ComPtr<ID3D12GraphicsCommandList5> nova;
+        if (l5 && de != g_list.Get())
+        {
+            de = g_list.Get();
+            nova.Reset();
+            g_list.As(&nova);
+        }
+        return nova ? nova.Get() : (de == g_list.Get() && !nova ? l5 : nullptr);
     }
 
     ID3D12GraphicsCommandList* FrameList()
@@ -491,7 +500,13 @@ float4 ps(VSOut i) : SV_Target
         {
             WaitFence(g_fenceValues[g_frame]);   // os recursos deste indice estao livres
             g_allocators[g_frame]->Reset();
-            g_list->Reset(g_allocators[g_frame].Get(), nullptr);
+            if (FAILED(g_list->Reset(g_allocators[g_frame].Get(), nullptr)))
+            {
+                // lista que o Close() recusou (bug 40) nao aceita Reset: cria outra
+                g_list.Reset();
+                g_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_allocators[g_frame].Get(), nullptr, IID_PPV_ARGS(&g_list));
+                Log("[render] lista de comandos recriada depois de um quadro descartado");
+            }
             g_uploadUsed = 0;
             g_srvUsed = 0;
             g_frameOpen = true;
@@ -710,9 +725,29 @@ float4 ps(VSOut i) : SV_Target
             g_occResolved[g_frame] = n;
         }
         g_tsUsed[g_frame] = true;
-        list->Close();
-        ID3D12CommandList* lists[] = { list };
-        g_queue->ExecuteCommandLists(1, lists);
+        // bug 40: uma lista com uma chamada invalida (ex.: barreira de um recurso que a placa nao conseguiu criar) faz
+        // o Close() falhar; enviar assim mesmo derrubava a placa (motivo 887A0001) e o jogo fechava. Agora o quadro
+        // e descartado (uma imagem repetida) e o problema vai para o diagnostico.
+        // teste: FCRECOMP_TESTE_LISTA=N grava uma barreira invalida (recurso nulo) na N-esima imagem
+        if (static const uint64_t testeLista = strtoull(getenv("FCRECOMP_TESTE_LISTA") ? getenv("FCRECOMP_TESTE_LISTA") : "0", nullptr, 10); testeLista)
+            if (static uint64_t imagensL = 0; ++imagensL == testeLista)
+            {
+                Log("[render] teste: barreira invalida na lista");
+                D3D12_RESOURCE_BARRIER nb{ D3D12_RESOURCE_BARRIER_TYPE_TRANSITION };
+                nb.Transition = { nullptr, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE };
+                list->ResourceBarrier(1, &nb);
+            }
+        if (HRESULT chr = list->Close(); FAILED(chr))
+        {
+            static int avisos = 0;
+            if (avisos++ < 5) Log("[render] lista de comandos recusada pelo DirectX (Close=%08X): quadro descartado; FCRECOMP_D3DDEBUG=1 mostra qual chamada", (unsigned)chr);
+            diag::Note(diag::Crash, "lista de comandos recusada (quadro descartado em vez de derrubar a placa)", "FCRECOMP_D3DDEBUG=1 mostra qual chamada");
+        }
+        else
+        {
+            ID3D12CommandList* lists[] = { list };
+            g_queue->ExecuteCommandLists(1, lists);
+        }
         // Sem vsync do PC: o jogo ja se ritma pela interrupcao de vsync emulada (60 Hz). Esperar tambem o monitor
         // fazia os quadros perderem a vez e cairem para ~17 qps. Em janela (modelo flip) o Windows compoe a
         // imagem, entao nao ha "rasgos". FCRECOMP_VSYNC=1 volta a esperar o monitor.

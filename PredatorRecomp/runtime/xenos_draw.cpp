@@ -264,6 +264,9 @@ namespace xdraw
         void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* res, D3D12_RESOURCE_STATES& state, D3D12_RESOURCE_STATES to)
         {
             if (state == to) return;
+            // recurso que nao foi criado (memoria da placa cheia): uma barreira com recurso nulo invalida a lista
+            // inteira e derrubava a placa (bug 40)
+            if (!res) { state = to; return; }
             D3D12_RESOURCE_BARRIER b{ D3D12_RESOURCE_BARRIER_TYPE_TRANSITION };
             b.Transition = { res, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, state, to };
             list->ResourceBarrier(1, &b);
@@ -304,6 +307,7 @@ namespace xdraw
                 td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
                 D3D12_CLEAR_VALUE cv{ s.format, { 0, 0, 0, 0 } };
                 { double tRt = perf::Now(); g_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&s.res)); perf::g_rtCreateMs += perf::Now() - tRt; }
+                if (!s.res) { Log("[draw] ERRO: a placa nao criou a superficie de cor %llux%u (memoria cheia?)", (unsigned long long)td.Width, td.Height); diag::Note(diag::Crash, "a placa nao criou uma superficie de desenho (memoria de video cheia?)"); }
                 s.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
                 s.view = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
                 s.view.ptr += (SIZE_T)(g_rtvUsed++ % MAX_SURFACES) * g_rtvSize;
@@ -336,6 +340,7 @@ namespace xdraw
                 D3D12_CLEAR_VALUE dv{ DS_FORMAT };
                 dv.DepthStencil = { 1.0f, 0 };
                 { double tRt = perf::Now(); g_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_DEPTH_WRITE, &dv, IID_PPV_ARGS(&s.res)); perf::g_rtCreateMs += perf::Now() - tRt; }
+                if (!s.res) { Log("[draw] ERRO: a placa nao criou a superficie de profundidade %llux%u (memoria cheia?)", (unsigned long long)td.Width, td.Height); diag::Note(diag::Crash, "a placa nao criou uma superficie de desenho (memoria de video cheia?)"); }
                 s.state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
                 s.view = g_dsvHeap->GetCPUDescriptorHandleForHeapStart();
                 s.view.ptr += (SIZE_T)(g_dsvUsed++ % MAX_SURFACES) * g_dsvSize;
