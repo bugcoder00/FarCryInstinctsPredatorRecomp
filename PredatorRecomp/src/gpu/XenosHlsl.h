@@ -30,6 +30,8 @@ namespace predator::gpu
         std::uint32_t cubeMask = 0;              // bit n = a textura n e lida como cubo
         bool writesDepth = false;
         bool loopMode = false;                   // gerado como maquina de estados
+        bool earlyAlpha = false;                 // pixel shader: compensa calcular so a transparencia (oC0.w) antes e
+                                                 // descartar cedo no alpha test (a parte dela e pequena perto do resto)
         std::vector<std::string> warnings;       // sem repeticao
     };
 

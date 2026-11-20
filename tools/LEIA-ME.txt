@@ -1,4 +1,4 @@
-FAR CRY INSTINCTS PREDATOR RECOMP 0.1.4
+FAR CRY INSTINCTS PREDATOR RECOMP 1.0.0
 =======================================
 
 Versao para PC de Far Cry Instincts Predator (Xbox 360), feita por recompilacao estatica.
@@ -12,16 +12,20 @@ O QUE VOCE PRECISA
 - 8 GB de RAM (o jogo usa ~1,5 GB).
 - Placa de video com DirectX 12 (video integrado serve).
   O launcher mostra o que o seu PC tem e se atende esse minimo.
-- A SUA copia de Far Cry Instincts Predator para Xbox 360 (versao USA/Europa), com os arquivos
-  extraidos numa pasta. A pasta precisa ter o default.xex e os arquivos .dat do jogo.
-  Para extrair o ISO do disco use um programa como o extract-xiso.
+- A SUA copia de Far Cry Instincts Predator para Xbox 360 (versao USA/Europa): o arquivo .iso do
+  disco (o jogo roda direto dele, sem extrair) ou os arquivos extraidos numa pasta (a pasta precisa ter
+  o default.xex e os arquivos .dat do jogo).
 
 COMO JOGAR
 ----------
 1. Extraia este pacote numa pasta onde voce possa gravar (por exemplo Documentos\FarCryPredatorRecomp).
    Evite "Arquivos de Programas": o jogo grava saves e opcoes na propria pasta.
-2. Abra o PredatorGame.exe. Vai aparecer o launcher.
-3. Em "Pasta do jogo", clique em Procurar e escolha a pasta com o default.xex.
+2. Abra o PredatorGame.exe. Vai aparecer o launcher. O idioma (portugues ou ingles) se troca no canto de
+   cima, em "IDIOMA - LANGUAGE"; na primeira vez ele segue o idioma do Windows. Em portugues, os menus e
+   textos do jogo tambem ficam em portugues (a traducao PT-BR vem dentro do programa e e aplicada na hora,
+   sem mudar os arquivos da sua copia). Em ingles, o jogo fica com os textos originais do disco.
+3. Em "Pasta do jogo", clique em "Arquivo ISO..." e escolha o .iso do disco, ou em "Pasta..." e
+   escolha a pasta com o default.xex.
 4. Ajuste o video e os controles, se quiser, e clique em Jogar.
    Na primeira vez o programa prepara os arquivos e os graficos: pode demorar cerca de 1 minuto a mais.
    "Resolucao interna" 1,5x ou 2x deixa a imagem mais nitida, mas pesa bem mais na placa de video
@@ -75,6 +79,7 @@ CONTROLES
   segundo e sincronia vertical, as mesmas opcoes do launcher (o que mudar la fica gravado para o launcher).
   Tudo muda na hora (na resolucao interna e nas sombras a imagem pode piscar uma vez). Tamanho da janela e
   formato da imagem continuam no launcher.
+- No menu principal ha "SAIR DO JOGO", que fecha o jogo (o mesmo que fechar a janela).
 
 PERFIS
 ------
@@ -87,14 +92,16 @@ TECLAS DURANTE O JOGO
 F1          configurar controles (para trocar uma tecla: clique no campo e aperte a tecla, o botao
             do mouse ou gire a roda; clique direito no campo deixa sem tecla; se a tecla ja estava
             em outra acao, ela sai de la: aquele campo pisca vermelho e fica sem tecla)
-F2          soltar/prender o mouse na janela
+F2          opcoes de video (mudam na hora e ficam gravadas no opcoes.ini)
+F3          soltar/prender o mouse na janela
 + e -       sensibilidade do mouse
 Alt+Enter   tela cheia / janela
 F12         guardar um relatorio de problema (pasta "bugs") quando algo der errado
             (se a placa de video parar, o jogo cria essa pasta sozinho e mostra onde ela ficou)
 
 CODIGOS DE TRAPACA: no menu principal, MENU DE TRAPACAS abre uma caixinha para digitar
-o codigo com o teclado (Enter confirma, Esc ou B no controle cancela).
+o codigo com o teclado (Enter confirma, Esc ou B no controle cancela). Ou ligue as trapacas na
+aba TRAPACAS do launcher (cada uma tem uma descricao e vale sem digitar; tem tambem a "Invencivel").
 
 JOGAR EM REDE LOCAL (SYSTEM LINK)
 ---------------------------------
@@ -162,4 +169,4 @@ controles.ini      controles
 fcrecomp_log.txt   registro (mande junto quando relatar um problema)
 
                                    Autor: bugcoder00
-                                      Versao 0.1.4
+                                      Versao 1.0.0

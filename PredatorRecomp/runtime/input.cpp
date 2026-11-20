@@ -4,7 +4,7 @@
 // padrao o jogador 1 e o teclado e mouse, o jogador 2 o primeiro controle ligado (usuario 1 do Xbox: tela dividida) e
 // os jogadores 3 e 4 nenhum (usuarios 2 e 3: a tela dividida do jogo vai ate 4).
 // "juntar" faz o dispositivo do jogador 2 tambem controlar o jogador 1 (e entao nao ha jogador 2). Tudo fica salvo em build\controles.ini (a janela escreve o arquivo).
-// O mouse move a camera; o cursor fica preso e escondido na janela do jogo. F2 solta/prende o mouse, "+" e "-" mudam
+// O mouse move a camera; o cursor fica preso e escondido na janela do jogo. F3 solta/prende o mouse (F2 abre as opcoes de video), "+" e "-" mudam
 // a sensibilidade (aparece no titulo da janela).
 #include "idioma.h"
 #include "guest.h"
@@ -34,6 +34,10 @@ extern float g_cameraSpeedBoost;   // definido no fim do arquivo
 #pragma comment(lib, "xinput.lib")
 
 extern HWND GetGameWindow();
+
+#ifndef PREDATOR_EDITOR
+bool CenaDiretaApertarStart();   // cena_direta.cpp: FCRECOMP_CENA aperta START ate o jogo entrar com o perfil
+#endif
 
 namespace
 {
@@ -167,34 +171,35 @@ namespace
         WORD bit;               // botao
         int axis, dir;          // eixo: 0 LX, 1 LY, 2 RX, 3 RY; direcao -1/+1
         const char* defaults;   // teclas padrao
-        const char* help;
+        const char* help;       // explicacao em portugues e em ingles (TR2: a tabela e iniciada antes de o idioma ser lido)
+        const char* helpEn;
         std::vector<int> keys;
     };
     Action g_actions[] = {
-        { "A", Button, XINPUT_GAMEPAD_A, 0, 0, "ESPACO", TR("botão A", "A button") },
-        { "B", Button, XINPUT_GAMEPAD_B, 0, 0, "T", TR("botão B", "B button") },
-        { "X", Button, XINPUT_GAMEPAD_X, 0, 0, "R", TR("botão X", "X button") },
-        { "Y", Button, XINPUT_GAMEPAD_Y, 0, 0, "F", TR("botão Y", "Y button") },
-        { "LB", Button, XINPUT_GAMEPAD_LEFT_SHOULDER, 0, 0, "Q", TR("LB (botão de ombro esquerdo)", "LB (left bumper)") },
-        { "RB", Button, XINPUT_GAMEPAD_RIGHT_SHOULDER, 0, 0, "E", TR("RB (botão de ombro direito)", "RB (right bumper)") },
-        { "LT", LeftTrigger, 0, 0, 0, "MOUSE_DIR, CTRL_ESQ", TR("LT (gatilho esquerdo, mirar)", "LT (left trigger, aim)") },
-        { "RT", RightTrigger, 0, 0, 0, "MOUSE_ESQ", TR("RT (gatilho direito, atirar)", "RT (right trigger, shoot)") },
-        { "START", Button, XINPUT_GAMEPAD_START, 0, 0, "ENTER", TR("botão Start (pausa)", "Start button (pause)") },
-        { "BACK", Button, XINPUT_GAMEPAD_BACK, 0, 0, "ESC", TR("botão Back", "Back button") },
-        { "L3", Button, XINPUT_GAMEPAD_LEFT_THUMB, 0, 0, "SHIFT_ESQ", TR("L3 (clique no analógico esquerdo)", "L3 (left stick click)") },
-        { "R3", Button, XINPUT_GAMEPAD_RIGHT_THUMB, 0, 0, "C, MOUSE_MEIO", TR("R3 (clique no analógico direito)", "R3 (right stick click)") },
-        { "CIMA", Button, XINPUT_GAMEPAD_DPAD_UP, 0, 0, "1, SETA_CIMA", TR("direcional para cima", "D-pad up") },
-        { "BAIXO", Button, XINPUT_GAMEPAD_DPAD_DOWN, 0, 0, "2, SETA_BAIXO", TR("direcional para baixo", "D-pad down") },
-        { "ESQUERDA", Button, XINPUT_GAMEPAD_DPAD_LEFT, 0, 0, "3, SETA_ESQUERDA", TR("direcional para a esquerda", "D-pad left") },
-        { "DIREITA", Button, XINPUT_GAMEPAD_DPAD_RIGHT, 0, 0, "4, SETA_DIREITA", TR("direcional para a direita", "D-pad right") },
-        { "ANDAR_FRENTE", Axis, 0, 1, +1, "W", TR("analógico esquerdo para cima", "left stick up") },
-        { "ANDAR_TRAS", Axis, 0, 1, -1, "S", TR("analógico esquerdo para baixo", "left stick down") },
-        { "ANDAR_ESQUERDA", Axis, 0, 0, -1, "A", TR("analógico esquerdo para a esquerda", "left stick left") },
-        { "ANDAR_DIREITA", Axis, 0, 0, +1, "D", TR("analógico esquerdo para a direita", "left stick right") },
-        { "OLHAR_CIMA", Axis, 0, 3, +1, "SETA_CIMA", TR("analógico direito para cima (além do mouse)", "right stick up (besides the mouse)") },
-        { "OLHAR_BAIXO", Axis, 0, 3, -1, "SETA_BAIXO", TR("analógico direito para baixo", "right stick down") },
-        { "OLHAR_ESQUERDA", Axis, 0, 2, -1, "SETA_ESQUERDA", TR("analógico direito para a esquerda", "right stick left") },
-        { "OLHAR_DIREITA", Axis, 0, 2, +1, "SETA_DIREITA", TR("analógico direito para a direita", "right stick right") },
+        { "A", Button, XINPUT_GAMEPAD_A, 0, 0, "ESPACO", TR2("botão A", "A button") },
+        { "B", Button, XINPUT_GAMEPAD_B, 0, 0, "T", TR2("botão B", "B button") },
+        { "X", Button, XINPUT_GAMEPAD_X, 0, 0, "R", TR2("botão X", "X button") },
+        { "Y", Button, XINPUT_GAMEPAD_Y, 0, 0, "F", TR2("botão Y", "Y button") },
+        { "LB", Button, XINPUT_GAMEPAD_LEFT_SHOULDER, 0, 0, "Q", TR2("LB (botão de ombro esquerdo)", "LB (left bumper)") },
+        { "RB", Button, XINPUT_GAMEPAD_RIGHT_SHOULDER, 0, 0, "E", TR2("RB (botão de ombro direito)", "RB (right bumper)") },
+        { "LT", LeftTrigger, 0, 0, 0, "MOUSE_DIR, CTRL_ESQ", TR2("LT (gatilho esquerdo, mirar)", "LT (left trigger, aim)") },
+        { "RT", RightTrigger, 0, 0, 0, "MOUSE_ESQ", TR2("RT (gatilho direito, atirar)", "RT (right trigger, shoot)") },
+        { "START", Button, XINPUT_GAMEPAD_START, 0, 0, "ENTER", TR2("botão Start (pausa)", "Start button (pause)") },
+        { "BACK", Button, XINPUT_GAMEPAD_BACK, 0, 0, "ESC", TR2("botão Back", "Back button") },
+        { "L3", Button, XINPUT_GAMEPAD_LEFT_THUMB, 0, 0, "SHIFT_ESQ", TR2("L3 (clique no analógico esquerdo)", "L3 (left stick click)") },
+        { "R3", Button, XINPUT_GAMEPAD_RIGHT_THUMB, 0, 0, "C, MOUSE_MEIO", TR2("R3 (clique no analógico direito)", "R3 (right stick click)") },
+        { "CIMA", Button, XINPUT_GAMEPAD_DPAD_UP, 0, 0, "1, SETA_CIMA", TR2("direcional para cima", "D-pad up") },
+        { "BAIXO", Button, XINPUT_GAMEPAD_DPAD_DOWN, 0, 0, "2, SETA_BAIXO", TR2("direcional para baixo", "D-pad down") },
+        { "ESQUERDA", Button, XINPUT_GAMEPAD_DPAD_LEFT, 0, 0, "3, SETA_ESQUERDA", TR2("direcional para a esquerda", "D-pad left") },
+        { "DIREITA", Button, XINPUT_GAMEPAD_DPAD_RIGHT, 0, 0, "4, SETA_DIREITA", TR2("direcional para a direita", "D-pad right") },
+        { "ANDAR_FRENTE", Axis, 0, 1, +1, "W", TR2("analógico esquerdo para cima", "left stick up") },
+        { "ANDAR_TRAS", Axis, 0, 1, -1, "S", TR2("analógico esquerdo para baixo", "left stick down") },
+        { "ANDAR_ESQUERDA", Axis, 0, 0, -1, "A", TR2("analógico esquerdo para a esquerda", "left stick left") },
+        { "ANDAR_DIREITA", Axis, 0, 0, +1, "D", TR2("analógico esquerdo para a direita", "left stick right") },
+        { "OLHAR_CIMA", Axis, 0, 3, +1, "SETA_CIMA", TR2("analógico direito para cima (além do mouse)", "right stick up (besides the mouse)") },
+        { "OLHAR_BAIXO", Axis, 0, 3, -1, "SETA_BAIXO", TR2("analógico direito para baixo", "right stick down") },
+        { "OLHAR_ESQUERDA", Axis, 0, 2, -1, "SETA_ESQUERDA", TR2("analógico direito para a esquerda", "right stick left") },
+        { "OLHAR_DIREITA", Axis, 0, 2, +1, "SETA_DIREITA", TR2("analógico direito para a direita", "right stick right") },
     };
 
     // ------------------------------------------------------------ configuracao do mouse
@@ -206,9 +211,11 @@ namespace
         float deadZone = 0.24f;      // parte do analogico que o jogo ignora (o mouse comeca logo depois dela)
         float fullSpeed = 1500.0f;   // contagens do mouse por segundo que dao o analogico todo (com sensibilidade 1)
         float lookScale = 0.06f;     // mira direta: giro (unidade do jogo) por contagem do mouse com sensibilidade 1 (~0,07 grau)
-        int releaseKey = VK_F2, sensUp[2] = { VK_OEM_PLUS, VK_ADD }, sensDown[2] = { VK_OEM_MINUS, VK_SUBTRACT };
+        int releaseKey = VK_F3, sensUp[2] = { VK_OEM_PLUS, VK_ADD }, sensDown[2] = { VK_OEM_MINUS, VK_SUBTRACT };
     };
     MouseCfg g_mouse;
+    // controles genericos: botao 1, 2... -> botoes do Xbox (controles_hid.cpp)
+    std::string& GenericoBotoes() { static std::string s = HidBotoesPadrao(); return s; }
     // dispositivos dos jogadores 1 e 2 (ids de controles.h) e se o 2 tambem controla o 1
     std::string g_jogador[4] = { "teclado", "auto", "nenhum", "nenhum" };
     bool g_juntar = false;
@@ -311,6 +318,11 @@ namespace
           << TR("; 0 = resposta na hora; ate 0.9 = o giro segue o analogico devagar (mais suave)\n",
                 "; 0 = instant response; up to 0.9 = the turning follows the stick slowly (smoother)\n")
           << "suavizacao_camera = " << g_padSuave.load() << "\n"
+          << TR("; controles genericos (DirectInput/HID): o botao 1, 2, 3... do controle vira estes botoes do Xbox\n"
+                ";   (A B X Y LB RB LT RT BACK START LS RS CIMA BAIXO ESQUERDA DIREITA, - = nada; F1 mostra o botao apertado)\n",
+                "; generic controllers (generico_botoes, DirectInput/HID): button 1, 2, 3... of the controller becomes these Xbox buttons\n"
+                ";   (A B X Y LB RB LT RT BACK START LS RS CIMA=up BAIXO=down ESQUERDA=left DIREITA=right, - = nothing)\n")
+          << "generico_botoes = " << GenericoBotoes() << "\n"
              "\n[mouse]\n"
              "camera_com_mouse = " << (g_mouse.camera ? 1 : 0) << "\n"
              "sensibilidade = " << sens << "\n"
@@ -323,7 +335,7 @@ namespace
         for (auto& a : g_actions)
         {
             std::string line = std::string(a.name) + " = " + KeyListText(a.keys);
-            f << line << std::string(line.size() < 34 ? 34 - line.size() : 1, ' ') << "; " << a.help << "\n";
+            f << line << std::string(line.size() < 34 ? 34 - line.size() : 1, ' ') << "; " << TR(a.help, a.helpEn) << "\n";
         }
     }
 
@@ -371,11 +383,13 @@ namespace
             else if (key == "ZONA_MORTA_CAMERA") g_padZona = std::clamp((float)atof(val.c_str()), 0.0f, 0.5f);
             else if (key == "ACELERACAO_CAMERA") g_padAcel = std::clamp((float)atof(val.c_str()), 0.0f, 2.0f);
             else if (key == "SUAVIZACAO_CAMERA") g_padSuave = std::clamp((float)atof(val.c_str()), 0.0f, 0.9f);
+            else if (key == "GENERICO_BOTOES") { GenericoBotoes() = val; HidDefinirBotoes(val); }
             else if (key == "CAMERA_COM_MOUSE") g_mouse.camera = atoi(val.c_str()) != 0;
             else if (key == "SENSIBILIDADE") g_mouse.sens = std::clamp((float)atof(val.c_str()), 0.1f, 10.0f);
             else if (key == "INVERTER_Y") g_mouse.invertY = atoi(val.c_str()) != 0;
             else if (key == "ZONA_MORTA") g_mouse.deadZone = std::clamp((float)atof(val.c_str()), 0.0f, 0.9f);
-            else if (key == "SOLTAR_MOUSE") { auto k = ParseKeyList(val, "soltar_mouse"); g_mouse.releaseKey = k.empty() ? 0 : k[0]; }
+            else if (key == "SOLTAR_MOUSE")   // F2 (o padrao antigo) agora abre as opcoes de video: vira F3
+            { auto k = ParseKeyList(val, "soltar_mouse"); g_mouse.releaseKey = k.empty() ? 0 : k[0] == VK_F2 ? VK_F3 : k[0]; }
             else if (key == "SENSIBILIDADE_MAIS" || key == "SENSIBILIDADE_MENOS")
             {
                 auto k = ParseKeyList(val, key.c_str());
@@ -459,7 +473,7 @@ namespace
         }
         else
             ClipCursor(nullptr);
-        if (g_captured.exchange(on) != on) Log("[input] mouse %s", on ? "preso na janela (F2 solta)" : "solto");
+        if (g_captured.exchange(on) != on) Log("[input] mouse %s", on ? "preso na janela (F3 solta)" : "solto");
     }
 
     bool Key(int vk)
@@ -707,8 +721,13 @@ namespace
     POINT g_cursorGuardado{ -1, -1 };
     ULONGLONG g_desligouEm = 0;
 
+    bool Repetindo();
+    bool GravandoRoteiro();
+
     void PonteiroMenu(XINPUT_GAMEPAD& g, GuestCpu& ctx)
     {
+        // repeticao de roteiro: o mouse real nao mexe nos menus (a escolha gravada vem no controle gravado)
+        if (Repetindo()) { if (g_ponteiro) { g_ponteiro = false; Log("[input] ponteiro do menu desligado (repeticao)"); } return; }
         static const bool desligado = getenv("FCRECOMP_SEMPONTEIRO") != nullptr;
         static const bool plog = getenv("FCRECOMP_PONTEIROLOG") != nullptr;
         static uint64_t comLista = 0;
@@ -788,6 +807,21 @@ namespace
         const bool cliqueNovo = cliquePend, direitoNovo = direitoPend;
         cliquePend = direitoPend = false;
 
+        // clique numa seta do cabecalho de paginas (System Link "< OPCOES RAPIDAS >"): escolhe a opcao de linhas (a que
+        // troca a pagina) e aperta esquerda/direita; seta ^ / v de uma lista que rola (mapas, saves): escolhe a lista e
+        // aperta cima/baixo
+        static uint32_t setaLista = 0, setaObj = 0;
+        static WORD setaBotao = 0;
+        static int setaVezes = 0;
+        if (setaBotao)
+        {
+            const MenuLista* sl = nullptr;
+            for (auto& x : q.listas) if (x.lista == setaLista) sl = &x;
+            if (!sl || sl->escolhido < 0 || ++setaVezes > 30) { setaBotao = 0; return; }
+            if (sl->itens[sl->escolhido].obj == setaObj) { pulsar(setaBotao); setaBotao = 0; return; }
+            if (MenuMouseEscolher(ctx, setaLista, setaObj, -1) == 0) setaBotao = 0;
+            return;
+        }
         if (direitoNovo) { temAlvo = clicar = false; pulsar(XINPUT_GAMEPAD_B); return; }
         const ULONGLONG agora = GetTickCount64();
         if (agora < g_wheelUpUntil) { g_wheelUpUntil = 0; temAlvo = clicar = false; pulsar(XINPUT_GAMEPAD_DPAD_UP); return; }
@@ -806,10 +840,25 @@ namespace
                 }
                 else
                 {
-                    // rodape "(B) VOLTAR" / "(A) ESCOLHER": o botao desenhado no texto
+                    // rodape "(B) VOLTAR" / "(A) ESCOLHER" / "(X) CRIAR PARTIDA": o botao desenhado no texto
                     bool feito = false;
+                    for (auto& x : q.listas)
+                        for (auto& z : x.setas)
+                            if (!feito && Dentro(z, ux, uy))
+                            {
+                                setaLista = x.lista; setaObj = z.obj; setaVezes = 0; feito = true;
+                                setaBotao = z.botao == 0x25 ? XINPUT_GAMEPAD_DPAD_LEFT : z.botao == 0x27 ? XINPUT_GAMEPAD_DPAD_RIGHT :
+                                            z.botao == 0x26 ? XINPUT_GAMEPAD_DPAD_UP : XINPUT_GAMEPAD_DPAD_DOWN;
+                                temAlvo = clicar = false;
+                            }
+                    if (feito) return;
                     for (auto& r : q.rodape)
-                        if (Dentro(r, ux, uy)) { pulsar(r.botao == 0x03C0 ? XINPUT_GAMEPAD_B : XINPUT_GAMEPAD_A); feito = true; break; }
+                        if (Dentro(r, ux, uy))
+                        {
+                            pulsar(r.botao == 0x03C0 ? XINPUT_GAMEPAD_B : r.botao == 0x2202 ? XINPUT_GAMEPAD_X :
+                                   r.botao == 0x2206 ? XINPUT_GAMEPAD_Y : XINPUT_GAMEPAD_A);
+                            feito = true; break;
+                        }
                     if (!feito && q.listas.empty()) pulsar(XINPUT_GAMEPAD_A);   // tela sem lista ("aperte A")
                     return;
                 }
@@ -819,10 +868,15 @@ namespace
         if (!temAlvo) return;
         const MenuLista* l; int i;
         if (!AcharItem(q, alvoX, alvoY, l, i) || l->escolhido < 0) { temAlvo = clicar = false; return; }
-        if (i != l->escolhido && l->lista && l->itens[i].obj && tentativas == 0)
+        // gravando roteiro: anda com o direcional (os apertos entram no controle.txt; a escolha direta nao entraria e a
+        // repeticao abriria outra opcao do menu)
+        if (i != l->escolhido && l->lista && l->itens[i].obj && tentativas == 0 && !GravandoRoteiro())
         {
-            // menu do jogo: a opcao fica escolhida na hora (sem andar pelas do meio)
-            if (MenuMouseEscolher(ctx, l->lista, l->itens[i].obj, l->itens[i].sub))
+            // menu do jogo: a opcao fica escolhida na hora (sem andar pelas do meio); dentro da fase a thread dos menus
+            // escolhe no proximo desenho da lista (2 = pedida: espera)
+            const int r = MenuMouseEscolher(ctx, l->lista, l->itens[i].obj, l->itens[i].sub);
+            if (r == 2) return;
+            if (r == 1)
             {
                 if (clicar) pulsar(XINPUT_GAMEPAD_A);
                 temAlvo = clicar = false;
@@ -966,6 +1020,7 @@ bool InputWindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& resu
     {
         int vk = (int)wp;
         if (vk == VK_F1) { ControlesAbrirJanela(false); result = 0; return true; }   // janela de configuracao dos controles
+        if (vk == VK_F2) { VideoAbrirJanela(); result = 0; return true; }            // janela das opcoes de video (video_janela.cpp)
         if (vk && vk == g_mouse.releaseKey)
         {
             bool release = g_captured;
@@ -992,7 +1047,7 @@ std::string InputStatus()
         char b[64]; snprintf(b, sizeof(b), "  [sensibilidade do mouse %.2f]", g_sens.load());
         s += b;
     }
-    if (g_mouse.camera && !g_captured && Focused()) s += "  [mouse solto: clique na janela ou F2 para prender]";
+    if (g_mouse.camera && !g_captured && Focused()) s += "  [mouse solto: clique na janela ou F3 para prender]";
     return s + RoteiroStatus();
 }
 
@@ -1036,6 +1091,7 @@ namespace
     std::mutex g_recMutex;   // tudo abaixo (thread do jogo e F4)
     FILE* g_recFile = nullptr;
     enum class RecState { Off, Recording, Done } g_recState = RecState::Off;
+    bool GravandoRoteiro() { return g_recState == RecState::Recording; }
 
     // ------------------------------------------------------------ relogio
     std::atomic<uint64_t> g_trocas{ 0 };   // VdSwap pedidas pela CPU neste programa
@@ -1450,9 +1506,36 @@ void RoteiroIniciar()
 
 // tique atual do roteiro (na repeticao, o da gravacao; -1 sem roteiro): para registros de depuracao
 // predator_bridge.cpp (mftb): relogio que o jogo le; na repeticao de um roteiro anda a duracao gravada de cada tique
+// pular_cena.cpp: relogio do jogo acelerado (fator x) enquanto uma cena e adiantada. Estados imutaveis num anel (como
+// g_relEstados): relogio = inicio + extra + fator * (t - inicio)
+namespace
+{
+    struct EstadoAcel { uint64_t inicio; uint64_t extra; uint32_t fator; };
+    EstadoAcel g_acel[64] = { { 0, 0, 1 } };
+    std::atomic<uint32_t> g_acelIdx{ 0 };
+    std::mutex g_acelMutex;
+    uint64_t Acelerado(uint64_t t)
+    {
+        const EstadoAcel& e = g_acel[g_acelIdx.load(std::memory_order_acquire) & 63];
+        if (e.fator <= 1 || t < e.inicio) return t + e.extra;
+        return t + e.extra + (uint64_t)(e.fator - 1) * (t - e.inicio);
+    }
+}
+void RelogioAcelerar(uint32_t fator)
+{
+    std::lock_guard l(g_acelMutex);
+    const uint32_t i = g_acelIdx.load();
+    const EstadoAcel& e = g_acel[i & 63];
+    const uint64_t t = TscSemPausa(__rdtsc());
+    EstadoAcel n{ t, Acelerado(t) - t, std::max<uint32_t>(1, fator) };
+    if (n.fator == e.fator) return;
+    g_acel[(i + 1) & 63] = n;
+    g_acelIdx.store(i + 1, std::memory_order_release);
+}
+
 uint64_t RoteiroTimebase(uint64_t real)
 {
-    real = TscSemPausa(real);
+    real = Acelerado(TscSemPausa(real));
     if (!g_relLigado.load(std::memory_order_acquire)) return real;
     return RelogioVirtual(g_relEstados[g_relIdx.load(std::memory_order_acquire) & 63], real);
 }
@@ -1688,6 +1771,9 @@ KFUNC(XamInputGetState)
     {
         g_dbgLeituras++;
         AutoInput(g);
+#ifndef PREDATOR_EDITOR
+        if (CenaDiretaApertarStart()) g.wButtons |= XINPUT_GAMEPAD_START;   // cena_direta.cpp (FCRECOMP_CENA)
+#endif
         RoteiroLeitura(g);   // roteiro gravado: relogio; na repeticao substitui o controle real; na gravacao anota
     }
     if (user < 4) g_rStick[user] = (uint32_t)(uint16_t)g.sThumbRX << 16 | (uint16_t)g.sThumbRY;   // camera direta
@@ -1818,6 +1904,10 @@ GUEST_DECLARE_ORIGINAL(GUEST_SUB_MIRA);
 #ifndef PREDATOR_EDITOR
 GUEST_DECLARE_ORIGINAL(sub_821D3B78);
 #endif
+#ifndef PREDATOR_EDITOR
+void CenaDiretaFase(GuestCpu& ctx);    // cena_direta.cpp: FCRECOMP_CENA dispara o gatilho da cena na fase
+#endif
+void EditorLuaQuadro(GuestCpu& ctx);   // npc_editor.cpp: ao_vivo LUA=n roda build_game\lua_teste.lua (editor e jogo)
 // declaradas aqui (e nao dentro do gancho) para manter a ligacao C++ mesmo quando GUEST_FUNC e extern "C"
 void WatchAddWriteRange(uint32_t addr, uint32_t size);
 void WatchAddReadRange(uint32_t addr, uint32_t size);
@@ -1845,6 +1935,10 @@ GUEST_FUNC(GUEST_SUB_MIRA)
     uint32_t in = Gpr32(ctx, 4);
     float sx = (float)Fpr(ctx, 1), sy = (float)Fpr(ctx, 2);
     g_dbgMiras++;
+    EditorLuaQuadro(ctx);
+#ifndef PREDATOR_EDITOR
+    CenaDiretaFase(ctx);   // cena_direta.cpp (FCRECOMP_CENA)
+#endif
     // voltando de um trecho sem giro do jogador (editor de mapas): o mouse acumulado nesse meio tempo ja foi usado
     // como analogico, nao vira um giro de uma vez so
     if (GetTickCount64() - g_miraTick.exchange(GetTickCount64()) >= 250) { g_lookDX = 0; g_lookDY = 0; }
@@ -2044,7 +2138,7 @@ ControlesCfg InputConfigAtual()
     c.cameraDireta = g_padDireto; c.velocidadeCamera = g_padVel.load();
     c.velocidadeVertical = g_padVelV.load(); c.sensMirando = g_padMira.load();
     c.zonaMorta = g_padZona.load(); c.aceleracao = g_padAcel.load(); c.suavizacao = g_padSuave.load();
-    for (auto& a : g_actions) c.acoes.push_back({ a.name, a.help, a.keys });
+    for (auto& a : g_actions) c.acoes.push_back({ a.name, TR(a.help, a.helpEn), a.keys });
     return c;
 }
 
@@ -2054,7 +2148,7 @@ ControlesCfg InputConfigPadrao()
     c.jogador[0] = "teclado"; c.jogador[1] = "auto"; c.jogador[2] = c.jogador[3] = "nenhum"; c.juntar = false;
     MouseCfg m;
     c.mouseCamera = m.camera; c.inverterY = m.invertY; c.sensibilidade = m.sens;
-    for (auto& a : g_actions) c.acoes.push_back({ a.name, a.help, ParseKeyList(a.defaults, a.name) });
+    for (auto& a : g_actions) c.acoes.push_back({ a.name, TR(a.help, a.helpEn), ParseKeyList(a.defaults, a.name) });
     return c;
 }
 
@@ -2113,6 +2207,6 @@ std::vector<int> InputTodasTeclas()
     for (int c = '0'; c <= '9'; c++) v.push_back(c);
     for (auto& k : KEY_NAMES) v.push_back(k.vk);
     for (int k = 0; k < 10; k++) v.push_back(VK_NUMPAD0 + k);
-    for (int k = 0; k < 12; k++) if (VK_F1 + k != VK_F1 && VK_F1 + k != VK_F10 && VK_F1 + k != VK_F12) v.push_back(VK_F1 + k);   // F1 = esta janela, F10 = tecla de sistema do Windows, F12 = bug
+    for (int k = 0; k < 12; k++) if (VK_F1 + k != VK_F1 && VK_F1 + k != VK_F2 && VK_F1 + k != VK_F10 && VK_F1 + k != VK_F12) v.push_back(VK_F1 + k);   // F1 = esta janela, F2 = opcoes de video, F10 = tecla de sistema do Windows, F12 = bug
     return v;
 }

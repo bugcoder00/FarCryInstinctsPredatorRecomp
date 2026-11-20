@@ -34,6 +34,8 @@
 #include <windows.h>
 
 #include "menu_mouse.h"
+std::string AoVivoValor(const char* chave);   // input.cpp: build_gameo_vivo.txt
+void MenuVideoLista(GuestCpu& ctx, uint32_t lista);   // menu_video.cpp (so o jogo)
 #include "icones_teclado.h"
 
 // funcoes do menu em cada programa (o editor de mapas tem o mesmo codigo em outros enderecos)
@@ -74,6 +76,7 @@ namespace
     uint64_t g_trocas = 0;
     std::atomic<uint64_t> g_edicaoUltima{ 0 };   // editor: ultimo quadro com o painel do modo de edicao (ferramenta + RT)
     std::atomic<DWORD> g_threadMenu{ 0 };    // thread do jogo que cuida dos menus (MM_SINCRONIZA; o desenho e em outra)
+    std::atomic<uint64_t> g_uiLogTroca{ 0 };  // ao_vivo.txt UILOG=n (n novo a cada vez): anota os textos e listas deste quadro
     std::map<uint32_t, int> g_desloc;        // opcao com linhas de valores: indice da 1a linha da tela (rolagem)
     struct ValPos { int tx, ty, ordem; };
     std::map<uint32_t, ValPos> g_valoresPos; // opcao com linhas desenhada neste quadro: translacao do pai, ordem de desenho
@@ -138,6 +141,25 @@ namespace
                         std::find(alcancadas.begin(), alcancadas.end(), v) == alcancadas.end())
                         alcancadas.push_back(v);
                 }
+            // cabecalho de paginas: opcao com linhas de valores que pode ser escolhida mas o direcional nao alcanca, com uma
+            // linha de texto so ("< OPCOES RAPIDAS >"); esquerda/direita na opcao de linhas alcancada troca a pagina
+            std::vector<MenuItem> cabecalhos;
+            for (uint32_t it : ops)
+            {
+                const uint32_t linha = R32(it + 8);
+                if (!(R8(it + 76) & 0x40) || !MM_VALORES_END || R32(R32(linha) + 8) != MM_VALORES_END) continue;
+                if (std::find(alcancadas.begin(), alcancadas.end(), it) != alcancadas.end()) continue;
+                MenuItem m{ 1 << 20, 1 << 20, -(1 << 20), -(1 << 20), 0, it };
+                bool tem = false, umaLinha = true;
+                for (auto& t : ts)
+                    if (t.linha == linha)
+                    {
+                        if (tem && (std::min(t.y1, m.y1) - std::max(t.y0, m.y0)) * 2 <= std::min(t.y1 - t.y0, m.y1 - m.y0)) umaLinha = false;
+                        m.x0 = std::min(m.x0, t.x0); m.y0 = std::min(m.y0, t.y0); m.x1 = std::max(m.x1, t.x1); m.y1 = std::max(m.y1, t.y1);
+                        tem = true;
+                    }
+                if (tem && umaLinha) cabecalhos.push_back(m);
+            }
             for (uint32_t it : ops)
             {
                 if (!(R8(it + 76) & 0x40)) continue;
@@ -152,8 +174,10 @@ namespace
                     {
                         if (t.linha != linha) continue;
                         Lin* achou = nullptr;
+                        // mesma linha da tela = alturas que se cobrem em mais da metade (as linhas do "CRIAR PARTIDA" do
+                        // System Link se encostam: 120-142, 141-163...)
                         for (auto& x : lins)
-                            if (t.y0 < x.m.y1 && t.y1 > x.m.y0) { achou = &x; break; }
+                            if ((std::min(t.y1, x.m.y1) - std::max(t.y0, x.m.y0)) * 2 > std::min(t.y1 - t.y0, x.m.y1 - x.m.y0)) { achou = &x; break; }
                         if (!achou)
                         {
                             lins.push_back({ { t.x0, t.y0, t.x1, t.y1, 0, it }, t.cor, t.x0 });
@@ -189,6 +213,38 @@ namespace
                         continue;
                     }
                     std::sort(lins.begin(), lins.end(), [](const Lin& x, const Lin& y) { return x.m.y0 < y.m.y0; });
+                    // entradas de varias linhas da tela (CONTINUAR JOGO: "NOME ..." e "TIPO ... DIFICULDADE ..." em cada
+                    // save, 2 px entre as duas e 10 px ate o save seguinte): as linhas coladas viram uma entrada so. Antes
+                    // cada linha da tela era uma entrada: o NOME do 1o save escolhia o 1o, o TIPO dele escolhia o 2o e o
+                    // nome do 2o save ficava fora de tudo (o clique nao carregava o save)
+                    int linhasPorEntrada = 1;
+                    if (lins.size() >= 3)
+                    {
+                        int gmin = 1 << 20, gmax = -(1 << 20);
+                        for (size_t v = 1; v < lins.size(); v++)
+                        {
+                            const int g = lins[v].m.y0 - lins[v - 1].m.y1;
+                            gmin = std::min(gmin, g); gmax = std::max(gmax, g);
+                        }
+                        if (gmax - gmin >= 4)
+                        {
+                            const int lim = (gmin + gmax) / 2;
+                            std::vector<Lin> grupos;
+                            std::vector<int> tamanhos;
+                            for (size_t v = 0; v < lins.size(); v++)
+                            {
+                                if (v == 0 || lins[v].m.y0 - lins[v - 1].m.y1 > lim) { grupos.push_back(lins[v]); tamanhos.push_back(1); continue; }
+                                Lin& gr = grupos.back();
+                                gr.m.x0 = std::min(gr.m.x0, lins[v].m.x0); gr.m.x1 = std::max(gr.m.x1, lins[v].m.x1);
+                                gr.m.y1 = std::max(gr.m.y1, lins[v].m.y1);
+                                tamanhos.back()++;
+                            }
+                            // so se todas as entradas tiverem o mesmo numero de linhas (a ultima pode estar cortada)
+                            bool iguais = tamanhos[0] > 1;
+                            for (size_t v = 0; v + 1 < tamanhos.size(); v++) iguais = iguais && tamanhos[v] == tamanhos[0];
+                            if (iguais) { linhasPorEntrada = tamanhos[0]; lins.swap(grupos); }
+                        }
+                    }
                     const int n = (int)((R32(linha + 140) - R32(linha + 136)) / 64), cur = (int16_t)R16(linha + 196);
                     if (it == atual)
                     {
@@ -196,8 +252,14 @@ namespace
                         std::map<uint32_t, int> conta;
                         for (auto& x : lins) conta[x.corEsq]++;
                         if (lins.size() >= 2 && conta.size() == 2)
+                        {
+                            // 2 entradas: as duas cores aparecem 1 vez; a escolhida e a mais clara (branca; as outras cinza)
+                            auto brilho = [](uint32_t c) { return ((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255); };
+                            int achada = -1;
                             for (size_t v = 0; v < lins.size(); v++)
-                                if (conta[lins[v].corEsq] == 1) g_desloc[linha] = cur - (int)v;
+                                if (conta[lins[v].corEsq] == 1 && (achada < 0 || brilho(lins[v].corEsq) > brilho(lins[achada].corEsq))) achada = (int)v;
+                            if (achada >= 0) g_desloc[linha] = cur - achada;
+                        }
                     }
                     const int desloc = g_desloc.count(linha) ? g_desloc[linha] : 0;
                     for (size_t v = 0; v < lins.size(); v++)
@@ -207,6 +269,26 @@ namespace
                         if (it == atual && sub == cur) a.l.escolhido = (int)a.l.itens.size();
                         lins[v].m.sub = sub;
                         a.l.itens.push_back(lins[v].m);
+                    }
+                    // lista que rola (mais linhas que as da tela: o jogo desenha as setas ^ e v em cima e embaixo):
+                    // faixas logo acima da primeira e logo abaixo da ultima linha = direcional cima / baixo nela
+                    if (n > (int)lins.size())
+                    {
+                        int x0 = lins[0].m.x0, x1 = lins[0].m.x1;
+                        for (auto& x : lins) { x0 = std::min(x0, x.m.x0); x1 = std::max(x1, x.m.x1); }
+                        const int alto = std::max(12, lins[0].m.y1 - lins[0].m.y0);
+                        a.l.setas.push_back({ x0, lins.front().m.y0 - alto, x1, lins.front().m.y0, 0x26, it });
+                        a.l.setas.push_back({ x0, lins.back().m.y1, x1, lins.back().m.y1 + alto, 0x28, it });
+                    }
+                    // entradas de varias linhas (saves): o jogo desenha as setas ^ e v a esquerda da lista, ^ ao lado da
+                    // 1a entrada e v abaixo da ultima (CONTINUAR JOGO: x ~60, y ~165 e ~309 com as entradas em 153-263)
+                    if (linhasPorEntrada > 1 && n >= 2)
+                    {
+                        int x0 = lins[0].m.x0;
+                        for (auto& x : lins) x0 = std::min(x0, x.m.x0);
+                        const int alto = lins[0].m.y1 - lins[0].m.y0;
+                        a.l.setas.push_back({ x0 - 45, lins.front().m.y0 - alto / 2, x0, lins.front().m.y1, 0x26, it });
+                        a.l.setas.push_back({ x0 - 45, lins.back().m.y1, x0, lins.back().m.y1 + alto * 2, 0x28, it });
                     }
                     continue;
                 }
@@ -223,6 +305,17 @@ namespace
                 if (it == atual) a.l.escolhido = (int)a.l.itens.size();
                 a.l.itens.push_back(m);
             }
+            // setas do cabecalho: metade esquerda / direita (com folga para as setas desenhadas dos lados), ligadas a opcao
+            // de linhas alcancada (a que troca a pagina com esquerda/direita)
+            uint32_t comLinhas = 0;
+            for (auto& m : a.l.itens) if (m.sub >= 0) { comLinhas = m.obj; break; }
+            if (comLinhas)
+                for (auto& c : cabecalhos)
+                {
+                    const int meio = (c.x0 + c.x1) / 2, y0 = c.y0 - 6, y1 = c.y1 + 6;
+                    a.l.setas.push_back({ c.x0 - 40, y0, meio, y1, 0x25, comLinhas });
+                    a.l.setas.push_back({ meio, y0, c.x1 + 40, y1, 0x27, comLinhas });
+                }
             if (a.l.escolhido >= 0) achadas.push_back(a);
         }
         // janela por cima de um menu (ex.: "OK / CANCELAR" sobre o menu de pausa): fica so o desenhado por ultimo
@@ -277,9 +370,10 @@ namespace
     MenuQuadro Montar(const std::vector<Texto>& ts, const std::vector<uint32_t>& listas)
     {
         MenuQuadro q;
-        // rodape "(A) ESCOLHER" / "(B) VOLTAR": o 1o caractere e o desenho do botao na fonte do jogo (Omega = A, pi = B)
+        // rodape "(A) ESCOLHER" / "(B) VOLTAR" / "(X) CRIAR PARTIDA" (System Link): o 1o caractere e o desenho do botao na
+        // fonte do jogo (Omega = A, pi = B, 0x2202 = X, 0x2206 = Y)
         for (auto& t : ts)
-            if (t.c0 == 0x03A9 || t.c0 == 0x03C0)
+            if (t.c0 == 0x03A9 || t.c0 == 0x03C0 || t.c0 == 0x2202 || t.c0 == 0x2206)
             {
 #ifdef PREDATOR_EDITOR
                 // no editor o rodape da direita e preso na borda direita da tela de 853 (o texto vem em 640x480)
@@ -319,6 +413,8 @@ void MenuMouseTroca()
                     d += b;
                 }
         }
+        for (auto& l : g_pronto.listas)
+            for (auto& z : l.setas) { char b[80]; snprintf(b, sizeof(b), " seta %02X %d,%d-%d,%d", z.botao, z.x0, z.y0, z.x1, z.y1); d += b; }
         for (auto& r : g_pronto.rodape) { char b[64]; snprintf(b, sizeof(b), " rodape %04X %d,%d", r.botao, r.x0, r.y0); d += b; }
         static std::string antes;
         if (d != antes)
@@ -330,6 +426,8 @@ void MenuMouseTroca()
     g_atual.clear();
     g_listasAtual.clear();
     g_valoresPos.clear();
+    static std::string uiAntes;
+    if (const std::string v = AoVivoValor("UILOG"); !v.empty() && v != uiAntes) { uiAntes = v; g_uiLogTroca = g_trocas + 1; }
 }
 
 bool MenuMouseEditorEdicao()
@@ -345,14 +443,12 @@ MenuQuadro MenuMouseQuadro()
     return g_pronto;
 }
 
-bool MenuMouseEscolher(GuestCpu& ctx, uint32_t L, uint32_t alvo, int sub)
+namespace
+{
+// escolha feita na thread que cuida dos menus (MM_SINCRONIZA)
+bool Escolher(GuestCpu& ctx, uint32_t L, uint32_t alvo, int sub)
 {
     static const bool plog = getenv("FCRECOMP_PONTEIROLOG") != nullptr;
-    if (!MM_SINCRONIZA || GetCurrentThreadId() != g_threadMenu.load())   // so na thread que cuida dos menus
-    {
-        if (plog) Log("[ponteiro] escolher direto: thread %lu, a dos menus e %lu", GetCurrentThreadId(), g_threadMenu.load());
-        return false;
-    }
     const std::vector<uint32_t> ops = OpcoesDaLista(L);
     if (std::find(ops.begin(), ops.end(), alvo) == ops.end() || !(R8(alvo + 76) & 0x40)) return false;
     const uint32_t atual = R32(L + 32);
@@ -409,6 +505,53 @@ bool MenuMouseEscolher(GuestCpu& ctx, uint32_t L, uint32_t alvo, int sub)
     return ok;
 }
 
+// Dentro da fase o controle e lido numa thread e os menus andam em outra (a que desenha a lista): a escolha fica pedida
+// aqui e a thread dos menus faz no desenho da lista (MM_LISTA), antes de desenhar.
+struct Pedido { uint32_t lista = 0, alvo = 0; int sub = -1; int estado = 0; ULONGLONG desde = 0; };   // estado: 2 pedido, 1 feito, 0 falhou
+std::mutex g_pedMx;
+Pedido g_pedido;
+bool g_temPedido = false;
+
+void FazerPedido(GuestCpu& ctx, uint32_t L)
+{
+    Pedido p;
+    {
+        std::lock_guard lk(g_pedMx);
+        if (!g_temPedido || g_pedido.estado != 2 || g_pedido.lista != L) return;
+        p = g_pedido;
+    }
+    const bool ok = Escolher(ctx, p.lista, p.alvo, p.sub);
+    std::lock_guard lk(g_pedMx);
+    if (g_temPedido && g_pedido.lista == p.lista && g_pedido.alvo == p.alvo && g_pedido.sub == p.sub) g_pedido.estado = ok ? 1 : 0;
+}
+}
+
+int MenuMouseEscolher(GuestCpu& ctx, uint32_t L, uint32_t alvo, int sub)
+{
+    static const bool plog = getenv("FCRECOMP_PONTEIROLOG") != nullptr;
+    if (!MM_SINCRONIZA) return 0;
+    if (GetCurrentThreadId() == g_threadMenu.load())   // a propria thread que cuida dos menus: na hora
+    {
+        std::lock_guard lk(g_pedMx);
+        g_temPedido = false;
+        return Escolher(ctx, L, alvo, sub) ? 1 : 0;
+    }
+    std::lock_guard lk(g_pedMx);
+    const ULONGLONG agora = GetTickCount64();
+    if (g_temPedido && g_pedido.lista == L && g_pedido.alvo == alvo && g_pedido.sub == sub)
+    {
+        if (g_pedido.estado != 2) { g_temPedido = false; return g_pedido.estado; }
+        if (agora - g_pedido.desde < 500) return 2;
+        g_temPedido = false;   // a lista nao foi desenhada pela thread dos menus: desiste (o direcional anda)
+        if (plog) Log("[ponteiro] pedido de escolha %08X na lista %08X nao foi feito pela thread dos menus (%lu)", alvo, L, g_threadMenu.load());
+        return 0;
+    }
+    g_pedido = { L, alvo, sub, 2, agora };
+    g_temPedido = true;
+    if (plog) Log("[ponteiro] escolha %08X/%d pedida a thread dos menus (%lu; leitura na %lu)", alvo, sub, g_threadMenu.load(), GetCurrentThreadId());
+    return 2;
+}
+
 // Cursor (0..1 na area da janela) -> coordenadas da interface do jogo (640x480)
 void MenuMouseParaJogo(float nx, float ny, float cw, float ch, float& ux, float& uy)
 {
@@ -444,6 +587,25 @@ GUEST_FUNC(MM_LISTA)
         std::lock_guard lk(g_mx);
         if (g_listasAtual.size() < 64) g_listasAtual.push_back(Gpr32(ctx, 3));
     }
+    if (g_uiLogTroca.load() && g_uiLogTroca.load() == g_trocas)
+    {
+        const uint32_t L = Gpr32(ctx, 3);
+        std::string d;
+        for (uint32_t it : OpcoesDaLista(L))
+        {
+            const uint32_t ln = R32(it + 8);
+            char b[96];
+            snprintf(b, sizeof(b), " [%08X linha %08X vt %08X f8 %08X marcas %02X viz %08X/%08X/%08X/%08X]", it, ln, R32(ln), R32(R32(ln) + 8),
+                     R8(it + 76), R32(it + 60), R32(it + 64), R32(it + 68), R32(it + 72));
+            d += b;
+        }
+        Log("[ui] lista %08X atual %08X:%s", L, R32(L + 32), d.c_str());
+    }
+    // escolha pedida pelo mouse (MenuMouseEscolher, leitura do controle em outra thread)
+    if (GetCurrentThreadId() == g_threadMenu.load()) FazerPedido(ctx, Gpr32(ctx, 3));
+#ifndef PREDATOR_EDITOR
+    MenuVideoLista(ctx, Gpr32(ctx, 3));   // menu_video.cpp: pausa > OPCOES ganha OPCOES DE VIDEO
+#endif
     GUEST_ORIGINAL(MM_LISTA)(ctx, base);
 }
 
@@ -461,6 +623,8 @@ GUEST_FUNC(MM_LINHA)
 GUEST_DECLARE_ORIGINAL(MM_SINC);
 GUEST_FUNC(MM_SINC)
 {
+    static const bool plog = getenv("FCRECOMP_PONTEIROLOG") != nullptr;
+    if (plog && g_threadMenu.load() != GetCurrentThreadId()) Log("[ponteiro] thread dos menus: %lu", GetCurrentThreadId());
     g_threadMenu = GetCurrentThreadId();
     GUEST_ORIGINAL(MM_SINC)(ctx, base);
 }
@@ -615,6 +779,41 @@ GUEST_DECLARE_ORIGINAL(MM_NO);
 GUEST_FUNC(MM_NO)
 {
     static std::vector<uint32_t> nos;                 // nos sendo desenhados (o de dentro por ultimo)
+#ifndef PREDATOR_EDITOR   // no editor o no (sub_8239ABD0) tem outro formato
+    // Vigia do crash de 15/11 (24_shantyday, so atirando): a lista de filhos de um no (no+16 -> [+4, +8)) tinha um
+    // endereco invalido (0x284) e o desenho do filho lia 0x28C e fechava o jogo. Aqui cada no confere a lista antes
+    // de desenhar: se achar lixo, anota no log/diagnostico quem e o no e pula o desenho dele (o jogo continua).
+    {
+        const uint32_t no0 = Gpr32(ctx, 3);
+        auto valido = [](uint32_t a) { return a >= 0x40000000 && a < 0xF0000000; };
+        bool ruim = !valido(no0);
+        uint32_t c = 0, ini = 0, fim = 0, lixo = 0, pos = 0;
+        if (!ruim && (c = R32(no0 + 16)) != 0)
+        {
+            ini = R32(c + 4); fim = R32(c + 8);
+            if (!valido(c) || !valido(ini) || !valido(fim) || fim < ini || fim - ini > 4096 * 4) ruim = true, lixo = c;
+            else
+                for (uint32_t p = ini; p < fim; p += 4)
+                    if (const uint32_t f = R32(p); !valido(f)) { ruim = true; lixo = f; pos = (p - ini) / 4; break; }
+        }
+        if (ruim)
+        {
+            static int avisos = 0;
+            if (avisos++ < 20)
+            {
+                const uint32_t ob = valido(no0) ? R32(no0 + 8) : 0;
+                Log("[vigia] no do HUD/menu com lista de filhos estragada: no=%08X obj=%08X vt=%08X lista=%08X [%08X-%08X] "
+                    "filho %u = %08X (lr=%08X, quadro %llu)", no0, ob, valido(ob) ? R32(ob) : 0, c, ini, fim, pos, lixo,
+                    (uint32_t)ctx.lr, (unsigned long long)diag::CurrentFrame());
+                if (valido(ini) && fim >= ini && fim - ini <= 64 * 4)
+                    for (uint32_t p = ini; p < fim; p += 4) Log("[vigia]   filho %u: %08X", (p - ini) / 4, R32(p));
+            }
+            diag::Note(diag::Crash, "no do HUD/menu com lista de filhos estragada (desenho pulado em vez de fechar o jogo)",
+                       "veja [vigia] no fcrecomp_log.txt");
+            return;
+        }
+    }
+#endif
     const uint32_t no = Gpr32(ctx, 3), obj = R32(no + 8), vt = R32(obj);
 #ifdef PREDATOR_EDITOR
     // editor: com o desenho do teclado, as linhas (vt 8201BD10) somem e cada rotulo ganha as teclas
@@ -683,10 +882,11 @@ GUEST_FUNC(MM_TEXTO)
 #endif
         }
         static const char* env = getenv("FCRECOMP_UILOG");
-        if (env)
+        const bool aoVivo = g_uiLogTroca.load() && g_uiLogTroca.load() == g_trocas;
+        if (env || aoVivo)
         {
-            const uint64_t q = strtoull(env, nullptr, 10), f = diag::CurrentFrame();
-            if (f == q || f == q + 7)
+            const uint64_t q = env ? strtoull(env, nullptr, 10) : 0, f = diag::CurrentFrame();
+            if (aoVivo || f == q || f == q + 7)
                 Log("[ui] q%llu w=%08X '%s' c0=%04X ret %d,%d-%d,%d cor %08X linha %08X", (unsigned long long)f, w, Texto16(sp, 20).c_str(),
                     t.c0, t.x0, t.y0, t.x1, t.y1, t.cor, t.linha);
         }

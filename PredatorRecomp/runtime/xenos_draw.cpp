@@ -22,6 +22,7 @@ static const bool g_statsOn = std::getenv("FCRECOMP_STATS") != nullptr;   // est
 #include "opcoes.h"
 #include "render.h"
 #include "guest.h"
+#include "iso.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <atomic>
@@ -35,6 +36,7 @@ static const bool g_statsOn = std::getenv("FCRECOMP_STATS") != nullptr;   // est
 #include <memory>
 #include <immintrin.h>
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 extern std::filesystem::path g_gameDir;   // fs.cpp: pasta do jogo
@@ -50,23 +52,31 @@ namespace xdraw
 {
     void ColetarReceita(const char* arquivo, const char* linha);   // item 39 (perto do AplicarReceita)
     void ColetarShader(uint64_t hash, bool pixel, const std::vector<uint32_t>& code);
+    void ColetarUso(uint64_t hash, bool pixel);
+    uint32_t RecFaseGeracao();
     namespace
     {
         constexpr uint32_t CANVAS = 2048;   // tamanho de cada superficie da "EDRAM"
-        // Resolucao interna (opcao "escala" do launcher), em meios: 2 = 1x, 3 = 1,5x, 4 = 2x, 6 = 3x (4K). A EDRAM, os resolves e a
+        // Resolucao interna (opcao "escala" do launcher), em QUARTOS (o nome "meios" ficou de quando era em meios):
+        // 4 = 1x, 6 = 1,5x, 8 = 2x, 12 = 3x (4K); 3 = 0,75x e 2 = 0,5x (so com o FSR, que amplia de volta). A EDRAM, os resolves e a
         // imagem final ficam maiores, mas tudo o que o jogo ve continua no tamanho dele (registradores, tamanho das
         // texturas, coordenadas dos desenhos e dos resolves, posicao do pixel nos shaders): as coordenadas so viram
         // pixels de verdade (Px) na hora de mandar para a placa. Texturas do jogo e dados lidos pela CPU nao mudam.
-        uint32_t g_meios = 2;
-        uint32_t Px(uint32_t v) { return v * g_meios / 2; }
-        // Mapa de sombras com escala propria (opcao "sombras": 2 = como a tela, 4 = 2x, 6 = 3x; nunca menos que a tela).
+        uint32_t g_meios = 4;
+        // abaixo de 1x arredonda para cima: tamanho nao vira 0 (reducoes de 1x1, 8x8 da imagem)
+        uint32_t Pm(uint32_t v, uint32_t meios) { return meios < 4 ? (v * meios + 3) / 4 : v * meios / 4; }
+        uint32_t Px(uint32_t v) { return Pm(v, g_meios); }
+        // Mapa de sombras com escala propria (opcao "sombras": 4 = 1x, 8 = 2x, 12 = 3x; nunca menos que 1x nem que a tela).
         // As superficies dele sao as unicas com pitch maior que a tela (1360 para o mapa de 1344x1344).
-        uint32_t g_sombraMeios = 2;
-        uint32_t Pm(uint32_t v, uint32_t meios) { return v * meios / 2; }
-        LONG PmL(LONG v, uint32_t meios) { return v * (LONG)meios / 2; }
+        uint32_t g_sombraMeios = 4;
+        LONG PmL(LONG v, uint32_t meios) { return v * (LONG)meios / 4; }
         uint32_t SurfaceMeios(uint32_t key)
         {
             uint32_t pitch = (key >> 12) & 0x3FFF;
+            // abaixo de 1x (FSR) as superficies pequenas (pitch ate 320: simulacao das ondas da agua 256x256, que na EDRAM
+            // tem pitch 320 por ser em blocos de 80; reducoes do brilho) ficam em 1x: sao dados que o jogo le em passos de 1/256; encolhidas para 192x192 as leituras caiam
+            // entre os pixels e a agua ficava com listras (bug 75). O reflexo (512x512) encolhe: em 1x custava ~3 ms.
+            if (g_meios < 4 && pitch && pitch <= 320) return 4;
             return pitch > 1280 && pitch <= 2560 ? std::max(g_meios, g_sombraMeios) : g_meios;
         }
         constexpr DXGI_FORMAT COLOR_FORMAT = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -120,6 +130,10 @@ namespace xdraw
         bool g_fullResolveThisFrame = false;  // o quadro atual leu um resolve de tela inteira
         bool g_usedPersistThisFrame = false;
         uint32_t g_drawsThisFrame = 0;
+        uint32_t g_aguaQuadro = 0;   // desenhos da superficie do mar neste quadro (FCRECOMP_AGUALOG)
+        uint32_t g_fundoMarQuadro = 0;
+        uint32_t g_vsDesdeResolve = 0, g_reflexoDesenhos = 0, g_reflexoPedras = 0;   // desenhos no reflexo 512 (e da pedra B53D)
+        uint32_t g_reflexoQuadro = 0, g_refracaoQuadro = 0;   // copias 512x512 (reflexo) e para 10FF4000 (fundo) neste quadro
 
         // Antisserrilhado (opcao do launcher) so na cena 3D. Na imagem final ele borrava o texto do HUD, dos menus (o de
         // pausa desenha a cena inteira por baixo) e os videos. O jogo resolve a cena pronta no endereco da tela e depois
@@ -131,6 +145,18 @@ namespace xdraw
         ComPtr<ID3D12Resource> g_aaScene;   // copia antisserrilhada (RGBA16F, tamanho da textura da cena)
         D3D12_RESOURCE_STATES g_aaSceneState = D3D12_RESOURCE_STATE_RENDER_TARGET;
         int g_aaLevel = -1;
+        // oclusao de ambiente (opcao "ao"): copia da cena escurecida nos cantos e o termo de AO (R8)
+        ComPtr<ID3D12Resource> g_aoScene, g_aoTex;
+        D3D12_RESOURCE_STATES g_aoSceneState = D3D12_RESOURCE_STATE_RENDER_TARGET, g_aoTexState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        // profundidade da cena 3D: a superficie de profundidade larga (>= 1280) com mais desenhos no quadro
+        uint64_t g_profCenaQuadro = ~0ull;
+        uint32_t g_profCenaChave = 0, g_profCenaMax = 0;
+        std::unordered_map<uint32_t, uint32_t> g_profConta;
+        // profundidades copiadas (resolve) como textura quadrada neste quadro: mapas de sombra (672x672, 1344x1344 nas
+        // cutscenes; superficie de largura 720/1360 >= 640). Nao sao a cena: nos quadros em que tinham mais desenhos que
+        // ela, o AO usava a sombra (artefatos andando com a camera, sombras piscando nas cutscenes - 21_dunea, bar)
+        uint64_t g_profSombraQuadro = ~0ull;
+        std::unordered_set<uint32_t> g_profSombra;
 
         bool MemoryIsZero(const uint8_t* p, size_t n)
         {
@@ -230,8 +256,21 @@ namespace xdraw
             D3D12_RECT clearRect{};   // so o retangulo do resolve que pediu a limpeza (uniao, se houver varios)
             uint32_t width = 0;   // largura (a pitch da superficie), no tamanho do jogo; a placa tem Pm(width, meios)
             uint32_t height = CANVAS;   // altura no tamanho do jogo (veja SurfaceHeight); a placa tem Pm(height, meios)
-            uint32_t meios = 2;   // escala desta superficie (SurfaceMeios)
+            uint32_t meios = 4;   // escala desta superficie (SurfaceMeios, em quartos)
+            uint32_t amostras = 1;   // MSAA (opcao msaa): amostras por pixel; so as superficies da tela (SurfaceAmostras)
+            std::shared_ptr<Surface> lida;   // MSAA: copia com 1 amostra por pixel para quem le a superficie (Lida)
+            ComPtr<ID3D12DescriptorHeap> heapProprio;   // DSV da copia lida (profundidade)
         };
+
+        // MSAA (opcao "msaa": 0 desligado, 1 = 2x, 2 = 4x, 3 = 8x). Vale so nas superficies da tela (SuperficieDaTela: cena 3D,
+        // HUD, menus): mapa de sombras, reflexo, reducoes de brilho etc. ficam
+        // com 1 amostra (sao lidas como textura, MSAA nelas so gastaria memoria). O jogo continua vendo tudo igual: quem
+        // le uma superficie da tela (resolve, oclusao de ambiente, capturas) le a copia resolvida dela (Lida).
+        uint32_t g_msaa = 1;   // amostras em uso agora (troca entre quadros, TrocarEscala)
+        // largura 1280: menus, carregamento e HUD; largura 800: a superficie das faixas do predicated tiling, onde o jogo
+        // desenha a cena 3D (o resolve da tela 006DA000 sai dela; "[draw] resolve da tela" no registro mostra de onde)
+        bool SuperficieDaTela(uint32_t key) { const uint32_t p = (key >> 12) & 0x3FFF; return p == 1280 || p == 800; }
+        uint32_t SurfaceAmostras(uint32_t key) { return SuperficieDaTela(key) ? g_msaa : 1; }
 
         // Largura de cada superficie = a pitch dela (bits 12-25 da chave), arredondada para 64. Antes todas tinham
         // 2048x2048: 11 de cor (32 MB cada) + 6 de profundidade passavam de 450 MB e estouravam os 512 MB de memoria de
@@ -242,7 +281,7 @@ namespace xdraw
             uint32_t pitch = (key >> 12) & 0x3FFF;
             // escala maior que 1x: superficies estreitas (reducoes da imagem, pitch < 640) ficam com a propria largura.
             // Na 1x continuam com 1280 como sempre foi.
-            if (SurfaceMeios(key) > 2 && pitch && pitch < 640 && !full) return (pitch + 63) & ~63u;
+            if (SurfaceMeios(key) > 4 && pitch && pitch < 640 && !full) return (pitch + 63) & ~63u;
             // pelo menos 1280: a superficie de uma faixa (pitch 800) recebe a tela inteira quando as faixas sao juntadas
             return pitch && !full ? std::min<uint32_t>(CANVAS, std::max<uint32_t>(1280, (pitch + 63) & ~63u)) : CANVAS;
         }
@@ -252,7 +291,7 @@ namespace xdraw
         uint32_t SurfaceHeight(uint32_t key)
         {
             static const bool full = getenv("FCRECOMP_SUPCHEIA") != nullptr;
-            if (SurfaceMeios(key) == 2 || full) return CANVAS;
+            if (SurfaceMeios(key) <= 4 || full) return CANVAS;
             uint32_t base = key & 0xFFF, pitch = (key >> 12) & 0x3FFF;
             uint32_t tilesPerRow = std::max(1u, (pitch + 79) / 80);
             uint32_t rows = base < 2048 ? (2048 - base) / tilesPerRow * 16 : 0;
@@ -301,9 +340,10 @@ namespace xdraw
                 s.meios = SurfaceMeios(base);
                 s.width = SurfaceWidth(base);
                 s.height = SurfaceHeight(base);
-                td.Width = Pm(s.width, s.meios); td.Height = Pm(s.height, s.meios); td.DepthOrArraySize = 1; td.MipLevels = 1; td.SampleDesc.Count = 1;
+                s.amostras = SurfaceAmostras(base);
+                td.Width = Pm(s.width, s.meios); td.Height = Pm(s.height, s.meios); td.DepthOrArraySize = 1; td.MipLevels = 1; td.SampleDesc.Count = s.amostras;
                 td.Format = s.format;
-                g_surfaceBytes += (uint64_t)td.Width * td.Height * (s.format == COLOR_FORMAT ? 8 : 4);
+                g_surfaceBytes += (uint64_t)td.Width * td.Height * (s.format == COLOR_FORMAT ? 8 : 4) * s.amostras;
                 td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
                 D3D12_CLEAR_VALUE cv{ s.format, { 0, 0, 0, 0 } };
                 { double tRt = perf::Now(); g_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&s.res)); perf::g_rtCreateMs += perf::Now() - tRt; }
@@ -333,9 +373,10 @@ namespace xdraw
                 s.meios = SurfaceMeios(base);
                 s.width = SurfaceWidth(base);
                 s.height = SurfaceHeight(base);
-                td.Width = Pm(s.width, s.meios); td.Height = Pm(s.height, s.meios); td.DepthOrArraySize = 1; td.MipLevels = 1; td.SampleDesc.Count = 1;
+                s.amostras = SurfaceAmostras(base);
+                td.Width = Pm(s.width, s.meios); td.Height = Pm(s.height, s.meios); td.DepthOrArraySize = 1; td.MipLevels = 1; td.SampleDesc.Count = s.amostras;
                 td.Format = DS_TYPELESS;
-                g_surfaceBytes += (uint64_t)td.Width * td.Height * 4;
+                g_surfaceBytes += (uint64_t)td.Width * td.Height * 4 * s.amostras;
                 td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
                 D3D12_CLEAR_VALUE dv{ DS_FORMAT };
                 dv.DepthStencil = { 1.0f, 0 };
@@ -347,7 +388,7 @@ namespace xdraw
                 if (g_dsvUsed > MAX_SURFACES) Log("[draw] AVISO: mais de %u superficies de profundidade (vagas reaproveitadas)", MAX_SURFACES);
                 D3D12_DEPTH_STENCIL_VIEW_DESC dd{};
                 dd.Format = DS_FORMAT;
-                dd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+                dd.ViewDimension = s.amostras > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D;
                 g_dev->CreateDepthStencilView(s.res.Get(), &dd, s.view);
                 Log("[draw] superficie de profundidade na EDRAM base %03X largura %u (%ux%u na placa; superficies: %llu MB)", base & 0xFFF, (base >> 12) & 0x3FFF,
                     (unsigned)td.Width, td.Height, (unsigned long long)(g_surfaceBytes >> 20));
@@ -356,6 +397,61 @@ namespace xdraw
                 if (((base >> 12) & 0x3FFF) <= 2560) { char l[32]; snprintf(l, sizeof(l), "d %08X", base); warm::AppendLine("superficies.txt", l); }
             }
             return s;
+        }
+
+        // Foto da profundidade para as caixas de consulta da segunda faixa (bug_70/72): cada caixa da faixa 2 e contada com
+        // a profundidade do MESMO ponto do quadro em que a caixa correspondente da faixa 1 foi contada. As caixas das
+        // lampadas vem antes da limpeza do meio do quadro (precisam do cenario: senao a luz atravessa o piso) e a do mar
+        // vem depois (precisa da profundidade limpa: senao o ceu aparece no mar). Com uma profundidade so, um dos dois
+        // sempre saia errado.
+        struct FotoProf
+        {
+            ComPtr<ID3D12Resource> res;
+            D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+            D3D12_CPU_DESCRIPTOR_HANDLE view{};
+        };
+        constexpr int FOTOS = 4;
+        FotoProf g_fotos[FOTOS];
+        ComPtr<ID3D12DescriptorHeap> g_fotoDsvHeap;
+        bool g_profSuja = true;        // algum desenho mudou a profundidade depois da ultima foto
+        int g_fotoAtual = -1;
+        uint32_t g_fotoChave = 0;
+        uint64_t g_fotoQuadro = ~0ull;
+        std::unordered_map<uint32_t, std::pair<uint64_t, int>> g_fotoDoBloco;   // bloco da faixa 1 -> (quadro, foto)
+
+        bool TirarFoto(ID3D12GraphicsCommandList* list, Surface& src, int i)
+        {
+            auto& f = g_fotos[i];
+            const D3D12_RESOURCE_DESC d = src.res->GetDesc();
+            if (!g_fotoDsvHeap)
+            {
+                D3D12_DESCRIPTOR_HEAP_DESC h{ D3D12_DESCRIPTOR_HEAP_TYPE_DSV, FOTOS };
+                g_dev->CreateDescriptorHeap(&h, IID_PPV_ARGS(&g_fotoDsvHeap));
+                if (!g_fotoDsvHeap) return false;
+            }
+            if (!f.res || f.res->GetDesc().Width != d.Width || f.res->GetDesc().Height != d.Height || f.res->GetDesc().SampleDesc.Count != d.SampleDesc.Count)
+            {
+                if (f.res) ReleaseLater(std::move(f.res));
+                f.res.Reset();
+                D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
+                D3D12_CLEAR_VALUE dv{ DS_FORMAT };
+                dv.DepthStencil = { 1.0f, 0 };
+                g_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COPY_DEST, &dv, IID_PPV_ARGS(&f.res));
+                if (!f.res) return false;
+                f.state = D3D12_RESOURCE_STATE_COPY_DEST;
+                f.view = g_fotoDsvHeap->GetCPUDescriptorHandleForHeapStart();
+                f.view.ptr += (SIZE_T)i * g_dsvSize;
+                D3D12_DEPTH_STENCIL_VIEW_DESC dd{};
+                dd.Format = DS_FORMAT;
+                dd.ViewDimension = d.SampleDesc.Count > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D;
+                g_dev->CreateDepthStencilView(f.res.Get(), &dd, f.view);
+            }
+            Transition(list, src.res.Get(), src.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Transition(list, f.res.Get(), f.state, D3D12_RESOURCE_STATE_COPY_DEST);
+            list->CopyResource(f.res.Get(), src.res.Get());
+            Transition(list, src.res.Get(), src.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            Transition(list, f.res.Get(), f.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            return true;
         }
 
         // ------------------------------------------------------------ compilacao em segundo plano
@@ -537,6 +633,7 @@ namespace xdraw
         struct CompiledShader
         {
             std::vector<uint8_t> dxil; std::vector<uint32_t> fetchSlots; uint32_t textureMask = 0, cubeMask = 0; bool ok = false;
+            mutable uint32_t usoFase = 0;   // coleta da receita: ultima fase (RecFaseGeracao) em que foi anotado
             std::shared_ptr<ShaderJob> job; std::string warnings;   // compilacao em segundo plano em andamento
         };
         std::unordered_map<uint64_t, CompiledShader> g_shaderCache;
@@ -695,6 +792,88 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
         ComPtr<ID3D12RootSignature> g_depthCopyRoot;
         ComPtr<ID3D12PipelineState> g_depthCopyPso;
         ComPtr<ID3D12PipelineState> g_colorCopyPso;   // resolve de superficie RGBA8 para textura RGBA16F (um desenho)
+        // MSAA: profundidade com varias amostras -> profundidade com 1 (a amostra 0; a media nao serve para profundidade)
+        const char* DEPTH_RESOLVE_HLSL = R"(
+Texture2DMS<float> depthTex : register(t0);
+cbuffer Off : register(b0) { int2 offset; };
+float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy) + offset, 0); }
+)";
+        ComPtr<ID3D12PipelineState> g_depthResolvePso;
+
+        // Superficie para ler (MSAA): com 1 amostra devolve ela mesma; com mais, atualiza e devolve a copia resolvida
+        // (cor: media das amostras, ResolveSubresourceRegion so no retangulo r; profundidade: amostra 0 com um desenho).
+        // r em pixels da placa (vazio = a superficie inteira).
+        Surface& Lida(ID3D12GraphicsCommandList* list, Surface& s, bool prof, D3D12_RECT r = {})
+        {
+            if (s.amostras <= 1 || !s.res) return s;
+            if (!s.lida) s.lida = std::make_shared<Surface>();
+            Surface& l = *s.lida;
+            const D3D12_RESOURCE_DESC sd = s.res->GetDesc();
+            if (!l.res)
+            {
+                D3D12_RESOURCE_DESC td = sd;
+                td.SampleDesc = { 1, 0 };
+                td.Alignment = 0;   // a superficie MSAA usa 4 MB; com 1 amostra o alinhamento e o padrao
+                D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
+                D3D12_CLEAR_VALUE cv{ prof ? DS_FORMAT : s.format };
+                if (prof) cv.DepthStencil = { 1.0f, 0 };
+                l.state = prof ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RESOLVE_DEST;
+                if (FAILED(g_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, l.state, &cv, IID_PPV_ARGS(&l.res)))) { l.res.Reset(); return s; }
+                g_surfaceBytes += (uint64_t)td.Width * td.Height * (prof ? 4 : s.format == COLOR_FORMAT ? 8 : 4);
+                if (prof)
+                {
+                    D3D12_DESCRIPTOR_HEAP_DESC h{ D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1 };
+                    if (FAILED(g_dev->CreateDescriptorHeap(&h, IID_PPV_ARGS(&l.heapProprio)))) { l.res.Reset(); return s; }
+                    l.view = l.heapProprio->GetCPUDescriptorHandleForHeapStart();
+                    D3D12_DEPTH_STENCIL_VIEW_DESC dd{};
+                    dd.Format = DS_FORMAT;
+                    dd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+                    g_dev->CreateDepthStencilView(l.res.Get(), &dd, l.view);
+                }
+            }
+            l.format = s.format; l.width = s.width; l.height = s.height; l.meios = s.meios; l.clearValue = s.clearValue; l.amostras = 1;
+            const LONG W = (LONG)sd.Width, H = (LONG)sd.Height;
+            if (r.right <= r.left || r.bottom <= r.top) r = { 0, 0, W, H };
+            r = { std::clamp(r.left, 0L, W), std::clamp(r.top, 0L, H), std::clamp(r.right, 0L, W), std::clamp(r.bottom, 0L, H) };
+            if (r.right <= r.left || r.bottom <= r.top) return l;
+            if (!prof)
+            {
+                Transition(list, s.res.Get(), s.state, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+                Transition(list, l.res.Get(), l.state, D3D12_RESOURCE_STATE_RESOLVE_DEST);
+                ComPtr<ID3D12GraphicsCommandList1> l1;
+                if (SUCCEEDED(list->QueryInterface(IID_PPV_ARGS(&l1))))
+                    l1->ResolveSubresourceRegion(l.res.Get(), 0, (UINT)r.left, (UINT)r.top, s.res.Get(), 0, &r, s.format, D3D12_RESOLVE_MODE_AVERAGE);
+                else
+                    list->ResolveSubresource(l.res.Get(), 0, s.res.Get(), 0, s.format);
+            }
+            else if (g_depthResolvePso)
+            {
+                Transition(list, s.res.Get(), s.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                Transition(list, l.res.Get(), l.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                auto srv = render::AllocSrv(1);
+                D3D12_SHADER_RESOURCE_VIEW_DESC v{};
+                v.Format = DS_SRV_FORMAT;
+                v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+                v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                g_dev->CreateShaderResourceView(s.res.Get(), &v, srv.cpu);
+                list->OMSetRenderTargets(0, nullptr, FALSE, &l.view);
+                D3D12_VIEWPORT vp{ 0, 0, (float)W, (float)H, 0, 1 };
+                list->RSSetViewports(1, &vp);
+                list->RSSetScissorRects(1, &r);
+                list->SetGraphicsRootSignature(g_depthCopyRoot.Get());
+                ID3D12DescriptorHeap* heaps[] = { render::SrvHeap(), render::SamplerHeap() };
+                list->SetDescriptorHeaps(2, heaps);
+                list->SetGraphicsRootDescriptorTable(0, srv.gpu);
+                const int32_t off[2] = { 0, 0 };
+                list->SetGraphicsRoot32BitConstants(1, 2, off, 0);
+                list->SetPipelineState(g_depthResolvePso.Get());
+                list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                ForgetBoundState();   // o proximo desenho do jogo reaplica tudo
+                list->DrawInstanced(3, 1, 0, 0);
+                Transition(list, s.res.Get(), s.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            }
+            return l;
+        }
         ComPtr<ID3D12RootSignature> g_misturaRoot;    // mistura de duas imagens (mascara do escuro, perto do PresentFrame)
         ComPtr<ID3D12PipelineState> g_misturaPso;
 
@@ -706,6 +885,8 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             uint32_t rtFormat = COLOR_FORMAT;   // DXGI_FORMAT da superficie de cor
             uint32_t biasScale = 0, biasOffset = 0;   // deslocamento de poligono (bits do float de PA_SU_POLY_OFFSET_*)
             uint32_t cull = 0;   // PA_SU_SC_MODE_CNTL bits 0-2: corta frente (1) / tras (2); bit 2 (4) = horario e a frente
+            uint32_t amostras = 1;   // MSAA da superficie de cor (e da profundidade junto)
+            uint32_t preenche = 0;   // completa 8 bytes: a comparacao e o hash leem a estrutura inteira (memcmp)
             bool operator==(const PsoKey& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
         };
         struct PsoKeyHash
@@ -843,7 +1024,7 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             d.PrimitiveTopologyType = (D3D12_PRIMITIVE_TOPOLOGY_TYPE)key.topology;
             d.NumRenderTargets = 1;
             d.RTVFormats[0] = (DXGI_FORMAT)key.rtFormat;
-            d.SampleDesc.Count = 1;
+            d.SampleDesc.Count = std::max(1u, key.amostras);
 
             auto j = std::make_shared<PsoJob>();
             j->d = d;
@@ -944,7 +1125,7 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             DXGI_FORMAT format;
             uint32_t width, height;
             uint64_t seq = 0;   // ordem do resolve (o mais novo cobre os antigos na montagem do quadro)
-            uint32_t meios = 2; // escala da superficie de origem (a textura tem Pm(width, meios) x Pm(height, meios))
+            uint32_t meios = 4; // escala da superficie de origem (a textura tem Pm(width, meios) x Pm(height, meios))
             D3D12_RESOURCE_STATES state;
             uint64_t frame = 0; // quadro do ultimo resolve neste endereco
             uint32_t ox = 0, oy = 0; // bug 33/34: posicao do retangulo dentro do bloco de 8x8 do destino (x0 & 7, y0 & 7)
@@ -1653,6 +1834,13 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
         // ---- captura de depuracao: FCRECOMP_GPUSHOT=N salva cada resolve de cor do quadro N em build/resolve_N_i_ENDERECO.bmp
         struct PendingShot { ComPtr<ID3D12Resource> readback; uint32_t dest, index, w, h, rowPitch; std::string dir; bool rgba8 = false; std::string nome; bool prof = false; };
         std::vector<PendingShot> g_pendingShots;
+        // Rajada de fotos (tecla ' no jogo, diag::OnKey -> IniciarRajada): os proximos RAJADA quadros apresentados vao
+        // para diag\rajada_<quadro>\. As copias ficam na placa ate o fim da rajada (sem esperar a placa a cada quadro,
+        // para o jogo nao ficar mais lento justamente no momento do defeito) e sao gravadas de uma vez no final.
+        constexpr int RAJADA = 60;
+        std::atomic<bool> g_rajadaPedida{ false };
+        int g_rajadaRestante = 0, g_rajadaFeitas = 0;
+        std::string g_rajadaDir;
 
         // copia uma regiao de um recurso de cor (RGBA16F) para leitura na CPU; salvo no fim do quadro
         void CaptureRegion(ID3D12GraphicsCommandList* list, ID3D12Resource* res, D3D12_RESOURCE_STATES& state,
@@ -1745,6 +1933,7 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
         struct PendingWriteback
         {
             ComPtr<ID3D12Resource> readback; uint32_t dest, w, h, rowPitch, destInfo, pitch; uint64_t serial;
+            uint32_t meios = 4;             // escala da superficie de origem (abaixo de 1x as estreitas ficam em 1x)
             std::vector<uint32_t> donos;    // numero da reserva de cada pagina de 4 KB do destino no momento do resolve
             std::vector<uint8_t> antes;     // bytes do destino no momento do resolve (ou do ultimo retorno nosso)
         };
@@ -1778,14 +1967,15 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
         void QueueWriteback(ID3D12GraphicsCommandList* list, ResolvedTexture& tex, uint32_t dest, uint32_t destInfo, uint32_t destPitch)
         {
             static const bool off = getenv("FCRECOMP_SEMRETORNO") != nullptr;
-            if (off || tex.format != COLOR_FORMAT || tex.width * tex.height >= 64 * 64 || tex.meios != g_meios) return;
-            PendingWriteback wb{ nullptr, dest, tex.width, tex.height, (Px(tex.width) * 8 + 255) & ~255u, destInfo, destPitch & 0x3FFF, render::FrameSerial() };
+            if (off || tex.format != COLOR_FORMAT || tex.width * tex.height >= 64 * 64 || (tex.meios != g_meios && tex.meios != 4)) return;
+            PendingWriteback wb{ nullptr, dest, tex.width, tex.height, (Pm(tex.width, tex.meios) * 8 + 255) & ~255u, destInfo, destPitch & 0x3FFF, render::FrameSerial() };
+            wb.meios = tex.meios;
             wb.pitch = std::max<uint32_t>(32, (wb.pitch + 31) & ~31u);
             wb.donos = DonosDoRetorno(wb);
             WritebackBytes(wb, wb.antes);
             // tamanho que a copia precisa (linhas alinhadas a 256 bytes, na resolucao interna); minimo 128 KB, que e o
             // que cabia antes (128x128 RGBA16F = 64x64 do jogo na escala 2x). Na 3x (4K) um 64x64 do jogo ja passa disso.
-            const UINT64 precisa = std::max<UINT64>(128 * 1024, (UINT64)wb.rowPitch * Px(wb.h));
+            const UINT64 precisa = std::max<UINT64>(128 * 1024, (UINT64)wb.rowPitch * Pm(wb.h, wb.meios));
             while (!g_writebackPool.empty() && !wb.readback)
             {
                 ComPtr<ID3D12Resource> r = std::move(g_writebackPool.back());
@@ -1806,7 +1996,7 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             }
             Transition(list, tex.res.Get(), tex.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
             D3D12_TEXTURE_COPY_LOCATION dst{ wb.readback.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
-            dst.PlacedFootprint.Footprint = { COLOR_FORMAT, Px(wb.w), Px(wb.h), 1, wb.rowPitch };
+            dst.PlacedFootprint.Footprint = { COLOR_FORMAT, Pm(wb.w, wb.meios), Pm(wb.h, wb.meios), 1, wb.rowPitch };
             D3D12_TEXTURE_COPY_LOCATION src{ tex.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
             list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
             Transition(list, tex.res.Get(), tex.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -1842,14 +2032,14 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
                 int32_t expBias = ((int32_t)(wb.destInfo << 10)) >> 26;   // bits 16-21 com sinal
                 float scale = std::ldexp(1.0f, expBias);
                 uint8_t* p = nullptr;
-                D3D12_RANGE r{ 0, (SIZE_T)wb.rowPitch * Px(wb.h) };
+                D3D12_RANGE r{ 0, (SIZE_T)wb.rowPitch * Pm(wb.h, wb.meios) };
                 if (format == 6 && SUCCEEDED(wb.readback->Map(0, &r, (void**)&p)))   // 8_8_8_8 (o unico usado por enquanto)
                 {
                     uint32_t pitch = wb.pitch;
                     for (uint32_t y = 0; y < wb.h; y++)
                         for (uint32_t x = 0; x < wb.w; x++)
                         {
-                            const uint16_t* px = (const uint16_t*)(p + (size_t)Px(y) * wb.rowPitch + Px(x) * 8);
+                            const uint16_t* px = (const uint16_t*)(p + (size_t)Pm(y, wb.meios) * wb.rowPitch + Pm(x, wb.meios) * 8);
                             uint8_t c[4];
                             for (int k = 0; k < 4; k++)
                                 c[k] = (uint8_t)std::lround(std::clamp(HalfToFloat(px[k]) * scale, 0.0f, 1.0f) * 255.0f);
@@ -1904,7 +2094,8 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
 
         void SavePendingShots()
         {
-            if (g_pendingShots.empty()) return;
+            if (g_pendingShots.empty() || g_rajadaRestante > 0) return;
+            if (g_rajadaFeitas) { Log("[rajada] gravando %d fotos em %s", g_rajadaFeitas, g_rajadaDir.c_str()); g_rajadaFeitas = 0; }
             render::WaitIdle();
             for (auto& s : g_pendingShots)
             {
@@ -2281,19 +2472,9 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
     // Chama fn(pixel, hash, microcode) para cada shader diferente do shaders.dat da pasta do jogo (formato acima)
     bool LerShadersDoJogo(const std::function<void(bool, uint64_t, std::vector<uint32_t>&)>& fn)
     {
-        auto ler = [](const std::filesystem::path& p) {
-            std::vector<uint8_t> v;
-            if (FILE* f = _wfopen(p.c_str(), L"rb"))
-            {
-                fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-                if (n > 0) { v.resize(n); if (fread(v.data(), 1, n, f) != (size_t)n) v.clear(); }
-                fclose(f);
-            }
-            return v;
-        };
         auto be32 = [](const uint8_t* b) { return (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 8 | b[3]; };
-        auto fat = ler(g_gameDir / "shaders.fat");
-        auto dat = ler(g_gameDir / "shaders.dat");
+        auto fat = JogoLer(g_gameDir / "shaders.fat");   // da pasta ou da ISO (iso.h)
+        auto dat = JogoLer(g_gameDir / "shaders.dat");
         if (fat.size() < 8 || memcmp(fat.data(), "DAT2", 4) != 0 || dat.empty()) { Log("[preparo] shaders.fat/.dat em formato inesperado: pulando"); return false; }
         uint32_t n;
         memcpy(&n, fat.data() + 4, 4);
@@ -2327,7 +2508,8 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
     {
         if (getenv("FCRECOMP_SEMPREPARO") || getenv("FCRECOMP_NOSHADERCACHE")) return;
         std::error_code ec;
-        const auto tamDat = std::filesystem::file_size(g_gameDir / "shaders.dat", ec);
+        uint64_t tamDat = 0;
+        if (!JogoTamanho(g_gameDir / "shaders.dat", tamDat)) ec = std::make_error_code(std::errc::no_such_file_or_directory);
         if (ec) { Log("[preparo] shaders.dat nao encontrado na pasta do jogo: pulando"); return; }
 
         // marcador: tamanho do shaders.dat + data do exe (exe novo pode traduzir diferente: confere de novo; o que nao
@@ -2403,11 +2585,14 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
         if (getenv("FCRECOMP_SEMRECEITA") || !warm::Enabled()) return;
         wchar_t exe[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        const auto caminho = std::filesystem::path(exe).parent_path() / TR("receita_shaders.txt", "shader_recipe.txt");
+        // um pacote so para os dois idiomas leva receita_shaders.txt; shader_recipe.txt = o nome do pacote em ingles antigo
+        auto caminho = std::filesystem::path(exe).parent_path() / "receita_shaders.txt";
         std::error_code ec;
+        if (!std::filesystem::exists(caminho, ec)) caminho = caminho.parent_path() / "shader_recipe.txt";
         const auto tamReceita = std::filesystem::file_size(caminho, ec);
         if (ec) return;
-        const auto tamDat = std::filesystem::file_size(g_gameDir / "shaders.dat", ec);
+        uint64_t tamDat = 0;
+        if (!JogoTamanho(g_gameDir / "shaders.dat", tamDat)) ec = std::make_error_code(std::errc::no_such_file_or_directory);
         if (ec) return;
         char marca[96];
         snprintf(marca, sizeof(marca), "%llu %llu", (unsigned long long)tamReceita, (unsigned long long)tamDat);
@@ -2504,6 +2689,9 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
         FILE* g_recArq = nullptr;
         std::unordered_map<uint64_t, std::vector<std::pair<uint64_t, std::vector<uint32_t>>>> g_recMoldes;   // (pixel, tamanho)
         std::unordered_set<std::string> g_recVistos;
+        std::string g_recFase;   // fase atual (pasta levels\NOME aberta por ultimo; vazio = menu)
+        std::atomic<uint32_t> g_recFaseGeracao{ 1 };   // muda a cada fase nova (cada shader e anotado uma vez por fase)
+        std::unordered_set<std::string> g_recUsos;   // "fase|tipo|hash" ja anotados
         uint32_t g_recShaders = 0, g_recSemMolde = 0, g_recOutros = 0;
         bool RecLigada() { static const bool on = getenv("FCRECOMP_COLETARRECEITA") != nullptr; return on; }
         void RecEscrever(const std::string& l)
@@ -2533,6 +2721,30 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             RecEscrever(l);
             g_recShaders++;
         }
+    }
+    // Fase de cada coleta: "# fase NOME" quando o jogo abre arquivos de outra pasta levels\NOME (fs.cpp) e, abaixo,
+    // "# usa p|v HASH" para cada shader que a fase usa (mesmo os que o warmcache ja tinha). Sao comentarios: o jogo
+    // ignora ao aplicar a receita; o gerar_receita.py juntar mostra por fase quantos shaders foram vistos.
+    bool ColetaReceitaLigada() { return RecLigada(); }
+    uint32_t RecFaseGeracao() { return RecLigada() ? g_recFaseGeracao.load() : 0; }
+    void ColetarFase(const std::string& fase)
+    {
+        if (!RecLigada()) return;
+        std::lock_guard lock(g_recMutex);
+        if (fase == g_recFase) return;
+        g_recFase = fase;
+        g_recFaseGeracao++;
+        if (g_recArq) { fprintf(g_recArq, "# fase %s\n", fase.c_str()); fflush(g_recArq); }
+        Log("[receita] coletando na fase %s", fase.c_str());
+    }
+    void ColetarUso(uint64_t hash, bool pixel)
+    {
+        if (!RecLigada()) return;
+        std::lock_guard lock(g_recMutex);
+        if (!g_recArq) return;
+        char b[48];
+        snprintf(b, sizeof(b), "%c %016llX", pixel ? 'p' : 'v', (unsigned long long)hash);
+        if (g_recUsos.insert(g_recFase + "|" + b).second) { fprintf(g_recArq, "# usa %s\n", b); fflush(g_recArq); }
     }
     void ColetarShader(uint64_t hash, bool pixel, const std::vector<uint32_t>& code)
     {
@@ -2564,12 +2776,13 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
         SYSTEMTIME st;
         GetLocalTime(&st);
         char nome[96];
-        snprintf(nome, sizeof(nome), TR("receitas/receita_", "recipes/recipe_") "%04u-%02u-%02u_%02u-%02u-%02u.txt", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        snprintf(nome, sizeof(nome), TR("receitas/receita_%04u-%02u-%02u_%02u-%02u-%02u.txt", "recipes/recipe_%04u-%02u-%02u_%02u-%02u-%02u.txt"), st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
         g_recArq = fopen(nome, "w");
         if (!g_recArq) { Log("[receita] nao consegui criar %s", nome); return; }
         fprintf(g_recArq, "%s\n%s\n", TR("RECEITA 1", "RECIPE 1"), TR("# coletada jogando (coletar_receita.bat); junte com: python tools\\gerar_receita.py juntar <pasta receitas>",
                                                 "# recorded while playing (collect_recipe.bat); numbers only, no game data. Send the \"recipes\" folder to the developer."));
         // o que o warmcache ja tem (de execucoes anteriores)
+        fprintf(g_recArq, "# fase (warmcache de antes)\n");
         std::error_code ec;
         for (auto& e : std::filesystem::directory_iterator("warmcache", ec))
         {
@@ -2597,6 +2810,7 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
                 }
                 fclose(f);
             }
+        fprintf(g_recArq, "# fase %s\n", g_recFase.empty() ? "(menu)" : g_recFase.c_str());
         fflush(g_recArq);
         Log("[receita] coletando em %s: %u shaders e %u pipelines/superficies do warmcache (%u shaders sem molde no shaders.dat ficam de fora) em %.0f ms",
             nome, g_recShaders, g_recOutros, g_recSemMolde, perf::Now() - t0);
@@ -2675,14 +2889,15 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
                     SetWarmStatus(TR("preparando a placa de video ", "preparing the graphics card ") + std::to_string(done) + "/" + std::to_string(total));
                 }
                 unsigned long long vsh, psh; unsigned alpha, topo, blend, depth, mask, rect, hasDepth, rtFormat = COLOR_FORMAT, bs = 0, bo = 0;
-                unsigned cull = 0;
-                if (sscanf(line, "%llX %llX %u %u %X %X %X %u %u %u %X %X %X", &vsh, &psh, &alpha, &topo, &blend, &depth, &mask, &rect, &hasDepth, &rtFormat, &bs, &bo, &cull) < 9) continue;
+                unsigned cull = 0, tela = 0;
+                if (sscanf(line, "%llX %llX %u %u %X %X %X %u %u %u %X %X %X %u", &vsh, &psh, &alpha, &topo, &blend, &depth, &mask, &rect, &hasDepth, &rtFormat, &bs, &bo, &cull, &tela) < 9) continue;
                 ShaderRef vr{ vsh, load(vsh, false) }, pr{ psh, load(psh, true) };
                 if (!vr.code || !pr.code) { failed++; continue; }
                 const auto& vs = GetShader(vr, false);
                 const auto& ps = GetShader(pr, true, alpha != 0);
                 if (vs.dxil.empty() || ps.dxil.empty()) { failed++; continue; }
                 PsoKey key{ vsh, psh ^ (alpha ? 0xA1A1A1A100000000ull : 0), topo, blend, depth, mask, rect, hasDepth, rtFormat, bs, bo, cull };
+                key.amostras = tela ? g_msaa : 1;   // 14o campo: desenho numa superficie da tela (MSAA)
                 if (GetPso(key, vs, ps)) pipelines++; else failed++;
             }
         }
@@ -2696,6 +2911,24 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
     uint32_t SombraMeios();
     void RecarregarSuavizacao() { g_aaLevel = -1; }
 
+    // MSAA pedido (opcao msaa 0-3 = 1, 2, 4, 8 amostras), o maior que a placa aceita nos formatos das superficies
+    uint32_t MsaaPedido()
+    {
+        static const uint32_t VEZES[] = { 1, 2, 4, 8 };
+        uint32_t n = VEZES[std::clamp(OpcoesAtuais().msaa, 0, 3)];
+        for (; n >= 2 && g_dev; n /= 2)
+        {
+            bool ok = true;
+            for (DXGI_FORMAT f : { DXGI_FORMAT_R8G8B8A8_UNORM, COLOR_FORMAT, DS_FORMAT })
+            {
+                D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS q{ f, n };
+                if (FAILED(g_dev->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &q, sizeof(q))) || !q.NumQualityLevels) ok = false;
+            }
+            if (ok) return n;
+        }
+        return 1;
+    }
+
     // Resolucao interna / sombras mudadas no jogo (OPCOES DE VIDEO): no fim do quadro (PresentFrame) a placa termina o
     // que tem na fila e todas as imagens no tamanho antigo (superficies da EDRAM, resolves, montagens, imagem
     // persistida, copias para a memoria) sao soltas; no quadro seguinte sao recriadas no tamanho novo (cada uma guarda
@@ -2706,8 +2939,8 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
     {
         void TrocarEscala()
         {
-            const uint32_t m = EscalaMeios(), s = SombraMeios();
-            if (m == g_meios && s == g_sombraMeios) return;
+            const uint32_t m = EscalaMeios(), s = SombraMeios(), a = MsaaPedido();
+            if (m == g_meios && s == g_sombraMeios && a == g_msaa) return;
             const double t0 = perf::Now();
             render::WaitIdle();
             g_pendingWritebacks.clear();
@@ -2718,11 +2951,13 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             g_depthSurfaces.clear();
             g_persisted.Reset();
             g_aaScene.Reset();
+            g_aoScene.Reset(); g_aoTex.Reset();
             g_fbTex.Reset();
             g_surfaceBytes = 0;
             g_meios = m;
             g_sombraMeios = s;
-            Log("[draw] resolucao interna agora %.1fx (%ux%u), mapa de sombras %.1fx (troca em %.0f ms)", m / 2.0, Px(1280), Px(720), s / 2.0, perf::Now() - t0);
+            g_msaa = a;
+            Log("[draw] resolucao interna agora %.2fx (%ux%u), mapa de sombras %.1fx, MSAA %ux (troca em %.0f ms)", m / 4.0, Px(1280), Px(720), s / 4.0, a, perf::Now() - t0);
         }
     }
 
@@ -2730,12 +2965,25 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
     uint32_t EscalaMeios()
     {
         static const uint32_t teste = [] {
-            if (const char* e = getenv("FCRECOMP_ESCALA"))   // testes: 1, 1.5, 2 ou 3
-                return (uint32_t)std::clamp<long>(std::lround(atof(e) * 2), 2, 6);
+            if (const char* e = getenv("FCRECOMP_ESCALA"))   // testes: 0.5, 0.75, 1, 1.5, 2 ou 3
+                return (uint32_t)std::clamp<long>(std::lround(atof(e) * 4), 2, 12);
             return 0u;
         }();
-        static const uint32_t MEIOS[] = { 2, 3, 4, 6 };   // opcao do launcher: 1x, 1,5x, 2x, 3x (4K)
-        return teste ? teste : MEIOS[std::clamp(OpcoesAtuais().escala, 0, 3)];
+        static const uint32_t MEIOS[] = { 4, 6, 8, 12 };   // opcao do launcher: 1x, 1,5x, 2x, 3x (4K)
+        if (teste) return teste;
+        if (const int fsr = OpcoesAtuais().fsr; fsr > 0)
+        {
+            // FSR (render.cpp): o jogo desenha abaixo de 1x e a imagem e ampliada para o tamanho da janela: qualidade 0,75x
+            // (960x540), equilibrado e desempenho 0,5x (640x360; o desempenho amplia so com o bilinear + nitidez).
+            // Antes a escala saia da altura da janela / 1,5..2 e em 1080p dava 1x: o jogo desenhava o mesmo que sem FSR e
+            // as passadas do FSR vinham por cima (medido em tela cheia 1080p, Radeon 610M: 15,3 ms sem FSR, 24,8 ms com).
+            // Abaixo de 1x o FSR sempre desenha menos pixels que jogar em 1x.
+            // Ultra qualidade (4): desenha em 1x (1280x720, a resolucao original do jogo) e o FSR amplia ate a janela
+            // (1080p: 1,5x; 1440p: 2x). E o mais perto do "Ultra Quality" da AMD (1,3x) sem escalas fora dos quartos
+            // usados no desenho (1,25x nunca foi testada); pesa como 1x mais as duas passadas do FSR.
+            return fsr == 4 ? 4u : fsr == 1 ? 3u : 2u;
+        }
+        return MEIOS[std::clamp(OpcoesAtuais().escala, 0, 3)];
     }
 
     // Mapa de sombras em meios: opcao "sombras" (0 = como a tela, 1 = 2x, 2 = 3x) ou FCRECOMP_SOMBRAS=1|2|3 (vezes)
@@ -2743,12 +2991,12 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
     {
         static const uint32_t teste = [] {
             if (const char* e = getenv("FCRECOMP_SOMBRAS"))
-                return (uint32_t)std::clamp<long>(std::lround(atof(e) * 2), 2, 6);
+                return (uint32_t)std::clamp<long>(std::lround(atof(e) * 4), 4, 12);
             return 0u;
         }();
         const int s = std::clamp(OpcoesAtuais().sombras, 0, 2);
-        const uint32_t meios = teste ? teste : s ? (uint32_t)(s + 1) * 2 : 2u;
-        return std::max(meios, EscalaMeios());
+        const uint32_t meios = teste ? teste : s ? (uint32_t)(s + 1) * 4 : 4u;
+        return std::max(meios, EscalaMeios());   // abaixo de 1x a tela encolhe; o mapa de sombras fica em 1x
     }
 
     bool Init()
@@ -2757,7 +3005,8 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
         if (!g_dev) return false;
         g_meios = EscalaMeios();
         g_sombraMeios = SombraMeios();
-        Log("[draw] resolucao interna %.1fx (%ux%u), mapa de sombras %.1fx", g_meios / 2.0, Px(1280), Px(720), g_sombraMeios / 2.0);
+        g_msaa = MsaaPedido();
+        Log("[draw] resolucao interna %.2fx (%ux%u), mapa de sombras %.1fx, MSAA %ux", g_meios / 4.0, Px(1280), Px(720), g_sombraMeios / 4.0, g_msaa);
 
         // assinatura: b0 VS, b0 PS, b1 desenho, t0-t32, s0-s31
         D3D12_DESCRIPTOR_RANGE srvRange{ D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 65, 0, 0, 0 };   // memoria + 32 texturas 2D + 32 cubos
@@ -2777,7 +3026,7 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
         }
         g_dev->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&g_root));
 
-        D3D12_DESCRIPTOR_HEAP_DESC rh{ D3D12_DESCRIPTOR_HEAP_TYPE_RTV, MAX_SURFACES + 1 }, dh{ D3D12_DESCRIPTOR_HEAP_TYPE_DSV, MAX_SURFACES };
+        D3D12_DESCRIPTOR_HEAP_DESC rh{ D3D12_DESCRIPTOR_HEAP_TYPE_RTV, MAX_SURFACES + 2 }, dh{ D3D12_DESCRIPTOR_HEAP_TYPE_DSV, MAX_SURFACES };
         g_dev->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&g_rtvHeap));
         g_dev->CreateDescriptorHeap(&dh, IID_PPV_ARGS(&g_dsvHeap));
         g_rtvSize = g_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -2820,6 +3069,17 @@ float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(
             d.RTVFormats[0] = COLOR_FORMAT;
             if (cps.empty() || FAILED(g_dev->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&g_colorCopyPso))))
                 Log("[draw] falha ao criar pipeline de copia de cor");
+            // MSAA: profundidade com varias amostras -> profundidade com 1 (Lida)
+            auto rps = render::CompileShader(DEPTH_RESOLVE_HLSL, L"ps_6_0");
+            d.PS = { rps.data(), rps.size() };
+            d.NumRenderTargets = 0;
+            d.RTVFormats[0] = DXGI_FORMAT_UNKNOWN;
+            d.DSVFormat = DS_FORMAT;
+            d.DepthStencilState.DepthEnable = TRUE;
+            d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+            d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+            if (rps.empty() || FAILED(g_dev->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&g_depthResolvePso))))
+                Log("[draw] falha ao criar pipeline da profundidade resolvida (MSAA)");
         }
         // pipeline da mistura da mascara do escuro (duas imagens e a fracao)
         {
@@ -2898,6 +3158,8 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         int g_queryIndex = -1;       // consulta do D3D12 aberta para ele (aberta no 1o desenho, so se houver desenho)
         uint32_t g_querySerial = 0;  // numero da consulta aberta (cresce a cada QueryBegin)
         bool g_queryPulado = false;  // um desenho da consulta aberta ficou de fora (shader compilando; item 34)
+        bool g_queryOtimista = false;   // caixa 3D sem tesoura na faixa 1 (o mar da 26_SHANTYNIGHT), veja QueryOtimista
+        std::unordered_map<uint32_t, bool> g_otimistas;
         std::mutex g_queryResultMutex;
         struct QueryCount { uint32_t samples, serial; };
         std::unordered_map<uint32_t, QueryCount> g_queryResults;
@@ -2922,6 +3184,11 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         return tq >= ini && tq <= fim;
     }
 
+    void NotaCaptura(const char* texto)
+    {
+        if (diag::Capturing(diag::CurrentFrame())) HistoryText(texto);
+    }
+
     int g_expMode = 0;
     void QueryBegin(uint32_t block)
     {
@@ -2930,7 +3197,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         {
             g_queryInit = true;
             render::g_onOcclusion = [](uint64_t tag, uint64_t samples) {
-                samples = (samples * 4 + g_meios * g_meios - 1) / (g_meios * g_meios);   // pixels da placa -> do jogo (resolucao interna; 1 visivel nao vira 0)
+                samples = (samples * 16 + g_meios * g_meios - 1) / (g_meios * g_meios);   // pixels da placa -> do jogo (resolucao interna; 1 visivel nao vira 0)
                 GuardarContagem((uint32_t)tag, (uint32_t)std::min<uint64_t>(samples, 0x7FFFFFFF), (uint32_t)(tag >> 32));
                 static const char* qlogEnv = getenv("FCRECOMP_OCLUSAOLOG");   // depuracao: cada contagem
                 static int logged = 0;
@@ -2939,14 +3206,27 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             };
         }
         if (g_queryIndex >= 0) render::OcclusionEnd(g_queryIndex);
+        if (diag::Capturing(diag::CurrentFrame()))
+        {
+            char t[96];
+            snprintf(t, sizeof(t), "CONSULTA inicio %08X (aberta antes: %08X)", block, g_queryBlock);
+            HistoryText(t);
+        }
         g_queryBlock = block;
         g_queryIndex = -1;
         g_querySerial++;
         g_queryPulado = false;
+        g_queryOtimista = false;
     }
 
     void QueryEnd(uint32_t block)
     {
+        if (diag::Capturing(diag::CurrentFrame()))
+        {
+            char t[128];
+            snprintf(t, sizeof(t), "CONSULTA fim %08X (aberta: %08X, contada na placa: %s)", block, g_queryBlock, g_queryIndex >= 0 ? "sim" : "nao");
+            HistoryText(t);
+        }
         if (g_queryIndex < 0 && g_queryBlock)
         {
             if (OclusaoLogAgora())
@@ -2957,8 +3237,25 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             if (NovaConsulta() && !g_queryPulado) GuardarContagem(g_queryBlock, 0, g_querySerial);
         }
         if (g_queryIndex >= 0) render::OcclusionEnd(g_queryIndex);
+        if (g_queryBlock && g_tileState == 1) g_otimistas[g_queryBlock] = g_queryOtimista;
         g_queryBlock = 0;
         g_queryIndex = -1;
+    }
+
+    uint32_t QuerySerial() { return g_querySerial; }
+    bool QueryAberta() { return g_queryBlock != 0; }
+    bool QueryOtimista(uint32_t block)
+    {
+        static const bool off = getenv("FCRECOMP_MARREAL") != nullptr;
+        auto it = g_otimistas.find(block);
+        return !off && it != g_otimistas.end() && it->second;
+    }
+
+    uint32_t QueryResultDesde(uint32_t block, uint32_t serial, uint32_t fallback)
+    {
+        std::lock_guard lock(g_queryResultMutex);
+        auto it = g_queryResults.find(block);
+        return it == g_queryResults.end() || (int32_t)(it->second.serial - serial) < 0 ? fallback : it->second.samples;
     }
 
     uint32_t QueryResult(uint32_t block, uint32_t fallback)
@@ -2984,6 +3281,76 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
 
     namespace
     {
+        // Oclusao de ambiente (opcao do launcher "ao": 0 desligada, 1 leve, 2 media, 3 forte; FCRECOMP_AO nos testes):
+        // escurece cantos e encontros de superficies usando a profundidade da cena 3D (render::OclusaoAmbiente). Vem antes
+        // do antisserrilhado, na mesma hora (a cena pronta lida para montar a tela, sem o HUD). A profundidade do Xbox
+        // (24 bits, invertida: 1 perto e 0 longe; d = perto / z) vira distancia com "perto" = 0,002 (calibrado com faixas
+        // de 1 m no chao da praia) e o campo de visao vertical (~50 graus); FCRECOMP_AO_PERTO / _FOV / _RAIO / _FORCA ajustam, FCRECOMP_AO_VER=1 mostra so o AO.
+        ID3D12Resource* OcclusaoCena(ID3D12GraphicsCommandList* list, ID3D12Resource* src, uint32_t larguraJogo)
+        {
+            static const int teste = getenv("FCRECOMP_AO") ? atoi(getenv("FCRECOMP_AO")) : -1;
+            const int nivel = std::clamp(teste >= 0 ? teste : OpcoesAtuais().ao, 0, 3);
+            // FCRECOMP_AOLOG=1: cada quadro em que a cena e montada (rodou ou nao, com qual profundidade)
+            static const bool aoLog = getenv("FCRECOMP_AOLOG") != nullptr;
+            if (aoLog) Log("[ao] quadro %llu: nivel %d, profundidade %08X do quadro %llu (%u desenhos)", (unsigned long long)g_frameNumber, nivel,
+                g_profCenaChave, (unsigned long long)g_profCenaQuadro, g_profCenaMax);
+            if (!nivel || g_profCenaQuadro != g_frameNumber || !g_profCenaChave) return src;
+            auto it = g_depthSurfaces.find(g_profCenaChave);
+            if (it == g_depthSurfaces.end() || !it->second.res) return src;
+            Surface& prof = Lida(list, it->second, true);   // MSAA: a profundidade resolvida
+            D3D12_RESOURCE_DESC sd = src->GetDesc();
+            if (sd.Format != COLOR_FORMAT) return src;
+            auto criar = [&](ComPtr<ID3D12Resource>& r, D3D12_RESOURCE_STATES& estado, DXGI_FORMAT f, UINT div) {
+                const UINT64 w = (sd.Width + div - 1) / div;
+                const UINT h = (sd.Height + div - 1) / div;
+                if (r && r->GetDesc().Width == w && r->GetDesc().Height == h) return true;
+                ReleaseLater(std::move(r));
+                D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
+                D3D12_RESOURCE_DESC td = sd;
+                td.MipLevels = 1;
+                td.Format = f;
+                td.Width = w; td.Height = h;
+                td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+                estado = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                return SUCCEEDED(g_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, estado, nullptr, IID_PPV_ARGS(&r)));
+            };
+            // AO em meia resolucao; abaixo de 1x (FSR) na resolucao da cena: em meia, a 0,5x, cada ponto do AO cobria 4x4
+            // pixels da janela depois de ampliado e o FSR afiava o pontilhado do disco (objetos perto quase pretos)
+            const UINT divAo = sd.Height < 720 ? 1 : 2;
+            if (!criar(g_aoScene, g_aoSceneState, COLOR_FORMAT, 1) || !criar(g_aoTex, g_aoTexState, DXGI_FORMAT_R16G16_FLOAT, divAo)) return src;
+            static bool avisou = false;
+            if (!avisou) { avisou = true; Log("[draw] oclusao de ambiente nivel %d na cena 3D (%llux%u, profundidade %08X)", nivel, (unsigned long long)sd.Width, sd.Height, g_profCenaChave); }
+            // o jogo limpa a profundidade da cena com 0: ela e invertida (1 perto, 0 longe; z da camera = perto / d)
+            const bool invertida = (prof.clearValue >> 8) == 0;
+            Transition(list, g_aoScene.Get(), g_aoSceneState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            Transition(list, g_aoTex.Get(), g_aoTexState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            Transition(list, prof.res.Get(), prof.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+            render::AoEntrada e{};
+            e.aoRtv = rtv; e.aoRtv.ptr += (SIZE_T)(MAX_SURFACES + 1) * g_rtvSize;
+            e.saidaRtv = rtv; e.saidaRtv.ptr += (SIZE_T)MAX_SURFACES * g_rtvSize;
+            g_dev->CreateRenderTargetView(g_aoTex.Get(), nullptr, e.aoRtv);
+            g_dev->CreateRenderTargetView(g_aoScene.Get(), nullptr, e.saidaRtv);
+            e.cena = src; e.prof = prof.res.Get(); e.formatoProf = DS_SRV_FORMAT; e.ao = g_aoTex.Get();
+            e.w = (UINT)sd.Width; e.h = sd.Height;
+            auto env = [](const char* n, float padrao) { const char* v = getenv(n); return v ? (float)atof(v) : padrao; };
+            static const float perto = env("FCRECOMP_AO_PERTO", 0.002f), fov = env("FCRECOMP_AO_FOV", 50.0f), raio = env("FCRECOMP_AO_RAIO", 1.2f),
+                               forcaTeste = env("FCRECOMP_AO_FORCA", 0.0f), ver = env("FCRECOMP_AO_VER", 0.0f);
+            const float forca = forcaTeste > 0 ? forcaTeste : nivel == 1 ? 1.2f : nivel == 2 ? 2.0f : 3.0f;
+            // pixels da profundidade por pixel da cena (as duas no mesmo tamanho do jogo, cada uma na sua escala)
+            const float escCena = (float)sd.Width / std::max(1u, larguraJogo), escProf = (float)Pm(prof.width, prof.meios) / std::max(1u, prof.width);
+            const float k[13] = { (float)sd.Width, (float)sd.Height, perto, raio, forca, tanf(fov * 0.5f * 3.14159265f / 180.0f),
+                                  (float)sd.Width / sd.Height, invertida ? 1.0f : 0.0f, ver, escProf / escCena, 60.0f, nivel == 1 ? 6.0f : nivel == 2 ? 8.0f : 12.0f,
+                                  (float)divAo };
+            memcpy(e.k, k, sizeof(k));
+            const bool ok = render::OclusaoAmbiente(list, e);
+            if (ok) g_aoTexState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            ForgetBoundState();   // o desenho do jogo reaplica tudo
+            Transition(list, g_aoScene.Get(), g_aoSceneState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            if (diag::Capturing(diag::CurrentFrame())) HistoryText("OCLUSAO DE AMBIENTE DA CENA");
+            return ok ? g_aoScene.Get() : src;
+        }
+
         ID3D12Resource* AntialiasedScene(ID3D12GraphicsCommandList* list, ID3D12Resource* src)
         {
             if (g_aaLevel < 0)
@@ -3073,6 +3440,12 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         const auto& vs = GetShader(info.vs, false);
         const bool alphaTest = (Reg(0x2202) & 8) != 0;   // RB_COLORCONTROL: alpha test ligado
         const auto& ps = GetShader(info.ps, true, alphaTest);
+        // coleta da receita: anota os shaders que a fase atual usa (uma vez por shader e fase)
+        if (const uint32_t ger = RecFaseGeracao())
+        {
+            if (vs.usoFase != ger) { vs.usoFase = ger; ColetarUso(info.vs.hash, false); }
+            if (ps.usoFase != ger) { ps.usoFase = ger; ColetarUso(info.ps.hash, true); }
+        }
         perf::g_ms[perf::Shader] += perf::Now() - tShader;
         static const bool puladosLog = getenv("FCRECOMP_PULADOSLOG") != nullptr;   // depuracao (item 34): desenhos pulados
         auto logPulado = [&](const char* porque) {
@@ -3127,6 +3500,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
 
         PsoKey key{ info.vs.hash, info.ps.hash ^ (alphaTest ? 0xA1A1A1A100000000ull : 0), (uint32_t)type, Reg(0x2201) | 0, depthControl & 0x77, colorMask, rect ? 1u : 0u, hasDepth ? 1u : 0u,
             (uint32_t)SurfaceFormat(ColorKey()) };
+        key.amostras = SurfaceAmostras(ColorKey());   // MSAA: o pipeline segue as amostras da superficie de destino
         // PA_SU_SC_MODE_CNTL bit 11/12: deslocamento de poligono na frente/atras (0x2380/81 frente, 0x2382/83 atras).
         // Sem corte por face aqui: vale o da frente (ou o de tras, se so ele estiver ligado). FCRECOMP_SEMPOLYOFFSET=1 desliga.
         if (static const bool semPoly = getenv("FCRECOMP_SEMPOLYOFFSET") != nullptr; !semPoly && hasDepth && (Reg(0x2205) & 0x1800))
@@ -3148,15 +3522,21 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         if (newPso)
         {
             char l[160];
-            snprintf(l, sizeof(l), "%016llX %016llX %u %u %08X %X %X %u %u %u %X %X %X", (unsigned long long)info.vs.hash, (unsigned long long)info.ps.hash,
-                alphaTest ? 1u : 0u, key.topology, key.blend, key.depth, key.mask, key.rect, key.hasDepth, key.rtFormat, key.biasScale, key.biasOffset, key.cull);
-            warm::AppendLine("pipelines.txt", l);
+            snprintf(l, sizeof(l), "%016llX %016llX %u %u %08X %X %X %u %u %u %X %X %X %u", (unsigned long long)info.vs.hash, (unsigned long long)info.ps.hash,
+                alphaTest ? 1u : 0u, key.topology, key.blend, key.depth, key.mask, key.rect, key.hasDepth, key.rtFormat, key.biasScale, key.biasOffset, key.cull,
+                SuperficieDaTela(ColorKey()) ? 1u : 0u);   // 14o campo: superficie da tela (o aquecimento usa o MSAA da vez)
+            // trocar o MSAA com o jogo aberto cria de novo os mesmos pipelines (outra quantidade de amostras): a linha e a mesma
+            static std::unordered_set<std::string> anotadas;
+            if (anotadas.insert(l).second) warm::AppendLine("pipelines.txt", l);
         }
 
         auto* list = render::FrameList();
         g_drewThisFrame = true;
         g_drawsSinceResolve++;
         g_drawsThisFrame++;
+        if (info.ps.hash == 0x7D2342975BC49C7Dull) g_aguaQuadro++;   // superficie do mar (FCRECOMP_AGUALOG)
+        if (info.ps.hash == 0x926AE9058707E023ull) g_fundoMarQuadro++;   // chao do mar perto da praia (16 pedacos, consultas)
+        if (info.vs.hash == 0xB53D2BF3C214573Full) g_vsDesdeResolve++;
 
         // Desenho sem efeito na imagem: nao grava cor, nem profundidade (RB_DEPTHCONTROL bit 1 teste + bit 2 escrita),
         // nem usa stencil (bit 0). No jogo sao as caixas das consultas de oclusao, que nos respondemos sempre
@@ -3168,14 +3548,24 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         if (!keepInvisible && g_queryIndex < 0 && colorMask == 0 && (depthControl & 6) != 6 && !(depthControl & 1))
         {
             if (diag::Capturing(diag::CurrentFrame()))
-                HistoryText("PULADO (sem efeito na imagem: sem cor, profundidade nem stencil)");
+            {
+                char t[200];
+                snprintf(t, sizeof(t), "PULADO (sem efeito na imagem: sem cor, profundidade nem stencil) vs=%016llX ps=%016llX n=%u prof=%08X 2293=%08X 2316=%08X",
+                    (unsigned long long)info.vs.hash, (unsigned long long)info.ps.hash, info.count, depthControl, Reg(0x2293), Reg(0x2316));
+                HistoryText(t);
+            }
             return;
         }
 
         // superficies da EDRAM: RB_COLOR_INFO / RB_DEPTH_INFO, base nos bits 0-11
         Surface& color = ColorSurface(ColorKey());
         Transition(list, color.res.Get(), color.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        if (color.pendingClear)
+        // Caixa de consulta da segunda faixa (desenhada so para contar, veja caixaFaixa): NAO faz as limpezas pedidas no
+        // resolve do fim da faixa 1. Elas sao para a faixa 2 do console (que nao desenhamos) e ficam pendentes para o
+        // desenho seguinte, como antes. Feitas aqui, a profundidade ficava vazia e as caixas das lampadas atras das
+        // paredes contavam "visivel" (bug_70: brilho da lampada atravessando o piso).
+        const bool caixaFaixa2 = g_tileState == 2 && g_queryIndex >= 0;
+        if (color.pendingClear && !caixaFaixa2)
         {
             uint32_t c = color.clearValue;
             float v[4] = { ((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f, (c >> 24) / 255.0f };
@@ -3188,7 +3578,18 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         {
             depth = &DepthSurface(DepthKey());
             Transition(list, depth->res.Get(), depth->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-            if (depth->pendingClear)
+            // para o AO: qual profundidade e a da cena 3D neste quadro. Pela largura de verdade (pitch da EDRAM, >= 640):
+            // a superficie e criada com pelo menos 1280 de largura, entao antes a do reflexo da agua (pitch 520, 512x512)
+            // tambem contava e, nos quadros em que tinha mais desenhos, o AO usava a profundidade dela (sombras piscando
+            // e formas de outra vista andando com a camera)
+            if (((DepthKey() >> 12) & 0x3FFF) >= 640)
+            {
+                if (g_profCenaQuadro != g_frameNumber) { g_profCenaQuadro = g_frameNumber; g_profConta.clear(); g_profCenaMax = 0; }
+                const uint32_t n = ++g_profConta[DepthKey()];
+                const bool sombra = g_profSombraQuadro == g_frameNumber && g_profSombra.count(DepthKey());
+                if (n > g_profCenaMax && !sombra) { g_profCenaMax = n; g_profCenaChave = DepthKey(); }
+            }
+            if (depth->pendingClear && !caixaFaixa2)
             {
                 // profundidade 24 bits << 8 | stencil
                 ClearRect(*depth);
@@ -3196,7 +3597,21 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                     (depth->clearValue >> 8) / 16777215.0f, (UINT8)(depth->clearValue & 0xFF),
                     depth->clearRect.right ? 1 : 0, depth->clearRect.right ? &depth->clearRect : nullptr);
                 depth->pendingClear = false;
+                g_profSuja = true;
             }
+            // fotos da profundidade para a segunda faixa (veja FotoProf). FCRECOMP_GRADEANTIGA=1 desliga.
+            static const bool semFoto = getenv("FCRECOMP_GRADEANTIGA") != nullptr;
+            if (!semFoto && g_tileState == 1 && g_queryIndex >= 0 && g_queryBlock)
+            {
+                if (g_profSuja || g_fotoAtual < 0 || g_fotoQuadro != g_frameNumber || g_fotoChave != DepthKey())
+                {
+                    const int i = (g_fotoAtual + 1) % FOTOS;
+                    if (TirarFoto(list, *depth, i)) { g_fotoAtual = i; g_fotoQuadro = g_frameNumber; g_fotoChave = DepthKey(); g_profSuja = false; }
+                    else g_fotoAtual = -1;
+                }
+                if (g_fotoAtual >= 0) g_fotoDoBloco[g_queryBlock] = { g_frameNumber, g_fotoAtual };
+            }
+            else if (g_queryIndex < 0 && (depthControl & 5)) g_profSuja = true;   // grava profundidade ou stencil
         }
 
         // texturas e samplers (32 slots, fetch constants em 0x4800 + 6*n) - antes das constantes, pois podem gravar comandos
@@ -3322,7 +3737,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                     if ((br & 0x7FFF) - std::min(br & 0x7FFF, tl & 0x7FFF) >= 1280 && ((br >> 16) & 0x7FFF) - std::min((br >> 16) & 0x7FFF, (tl >> 16) & 0x7FFF) >= 720)
                     {
                         g_aaFrame = g_frameNumber;
-                        tex = AntialiasedScene(list, tex);
+                        tex = AntialiasedScene(list, OcclusaoCena(list, tex, (f[2] & 0x1FFF) + 1));
                     }
                 }
                 sd.Format = fmt;
@@ -3374,6 +3789,14 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                     Log("[draw] sampler: anisotropia %u (%ux), ajuste de mip %+.2f (formato %u, %ux%u)", aniso, sdesc.MaxAnisotropy,
                         bias / 32.0f, f[1] & 63, (f[2] & 0x1FFF) + 1, ((f[2] >> 13) & 0x1FFF) + 1);
                 }
+            }
+            // opcao "Filtro de textura" do launcher: anisotropico 2x..16x em toda textura com niveis de mip filtrada
+            // linear (o chao e as paredes vistos de lado ficam nitidos de longe). Texturas sem mip (alvos de desenho,
+            // mapas de sombra, telas) ficam como o jogo pediu.
+            if (const int ft = std::clamp(OpcoesAtuais().filtroTextura, 0, 4); ft && linear && mipFilter != 2 && sdesc.MaxLOD > 0)
+            {
+                sdesc.Filter = D3D12_FILTER_ANISOTROPIC;
+                sdesc.MaxAnisotropy = std::max(sdesc.MaxAnisotropy, 1u << ft);
             }
         }
         if (static const bool mipLog = getenv("FCRECOMP_MIPLOG") != nullptr; mipLog)   // depuracao: niveis de detalhe
@@ -3523,7 +3946,8 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         fl[4] = RegF(0x2110); fl[5] = RegF(0x2112); fl[6] = RegF(0x2114); fl[7] = 0;   // offset x, y, z
         fl[8] = (float)CANVAS; fl[9] = (float)CANVAS; fl[10] = 0; fl[11] = 0;
         // PA_SC_WINDOW_OFFSET (x bits 0-14, y bits 16-30, com sinal), se PA_SU_SC_MODE_CNTL.vtx_window_offset_enable (bit 16)
-        if (Reg(0x2205) & (1u << 16))
+        // caixa de consulta da segunda faixa (contada na tela inteira, veja CaixaFaixa): sem deslocamento da janela
+        if ((Reg(0x2205) & (1u << 16)) && !(g_tileState == 2 && g_queryIndex >= 0))
         {
             uint32_t wo = Reg(0x2080);
             fl[10] = (float)(int32_t(wo << 17) >> 17);
@@ -3544,7 +3968,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         {
             static const bool noShift = getenv("FCRECOMP_NOPIXSHIFT") != nullptr;
             static const bool shiftJogo = getenv("FCRECOMP_PIXSHIFTJOGO") != nullptr;
-            float shift = (!noShift && !(Reg(0x2302) & 1)) ? (shiftJogo ? 0.5f : 1.0f / color.meios) : 0.0f;
+            float shift = (!noShift && !(Reg(0x2302) & 1)) ? (shiftJogo ? 0.5f : 2.0f / color.meios) : 0.0f;
             memcpy(&d[212], &shift, 4);
         }
         d[209] = (Reg(0x2180) & (1u << 18)) ? (0x80000000u | ((Reg(0x2181) >> 8) & 0xFF)) : 0;
@@ -3555,10 +3979,10 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         {
             static const bool noUcp = getenv("FCRECOMP_SEMUCP") != nullptr;
             d[213] = (noUcp || g_expMode == 2) ? 0 : Reg(0x2204);
-            float resScale = color.meios / 2.0f;   // escala do alvo deste desenho (pixels da placa por pixel do jogo)
+            float resScale = color.meios / 4.0f;   // escala do alvo deste desenho (pixels da placa por pixel do jogo)
             memcpy(&d[214], &resScale, 4);
             d[215] = scaledMask;
-            float texScale = g_meios / 2.0f;   // escala das texturas marcadas em scaledMask (imagens da tela)
+            float texScale = g_meios / 4.0f;   // escala das texturas marcadas em scaledMask (imagens da tela)
             memcpy(&d[240], &texScale, 4);
             // ultrawide (gpu.cpp AspectoTela): desenhos 2D em alvos da largura da tela vao para o centro (xenos_common.hlsl.h)
             static const float hudK = (16.0f / 9.0f) / AspectoTela();
@@ -3573,7 +3997,14 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             }
         }
 
-        list->OMSetRenderTargets(1, &color.view, FALSE, depth ? &depth->view : nullptr);
+        D3D12_CPU_DESCRIPTOR_HANDLE depthView = depth ? depth->view : D3D12_CPU_DESCRIPTOR_HANDLE{};
+        if (depth && caixaFaixa2)   // caixa da segunda faixa: a profundidade do ponto da caixa correspondente da faixa 1
+        {
+            auto it = g_fotoDoBloco.find(g_queryBlock - 0x40);
+            if (it != g_fotoDoBloco.end() && it->second.first == g_frameNumber && g_fotos[it->second.second].res)
+                depthView = g_fotos[it->second.second].view;
+        }
+        list->OMSetRenderTargets(1, &color.view, FALSE, depth ? &depthView : nullptr);
         // o shader de vertices converte a posicao para -1..1 com o tamanho do jogo (rtSize = CANVAS); o viewport leva isso
         // para os pixels da placa. A tesoura e calculada no tamanho do jogo e convertida no fim.
         const uint32_t m = color.meios;   // escala do alvo (resolucao interna; mapa de sombras pode ter outra)
@@ -3582,16 +4013,38 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         // No "predicated tiling" cada faixa so pinta a sua parte: sem isto a cena inteira era pintada em cada faixa.
         uint32_t tl = Reg(0x2081), br = Reg(0x2082);
         LONG sx0 = tl & 0x7FFF, sy0 = (tl >> 16) & 0x7FFF, sx1 = br & 0x7FFF, sy1 = (br >> 16) & 0x7FFF;
-        if (!(tl >> 31) && (Reg(0x2205) & (1u << 16)))
+        // Caixas de consulta durante as faixas (01_BEACH, bug_64/68: o mar e testado em 4x4 pedacos da tela). No console
+        // cada faixa conta a caixa so na sua parte (faixa 1: x 0-768, faixa 2: x 640-1280 com a janela deslocada -640) e o
+        // jogo soma os dois registros. Antes so a faixa 1 contava, alargada para a tela inteira se comecasse em 0, e a
+        // tesoura vazia (pedaco 960-1280, so na faixa 2) virava a tela inteira: pedacos com mar contavam 0 ou o mesmo
+        // numero em todas as linhas. Agora: faixa 1 conta so a tesoura do jogo; a faixa 2 tambem desenha as caixas
+        // (gpu.cpp), nas coordenadas da tela (a nossa faixa 1 ja tem a profundidade da largura toda).
+        // FCRECOMP_GRADEANTIGA=1 volta ao antigo.
+        static const bool gradeAntiga = getenv("FCRECOMP_GRADEANTIGA") != nullptr;
+        const bool caixaFaixa = !gradeAntiga && g_queryIndex >= 0 && (g_tileState == 1 || g_tileState == 2);
+        if (!(tl >> 31) && (Reg(0x2205) & (1u << 16)) && !(caixaFaixa && g_tileState == 2))
         {
             uint32_t wo = Reg(0x2080);
             LONG ox = int32_t(wo << 17) >> 17, oy = int32_t(wo << 1) >> 17;
             sx0 += ox; sx1 += ox; sy0 += oy; sy1 += oy;
         }
         D3D12_RECT sc{ std::max(sx0, 0L), std::max(sy0, 0L), std::min(sx1, (LONG)CANVAS), std::min(sy1, (LONG)CANVAS) };
-        if (sc.right <= sc.left || sc.bottom <= sc.top) sc = { 0, 0, (LONG)CANVAS, (LONG)CANVAS };
+        const bool tesVazia = sc.right <= sc.left || sc.bottom <= sc.top;
+        // Tesoura vazia numa caixa de consulta: na faixa 2 conta 0. Na faixa 1, caixa 3D (24 vertices: tiras de 10 e 16,
+        // nao os quadrados das lampadas) conta a tela inteira como antes: o mar da 26_SHANTYNIGHT (bug_73) nao define a
+        // tesoura e herda a do ultimo pedaco da grade (vazia na faixa 1); contando 0 o jogo escondia o mar. Contar a mais
+        // so faz o jogo desenhar algo escondido; contar a menos apaga o mar.
+        const bool caixa3D = info.primType == 5 || info.primType == 13;
+        if (tesVazia) sc = (caixaFaixa && !(g_tileState == 1 && caixa3D)) ? D3D12_RECT{ 0, 0, 0, 0 } : D3D12_RECT{ 0, 0, (LONG)CANVAS, (LONG)CANVAS };
+        // Item 1 (reflexos das pedras sumindo no mar, gravacao 2026-11-19_15-51, tiques 1005-1007): os 16 pedacos da grade
+        // do mar sao testados a cada 3 quadros. Virando da areia para o mar, o teste anterior (ainda na areia) dava 0 e o
+        // seguinte so chegava 3 quadros depois: nesse meio tempo o jogo achava o mar escondido e tirava as pedras, palmeiras
+        // etc. do reflexo. Agora toda caixa 3D da grade (nao so a de tesoura vazia) e "otimista": nunca responde 0.
+        // FCRECOMP_MARCONTADO=1 volta ao antigo (so as de tesoura vazia).
+        static const bool marContado = getenv("FCRECOMP_MARCONTADO") != nullptr;
+        if (caixaFaixa && g_tileState == 1 && caixa3D && (tesVazia || !marContado)) g_queryOtimista = true;
         // faixas juntas: a primeira faixa desenha a largura toda (a tesoura dela vai so ate 768)
-        if (g_tileState == 1 && g_tileFullWidth && sc.left == 0 && sc.right < (LONG)g_tileFullWidth)
+        if (!caixaFaixa && g_tileState == 1 && g_tileFullWidth && sc.left == 0 && sc.right < (LONG)g_tileFullWidth)
             sc.right = std::min<LONG>((LONG)g_tileFullWidth, (LONG)CANVAS);
         // Caixa de teste de uma consulta de oclusao: so conta pixels dentro do viewport (a tela). A tesoura dessas caixas
         // vai ate 2048 e a superficie tem 2048 linhas: a parte fora da tela (profundidade limpa, nada na frente)
@@ -3670,6 +4123,8 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                 snprintf(wb, sizeof(wb), " jan=%.0f,%.0f tes=%ld,%ld-%ld,%ld vpx=%.0f modo=%08X tela=%08X/%08X sup=%08X", fl[10], fl[11], sc.left, sc.top, sc.right, sc.bottom,
                     RegF(0x2110), Reg(0x2205), Reg(0x200E), Reg(0x200F), Reg(0x2000));
                 full += wb;
+                snprintf(wb, sizeof(wb), " tesjogo=%ld,%ld-%ld,%ld", sx0, sy0, sx1, sy1);
+                full += wb;
                 // impressoes digitais: constantes do VS e cada buffer de vertices (compara o mesmo objeto entre faixas)
                 auto fnv = [](const uint8_t* p, size_t n) { uint32_t h = 2166136261u; for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; } return h; };
                 uint32_t vc[1024];
@@ -3678,6 +4133,11 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                     [&] { for (uint32_t i = 0; i < 1024; i++) vc[i] = Reg(0x4400 + i); return fnv((const uint8_t*)vc, sizeof(vc)); }(),
                     Reg(0x2202), RegF(0x210E), Reg(0x2201));
                 full += wb;
+                if (Reg(0x2204) & ~63u)
+                {
+                    snprintf(wb, sizeof(wb), " clipcntl=%08X", Reg(0x2204));
+                    full += wb;
+                }
                 if (Reg(0x2204) & 63)
                 {
                     snprintf(wb, sizeof(wb), " corte=%08X", Reg(0x2204));
@@ -3765,7 +4225,8 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                             Log("[draw]   ps c%d = %g %g %g %g", i, RegF(0x4400 + i * 4), RegF(0x4401 + i * 4), RegF(0x4402 + i * 4), RegF(0x4403 + i * 4));
                         Log("[draw]   viewport escala %g %g %g deslocamento %g %g %g vte %08X", RegF(0x210F), RegF(0x2111), RegF(0x2113),
                             RegF(0x2110), RegF(0x2112), RegF(0x2114), Reg(0x2206));
-                        CaptureRegion(list, color.res.Get(), color.state, Px(1280), Px(720), idx);
+                        Surface& corLida = Lida(list, color, false);
+                        CaptureRegion(list, corLida.res.Get(), corLida.state, Px(1280), Px(720), idx);
                     }
         }
     }
@@ -3809,6 +4270,20 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             if (g_tileState == 1 && x0 == 0 && destW > x1) x1 = std::min<uint32_t>(destW, CANVAS);
         }
         uint32_t w = x1 - x0, h = y1 - y0;
+        if (isDepth && w == h && w >= 256)   // mapa de sombra (veja g_profSombra)
+        {
+            if (g_profSombraQuadro != g_frameNumber) { g_profSombraQuadro = g_frameNumber; g_profSombra.clear(); }
+            if (g_profSombra.insert(DepthKey()).second && g_profCenaQuadro == g_frameNumber && g_profCenaChave == DepthKey())
+            {
+                // ja era a escolhida: volta a melhor das outras
+                g_profCenaChave = 0; g_profCenaMax = 0;
+                for (const auto& [k, n] : g_profConta)
+                    if (!g_profSombra.count(k) && n > g_profCenaMax) { g_profCenaMax = n; g_profCenaChave = k; }
+            }
+        }
+        if (!isDepth && w == 512 && h == 512) { g_reflexoQuadro++; g_reflexoDesenhos = drawsBefore; g_reflexoPedras = g_vsDesdeResolve; }
+        if (!isDepth) g_vsDesdeResolve = 0;
+        if (!isDepth && dest == 0x10FF4000) g_refracaoQuadro++;
         if (diag::Capturing(diag::CurrentFrame()))
         {
             char desc[200];
@@ -3890,26 +4365,38 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                 tex.width = w; tex.height = h; tex.format = fmt; tex.meios = m;
             }
 
-            if (!isDepth && color.format != COLOR_FORMAT && g_colorCopyPso)
+            if (!isDepth && w >= 1280 && h >= 720)   // de qual superficie sai a imagem da tela (uma vez por superficie)
+            {
+                static std::unordered_set<uint32_t> vistas;
+                if (vistas.insert(ColorKey()).second)
+                    Log("[draw] resolve da tela %08X <- superficie base %03X largura %u formato %u (%u amostras)", dest, ColorKey() & 0xFFF,
+                        (ColorKey() >> 12) & 0x3FFF, ColorKey() >> 26, color.amostras);
+            }
+            // MSAA: quem le e a copia resolvida da superficie (so o retangulo deste resolve, em pixels da placa)
+            const Surface& origem = isDepth ? *depth : color;
+            const D3D12_RECT rLida{ (LONG)Pm(x0, m), (LONG)Pm(y0, m), (LONG)Pm(std::min(x1, origem.width), m), (LONG)Pm(std::min(y1, origem.height), m) };
+            Surface& corS = isDepth ? color : Lida(list, color, false, rLida);
+            Surface* profS = isDepth ? &Lida(list, *depth, true, rLida) : depth;
+            if (!isDepth && corS.format != COLOR_FORMAT && g_colorCopyPso)
             {
                 // superficie de 8 bits: o resolve vira um desenho que converte para a textura RGBA16F (CopyTextureRegion so
                 // copia entre formatos iguais); o resto do emulador continua vendo os resolves em RGBA16F
-                Transition(list, color.res.Get(), color.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                Transition(list, corS.res.Get(), corS.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 Transition(list, tex.res.Get(), tex.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 auto srvc = render::AllocSrv(1);
                 D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
-                sd.Format = color.format;
+                sd.Format = corS.format;
                 sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
                 sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 sd.Texture2D.MipLevels = 1;
-                g_dev->CreateShaderResourceView(color.res.Get(), &sd, srvc.cpu);
+                g_dev->CreateShaderResourceView(corS.res.Get(), &sd, srvc.cpu);
                 D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
                 rtv.ptr += (SIZE_T)MAX_SURFACES * g_rtvSize;   // ultimo slot: alvo temporario
                 g_dev->CreateRenderTargetView(tex.res.Get(), nullptr, rtv);
                 list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
                 // em pixels da placa; a superficie pode ser mais estreita/baixa que o retangulo pedido
-                uint32_t cw = Pm(std::min(x1, color.width), m) > Pm(x0, m) ? Pm(std::min(x1, color.width), m) - Pm(x0, m) : 0;
-                uint32_t ch = Pm(std::min(y1, color.height), m) > Pm(y0, m) ? Pm(std::min(y1, color.height), m) - Pm(y0, m) : 0;
+                uint32_t cw = Pm(std::min(x1, corS.width), m) > Pm(x0, m) ? Pm(std::min(x1, corS.width), m) - Pm(x0, m) : 0;
+                uint32_t ch = Pm(std::min(y1, corS.height), m) > Pm(y0, m) ? Pm(std::min(y1, corS.height), m) - Pm(y0, m) : 0;
                 D3D12_VIEWPORT vp{ 0, 0, (float)Pm(w, m), (float)Pm(h, m), 0, 1 };
                 D3D12_RECT sc{ 0, 0, (LONG)std::min(cw, Pm(w, m)), (LONG)std::min(ch, Pm(h, m)) };
                 list->RSSetViewports(1, &vp);
@@ -3927,19 +4414,19 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             }
             else if (!isDepth)
             {
-                Transition(list, color.res.Get(), color.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                Transition(list, corS.res.Get(), corS.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
                 Transition(list, tex.res.Get(), tex.state, D3D12_RESOURCE_STATE_COPY_DEST);
                 D3D12_TEXTURE_COPY_LOCATION dst{ tex.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
-                D3D12_TEXTURE_COPY_LOCATION src{ color.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                D3D12_TEXTURE_COPY_LOCATION src{ corS.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
                 // a superficie pode ser mais estreita (ou baixa) que o retangulo pedido: copia so a parte que existe
                 // (em pixels da placa; a textura tem Pm(w) x Pm(h))
-                D3D12_BOX box{ Pm(x0, m), Pm(y0, m), 0, std::min(Pm(x0, m) + Pm(w, m), Pm(color.width, m)), std::min(Pm(y0, m) + Pm(h, m), Pm(color.height, m)), 1 };
+                D3D12_BOX box{ Pm(x0, m), Pm(y0, m), 0, std::min(Pm(x0, m) + Pm(w, m), Pm(corS.width, m)), std::min(Pm(y0, m) + Pm(h, m), Pm(corS.height, m)), 1 };
                 if (box.right > box.left && box.bottom > box.top) list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
             }
             else if (g_depthCopyPso)
             {
                 // profundidade -> R32_FLOAT com um desenho de tela cheia
-                Transition(list, depth->res.Get(), depth->state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                Transition(list, profS->res.Get(), profS->state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 Transition(list, tex.res.Get(), tex.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 auto srvd = render::AllocSrv(1);
                 D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
@@ -3947,7 +4434,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                 sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
                 sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 sd.Texture2D.MipLevels = 1;
-                g_dev->CreateShaderResourceView(depth->res.Get(), &sd, srvd.cpu);
+                g_dev->CreateShaderResourceView(profS->res.Get(), &sd, srvd.cpu);
                 D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
                 rtv.ptr += (SIZE_T)MAX_SURFACES * g_rtvSize;   // ultimo slot: alvo temporario
                 g_dev->CreateRenderTargetView(tex.res.Get(), nullptr, rtv);
@@ -4263,6 +4750,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
 
     std::string g_fotoPedida;   // roteiro gravado (gpu.cpp): arquivo da foto da proxima imagem apresentada
     void PedirFoto(const std::string& arquivo) { g_fotoPedida = arquivo; }
+    void IniciarRajada() { g_rajadaPedida = true; }
 
     bool PresentFrame(uint32_t frontBuffer)
     {
@@ -4394,6 +4882,25 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             {
                 gpuprof::BeforePresent(render::FrameList());
                 ID3D12Resource* imagem = MascararEscuro(list, pieces ? fbTex.Get() : g_lastResolve);
+                if (g_rajadaPedida.exchange(false) && g_rajadaRestante == 0)
+                {
+                    g_rajadaRestante = RAJADA;
+                    g_rajadaFeitas = 0;
+                    g_rajadaDir = "diag\\rajada_" + std::to_string(g_frameNumber);
+                    CreateDirectoryA("diag", nullptr);
+                    CreateDirectoryA(g_rajadaDir.c_str(), nullptr);
+                    Log("[rajada] tecla ': %d fotos seguidas a partir do quadro %llu em %s", RAJADA, (unsigned long long)g_frameNumber, g_rajadaDir.c_str());
+                }
+                if (g_rajadaRestante > 0 && g_fotoPedida.empty())
+                {
+                    char nome[64];
+                    snprintf(nome, sizeof(nome), "\\foto_%02d_quadro_%llu.bmp", g_rajadaFeitas, (unsigned long long)g_frameNumber);
+                    g_fotoPedida = g_rajadaDir + nome;
+                    Log("[rajada] foto %02d quadro %llu: superficie do mar %u, chao do mar %u, reflexo %u, fundo %u", g_rajadaFeitas,
+                        (unsigned long long)g_frameNumber, g_aguaQuadro, g_fundoMarQuadro, g_reflexoQuadro, g_refracaoQuadro);
+                    g_rajadaFeitas++;
+                    g_rajadaRestante--;
+                }
                 if (!g_fotoPedida.empty())   // a imagem final (lida da placa depois do quadro, em SavePendingShots)
                 {
                     D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -4445,9 +4952,26 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             for (const char* p = t; p && *p; p = strchr(p, ','), p = p ? p + 1 : nullptr)
                 if (int q = 0, e = 0, so = 0; sscanf(p, "%d:%d:%d", &q, &e, &so) == 3 && (uint64_t)q == g_frameNumber)
                 { OpcoesAtuais().escala = e; OpcoesAtuais().sombras = so; g_trocarEscala = true; }
+        // teste: MSAA=0..3 no ao_vivo.txt troca o MSAA com o jogo aberto (comparar e medir no mesmo lugar)
+        if (const std::string v = AoVivoValor("MSAA"); !v.empty() && atoi(v.c_str()) != OpcoesAtuais().msaa)
+        { OpcoesAtuais().msaa = atoi(v.c_str()); g_trocarEscala = true; }
         if (g_trocarEscala.exchange(false)) TrocarEscala();
         g_usedPersistThisFrame = false;
         g_fullResolveThisFrame = false;
+        // FCRECOMP_AGUALOG=1: quadros em que o numero de desenhos da superficie do mar muda (agua sumindo por 1 quadro)
+        if (static const bool aguaLog = getenv("FCRECOMP_AGUALOG") != nullptr; aguaLog)
+        {
+            static uint32_t antes = 0, reflAntes = 0, refrAntes = 0, chaoAntes = 0;
+            static LARGE_INTEGER t0{}; LARGE_INTEGER t1, fq; QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&fq);
+            Log("[agua] tique %lld quadro %llu: %.1f ms (placa %.1f ms), reflexo com %u desenhos (pedra %u)", (long long)RoteiroTiqueAtual(), (unsigned long long)g_frameNumber,
+                t0.QuadPart ? (t1.QuadPart - t0.QuadPart) * 1000.0 / fq.QuadPart : 0.0, render::LastGpuFrameMs(), g_reflexoDesenhos, g_reflexoPedras);
+            t0 = t1;
+            if (g_aguaQuadro != antes || g_reflexoQuadro != reflAntes || g_refracaoQuadro != refrAntes || g_fundoMarQuadro != chaoAntes)
+                Log("[agua] tique %lld quadro %llu: superficie %u, chao do mar %u, reflexo %u, fundo %u (antes %u/%u/%u/%u)", (long long)RoteiroTiqueAtual(),
+                    (unsigned long long)g_frameNumber, g_aguaQuadro, g_fundoMarQuadro, g_reflexoQuadro, g_refracaoQuadro, antes, chaoAntes, reflAntes, refrAntes);
+            antes = g_aguaQuadro; reflAntes = g_reflexoQuadro; refrAntes = g_refracaoQuadro; chaoAntes = g_fundoMarQuadro;
+        }
+        g_aguaQuadro = 0; g_reflexoQuadro = 0; g_refracaoQuadro = 0; g_fundoMarQuadro = 0;
         g_drawsThisFrame = 0;
         g_frameNumber++;
         gpuprof::BeginFrame(g_frameNumber);

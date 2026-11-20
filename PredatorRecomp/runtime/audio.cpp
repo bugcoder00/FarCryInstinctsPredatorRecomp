@@ -27,6 +27,8 @@ namespace
     std::atomic<uint32_t> g_callback{ 0 }, g_callbackArg{ 0 };
     std::atomic<uint64_t> g_framesSubmitted{ 0 }, g_callbacks{ 0 }, g_submitsInCallback{ 0 };
     thread_local bool t_inCallback = false;
+    // a thread de som esta dentro do callback do jogo (XAudioUnregisterRenderDriverClient espera ele terminar)
+    std::atomic<bool> g_emCallback{ false };
 
     constexpr uint32_t CHANNELS = 6, SAMPLES = 256;          // quadro do Xbox: 6 canais x 256 amostras
     // saida em estereo (padrao, como o console na TV) ou 5.1 de verdade (FCRECOMP_SOM51=1)
@@ -179,11 +181,16 @@ namespace
                 if (!cb) continue;
             }
             if (output && QueuedFrames() == 0 && g_callbacks) g_vazias++;   // a fila acabou: o PC tocou silencio (picote)
+            // marca "dentro do callback" e confere de novo: se o jogo desregistrou no meio, nao chama (o motor de som
+            // dele pode ja estar sendo desmontado; editor de mapas voltando ao jogo lia um ponteiro zerado)
+            g_emCallback = true;
+            if (g_callback != cb) { g_emCallback = false; continue; }
             SetGpr(*ctx, 3, g_callbackArg);
             g_callbacks++;
             t_inCallback = true;
             GuestCall(*ctx, cb);
             t_inCallback = false;
+            g_emCallback = false;
         }
     }
 }
@@ -226,10 +233,38 @@ KFUNC(XAudioRegisterRenderDriverClient)
     Ret(ctx, 0);
 }
 
+// Como no Xbox: depois de desregistrar, o callback nao roda mais; se estiver rodando agora, espera terminar (o jogo
+// desmonta o motor de som logo em seguida). Chamado de dentro do proprio callback, nao espera (travaria).
 KFUNC(XAudioUnregisterRenderDriverClient)
 {
     g_callback = 0;
+    if (!t_inCallback)
+    {
+        const ULONGLONG t0 = GetTickCount64();
+        while (g_emCallback && GetTickCount64() - t0 < 2000) Sleep(1);
+        if (g_emCallback) Log("[audio] callback do jogo nao terminou em 2 s ao desregistrar o driver");
+    }
+    Log("[audio] driver desregistrado");
     Ret(ctx, 0);
+}
+
+// pular_cena.cpp: saida em silencio enquanto uma cena e adiantada
+std::atomic<bool> g_somCalado{ false };
+// pular cena (pular_cena.cpp): sons que a cena pulada solta (vento, tiros, explosao do barco) nao podem continuar no
+// jogo (o som fica calado ate o fim da parada). SonsDoPuloInicio guarda os sons que ja existiam; ate SonsDoPuloFim + 500 ms, todo som novo da lista do gerente
+// de vozes (sub_824C37B8) recebe o estado 3 (parado; o gerente o tira da lista).
+std::atomic<int> g_sonsPulo{ 0 };            // 0 nada, 1 pedido (guardar a lista), 2 parando os novos
+std::atomic<bool> g_sonsCenaPedido{ false };  // BeginCutScene: guardar a lista na proxima rodada (o vento da intro do
+                                              // treino comeca com a cena, antes de o jogador abrir o menu)
+std::mutex g_sonsCenaMutex;
+std::vector<uint32_t> g_sonsCena;             // sons que existiam quando a cena comecou
+bool g_sonsCenaOk = false;
+void SonsCenaComeca() { g_sonsCenaPedido = true; }
+std::atomic<double> g_sonsPuloFim{ 0 };      // perf::Now() ate quando continua parando (0 = enquanto durar o pulo)
+void SonsDoPuloInicio() { g_sonsPuloFim = 0; g_sonsPulo = 1; }
+void SonsDoPuloFim()   // o som volta (g_somCalado) quando a parada acaba
+{
+    if (g_sonsPulo) g_sonsPuloFim = perf::Now() + 500; else g_somCalado = false;
 }
 
 // XAudioSubmitRenderDriverFrame(driver, samples*): 256 amostras x 6 canais em float big-endian, um canal depois do
@@ -250,6 +285,7 @@ KFUNC(XAudioSubmitRenderDriverFrame)
                 uint32_t v = __builtin_bswap32(in[c * SAMPLES + i]);
                 memcpy(&out[i * CHANNELS + c], &v, 4);
             }
+        if (g_somCalado.load(std::memory_order_relaxed)) std::fill(std::begin(out), std::end(out), 0.0f);   // pular_cena.cpp
         if (perf::AvLog())   // inicio de cada som depois de silencio (sincronia com a imagem)
         {
             static bool sound = false;
@@ -340,8 +376,10 @@ KFUNC(XAudioGetVoiceCategoryVolume)
 GUEST_DECLARE_ORIGINAL(sub_824B8020);
 GUEST_FUNC(sub_824B8020)
 {
-    if (static const uint32_t alvo = getenv("FCRECOMP_SOMEVENTO") ? strtoul(getenv("FCRECOMP_SOMEVENTO"), nullptr, 16) : 0;
-        alvo && Gpr32(ctx, 4) == alvo)
+    // FCRECOMP_SOMEVENTO=todos: todos os eventos (para achar quem pede um som)
+    if (static const uint32_t alvo = getenv("FCRECOMP_SOMEVENTO") ? (!strcmp(getenv("FCRECOMP_SOMEVENTO"), "todos") ? 0xFFFFFFFFu
+                                                                      : strtoul(getenv("FCRECOMP_SOMEVENTO"), nullptr, 16)) : 0;
+        alvo && (alvo == 0xFFFFFFFFu || Gpr32(ctx, 4) == alvo))
     {
         std::string chain;
         uint32_t sp = Gpr32(ctx, 1);
@@ -358,6 +396,39 @@ GUEST_FUNC(sub_824B8020)
         Log("[somevento] t=%.0f obj %08X id %08X lr %08X ev %08X:%s | pilha:%s", perf::Now(), Gpr32(ctx, 4), Gpr32(ctx, 5),
             (uint32_t)Lr(ctx), ev, campos.c_str(), chain.c_str());
     }
+    // estalo do gatilho dos fuzis (TriggerSoundEvent 4521985 = 0x450001, lua.dat BasicWeapon: tocado no 1o tiro de cada
+    // aperto): com toques rapidos ele soava como "arma sem balas" por cima do tiro (pedido do usuario, 17/11). O som de
+    // arma vazia de verdade (EmptyChamberSoundEvent 0x450008) e o das pistolas (0x450000) continuam.
+    // FCRECOMP_CLIQUEGATILHO=1 devolve o estalo.
+    // So quando sai tiro: o script de tiro (lua.dat linha 276) chama BasicWeapon.PlayTriggerSound, entao ha duas camadas
+    // da maquina Lua (retorno 823E5AAC) antes da chamada vinda do C (823DF15C). Com a arma vazia o estalo e o "clique sem
+    // balas" do fuzil (fuzis nao tem EmptyChamberSoundEvent) e continua tocando.
+    if (static const bool manter = getenv("FCRECOMP_CLIQUEGATILHO") != nullptr; !manter)
+        if (uint32_t pev = Gpr32(ctx, 6); pev)
+            if (uint32_t ev = R32(pev); ev && R32(ev) == 0x00450001u)
+            {
+                int camadasLua = 0;
+                std::string chain;
+                uint32_t sp = Gpr32(ctx, 1);
+                for (int i = 0; i < 24 && sp >= 0x10000000 && sp < 0x80000000; i++)
+                {
+                    uint32_t next = R32(sp);
+                    if (next <= sp) break;
+                    const uint32_t ret = R32(next - 8);
+                    char b[16]; snprintf(b, sizeof(b), " %08X", ret); chain += b;
+                    if (ret == 0x823DF15Cu) break;
+                    if (ret == 0x823E5AACu) camadasLua++;
+                    sp = next;
+                }
+                const bool tiro = camadasLua >= 2;
+                Log("[som] estalo do gatilho (%u camadas Lua): %s |%s", camadasLua, tiro ? "tiro, silenciado" : "sem tiro, toca",
+                    chain.c_str());
+                if (tiro)
+                {
+                    Ret(ctx, (uint64_t)(int64_t)-1);   // como o caminho "nao tocou" da funcao original
+                    return;
+                }
+            }
     GUEST_ORIGINAL(sub_824B8020)(ctx, base);
 }
 
@@ -457,6 +528,60 @@ GUEST_FUNC(sub_824C37B8)
                 float x = F(cam + 12), y = F(cam + 16), z = F(cam + 20);
                 float d = std::sqrt((x - lx) * (x - lx) + (y - ly) * (y - ly) + (z - lz) * (z - lz));
                 Log("[3d]   som %08X vol %.1f dB pos %.2f %.2f %.2f (dist %.2f) camadas %u", som, (int32_t)R32(som + 88) / 65536.0, x, y, z, d, R32(som));            }
+        }
+    }
+    if (root && g_sonsCenaPedido.exchange(false))
+    {
+        std::lock_guard l(g_sonsCenaMutex);
+        g_sonsCena.clear();
+        int n = 0;
+        for (uint32_t no = R32(root + 4); no && n < 512; no = R32(no), n++) if (uint32_t som = R32(no + 8)) g_sonsCena.push_back(som);
+        g_sonsCenaOk = true;
+    }
+    if (const int pulo = g_sonsPulo.load(); pulo && root)
+    {
+        static std::vector<uint32_t> antes;
+        static int parados = 0;
+        int n = 0;
+        if (pulo == 1)
+        {
+            antes.clear(); parados = 0;
+            std::lock_guard l(g_sonsCenaMutex);
+            if (g_sonsCenaOk) antes = g_sonsCena;   // os de antes da cena: o que a cena soltou tambem para
+            else for (uint32_t no = R32(root + 4); no && n < 512; no = R32(no), n++) if (uint32_t som = R32(no + 8)) antes.push_back(som);
+            g_sonsPulo = 2;
+        }
+        else
+        {
+            for (uint32_t no = R32(root + 4); no && n < 512; no = R32(no), n++)
+            {
+                const uint32_t som = R32(no + 8);
+                if (!som || R32(som + 40) == 3 || std::find(antes.begin(), antes.end(), som) != antes.end()) continue;
+                // parar como o proprio gerente faz quando tira a voz de um som (824C38A0): funcoes da tabela do motor
+                // (root+24): +28 (def +16, som+28) desliga a voz de verdade; +4 (dono +4, def, acabou) avisa o dono.
+                // So escrever o estado 3 deixava a voz tocando: a musica do menu de pausa (em laco) nunca parava.
+                if (const uint32_t tab = R32(root + 24))
+                {
+                    GuestCpu salvo = ctx;
+                    const uint32_t est = R32(som + 40);
+                    SetGpr(ctx, 3, R32(som + 16)); SetGpr(ctx, 4, som + 28);
+                    GuestCall(ctx, R32(tab + 28));
+                    if (est != 2)
+                    {
+                        SetGpr(ctx, 3, R32(som + 4)); SetGpr(ctx, 4, R32(som + 16)); SetGpr(ctx, 5, 1);
+                        GuestCall(ctx, R32(tab + 4));
+                    }
+                    ctx = salvo;
+                }
+                W32(som + 40, 3);
+                parados++;
+            }
+            if (const double fim = g_sonsPuloFim.load(); fim > 0 && perf::Now() > fim)
+            {
+                Log("[pularcena] %d sons da cena parados", parados);
+                g_sonsPulo = 0;
+                g_somCalado = false;
+            }
         }
     }
     uint32_t protegidos[64]; int nProt = 0;

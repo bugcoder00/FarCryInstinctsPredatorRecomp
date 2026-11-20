@@ -84,7 +84,7 @@ namespace
         {
             uint16_t c = R16(a + (uint32_t)i * 2);
             if (!c) break;
-            s += c < 0x80 ? (char)c : '?';
+            s += c < 0x100 ? (char)c : '?';   // Latin-1: nomes com acento (cópia, ação...) ficam certos no _nome.txt
         }
         return s;
     }
@@ -603,6 +603,25 @@ KFUNC(XamShowKeyboardUI)
     }
     Log("[save] XamShowKeyboardUI (opcoes %08X, ate %u letras) titulo \"%s\" descricao \"%s\" -> \"%s\"", Gpr32(ctx, 4), len, Gpr32(ctx, 6) ? ReadWide(Gpr32(ctx, 6), 128).c_str() : "",
         Gpr32(ctx, 7) ? ReadWide(Gpr32(ctx, 7), 256).c_str() : "", text.c_str());
+    // nome do jogo salvo / do mapa do editor: abre a caixa de digitacao (teclado.cpp) ja com o nome automatico, para o
+    // jogador trocar se quiser. Nos testes automaticos (roteiro, FCRECOMP_AUTOINPUT, FCRECOMP_TECLADO) segue sozinho.
+    if (!RoteiroAtivo() && !getenv("FCRECOMP_AUTOINPUT") && !getenv("FCRECOMP_TECLADO") && buf && len > 1)
+    {
+        std::wstring padrao(text.begin(), text.end());
+        std::wstring titulo = ReadWideW(Gpr32(ctx, 6), 128), desc = ReadWideW(Gpr32(ctx, 7), 256);
+        if (ov) { W32(ov + 0x00, X_ERROR_IO_PENDING); W32(ov + 0x18, X_ERROR_IO_PENDING); }
+        Broadcast(0x00000009, 1);   // tela do sistema aberta
+        TecladoAbrir(titulo, desc, padrao, len, [buf, len, ov, padrao](bool ok, const std::wstring& texto) {
+            std::wstring t = texto;
+            while (!t.empty() && t.back() == L' ') t.pop_back();
+            if (ok && t.empty()) t = padrao;   // nome vazio: fica o automatico
+            std::string s(t.begin(), t.end());
+            Log("[teclado] nome %s \"%s\"", ok ? "confirmado" : "cancelado", ok ? s.c_str() : "");
+            TecladoResponder(buf, len, ov, ok, t);
+        });
+        Ret(ctx, X_ERROR_IO_PENDING);
+        return;
+    }
     for (uint32_t i = 0; buf && i < len; i++) W16(buf + i * 2, i < text.size() && i + 1 < len ? (uint8_t)text[i] : 0);
     SystemUiShown();
     Ret(ctx, Complete(ov, X_ERROR_SUCCESS));

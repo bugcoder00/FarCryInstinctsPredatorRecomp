@@ -1,4 +1,4 @@
-FAR CRY INSTINCTS PREDATOR RECOMP 0.1.4
+FAR CRY INSTINCTS PREDATOR RECOMP 1.0.0
 =======================================
 
 PC version of Far Cry Instincts Predator (Xbox 360), made by static recompilation.
@@ -12,16 +12,20 @@ WHAT YOU NEED
 - 8 GB of RAM (the game uses ~1.5 GB).
 - A DirectX 12 graphics card (integrated graphics works).
   The launcher shows what your PC has and whether it meets this minimum.
-- YOUR copy of Far Cry Instincts Predator for Xbox 360 (USA/Europe version), with the files
-  extracted to a folder. The folder must have default.xex and the game's .dat files.
-  To extract the disc ISO use a tool such as extract-xiso.
+- YOUR copy of Far Cry Instincts Predator for Xbox 360 (USA/Europe version): the disc .iso file
+  (the game runs straight from it, no extracting) or the files extracted to a folder (the folder must
+  have default.xex and the game's .dat files).
 
 HOW TO PLAY
 -----------
 1. Extract this package to a folder you can write to (for example Documents\FarCryPredatorRecomp).
    Avoid "Program Files": the game saves games and options in its own folder.
-2. Open PredatorGame.exe. The launcher appears.
-3. In "Game folder", click Browse and choose the folder with default.xex.
+2. Open PredatorGame.exe. The launcher appears. The language (Portuguese or English) is changed at the top
+   right, in "IDIOMA - LANGUAGE"; the first time it follows the Windows language. In Portuguese the game's
+   menus and texts are also in Portuguese (applied on the fly, your copy's files are not changed); in English
+   the game keeps the disc's original texts.
+3. In "Game folder", click "ISO file..." and choose the disc .iso, or "Folder..." and choose the
+   folder with default.xex.
 4. Adjust video and controls if you want and click Play.
    The first time, the program prepares the files and the graphics: it may take about 1 minute longer.
    "Internal resolution" 1.5x or 2x makes the image sharper but is much heavier on the graphics card
@@ -75,6 +79,7 @@ CONTROLS
   per second and vertical sync, the same options as the launcher (changes there are saved for the
   launcher too). Everything changes right away (with internal resolution and shadows the image may
   flicker once). Window size and aspect ratio stay in the launcher.
+- The main menu has "QUIT GAME", which closes the game (the same as closing the window).
 
 PROFILES
 --------
@@ -87,14 +92,16 @@ KEYS DURING THE GAME
 F1          controller settings (to change a key: click the field and press the key, the mouse
             button or turn the wheel; right click on the field leaves it empty; if the key was already
             used by another action it moves: that field flashes red and is left empty)
-F2          release/capture the mouse in the window
+F2          video options (they change right away and are saved in opcoes.ini)
+F3          release/capture the mouse in the window
 + and -     mouse sensitivity
 Alt+Enter   full screen / window
 F12         save a problem report ("bugs" folder) when something goes wrong
             (if the graphics card stops, the game creates this folder by itself and shows where it is)
 
 CHEAT CODES: in the main menu, CHEATS MENU opens a small box to type the code with the
-keyboard (Enter confirms, Esc or B on the controller cancels).
+keyboard (Enter confirms, Esc or B on the controller cancels). Or turn the cheats on in the
+launcher CHEATS tab (each one has a description and works without typing; there is also "Invincible").
 
 LOCAL NETWORK PLAY (SYSTEM LINK)
 --------------------------------
@@ -162,4 +169,4 @@ controles.ini      controls
 fcrecomp_log.txt   log (send it along when reporting a problem)
 
                                    Author: bugcoder00
-                                     Version 0.1.4
+                                     Version 1.0.0

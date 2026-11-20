@@ -23,6 +23,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <windows.h>
 
 namespace
 {
@@ -139,7 +140,7 @@ int Valor(Linha l)
     const Opcoes& o = OpcoesAtuais();
     switch (l)
     {
-    case RESOLUCAO: return std::clamp(o.escala, 0, 3);
+    case RESOLUCAO: return o.fsr > 0 ? 3 + ListaDoFsr(o.fsr) : std::clamp(o.escala, 0, 3);   // 4..7 = FSR ultra, qualidade, equilibrado, desempenho (render.cpp)
     case SOMBRAS: return std::clamp(o.sombras, 0, 2);
     case SUAVIZACAO: return std::clamp(o.antisserrilhado, 0, 3);
     case FPS: return std::clamp(o.fps, 0, 2);
@@ -147,17 +148,19 @@ int Valor(Linha l)
     }
 }
 
-int Quantos(Linha l) { return l == RESOLUCAO || l == SUAVIZACAO ? 4 : l == VSYNC ? 2 : 3; }
+int Quantos(Linha l) { return l == RESOLUCAO ? 8 : l == SUAVIZACAO ? 4 : l == VSYNC ? 2 : 3; }
 
 std::string NomeValor(Linha l, int v)
 {
     switch (l)
     {
-    case RESOLUCAO: { static const char* n[] = { "1x (1280x720)", "1,5x (1920x1080)", "2x (2560x1440)", "3x (3840x2160)" };
-                      static const char* e[] = { "1x (1280x720)", "1.5x (1920x1080)", "2x (2560x1440)", "3x (3840x2160)" }; return TR(n, e)[v]; }
-    case SOMBRAS: { static const char* n[] = { "NORMAL", "ALTA", "MUITO ALTA" }, *e[] = { "NORMAL", "HIGH", "VERY HIGH" }; return TR(n, e)[v]; }
-    case SUAVIZACAO: { static const char* n[] = { "DESLIGADA", "LEVE", "MÉDIA", "FORTE" }, *e[] = { "OFF", "LOW", "MEDIUM", "HIGH" }; return TR(n, e)[v]; }
-    case FPS: { static const char* n[] = { "30", "60", "SEM LIMITE" }, *e[] = { "30", "60", "UNLOCKED" }; return TR(n, e)[v]; }
+    case RESOLUCAO: { static const char* n[] = { "1x (1280x720)", "1,5x (1920x1080)", "2x (2560x1440)", "3x (3840x2160)",
+                                                 "FSR ULTRA QUALIDADE", "FSR QUALIDADE", "FSR EQUILIBRADO", "FSR DESEMPENHO" };
+                      static const char* e[] = { "1x (1280x720)", "1.5x (1920x1080)", "2x (2560x1440)", "3x (3840x2160)",
+                                                 "FSR ULTRA QUALITY", "FSR QUALITY", "FSR BALANCED", "FSR PERFORMANCE" }; return TR(n[v], e[v]); }
+    case SOMBRAS: { static const char* n[] = { "NORMAL", "ALTA", "MUITO ALTA" }, *e[] = { "NORMAL", "HIGH", "VERY HIGH" }; return TR(n[v], e[v]); }
+    case SUAVIZACAO: { static const char* n[] = { "DESLIGADA", "LEVE", "MÉDIA", "FORTE" }, *e[] = { "OFF", "LOW", "MEDIUM", "HIGH" }; return TR(n[v], e[v]); }
+    case FPS: { static const char* n[] = { "30", "60", "SEM LIMITE" }, *e[] = { "30", "60", "UNLOCKED" }; return TR(n[v], e[v]); }
     default: return v ? TR("SIM", "YES") : TR("NÃO", "NO");
     }
 }
@@ -166,26 +169,26 @@ const char* NomeLinha(Linha l)
 {
     static const char* n[] = { "RESOLUÇÃO INTERNA", "SOMBRAS", "SUAVIZAÇÃO", "QUADROS POR SEGUNDO", "SINCRONIA VERTICAL" };
     static const char* e[] = { "INTERNAL RESOLUTION", "SHADOWS", "ANTI-ALIASING", "FRAMES PER SECOND", "VERTICAL SYNC" };
-    return TR(n, e)[l];
+    return TR(n[l], e[l]);
 }
 
 const char* Ajuda(Linha l)
 {
     static const char* n[] = {
-        "Imagem mais nítida, mas pesa mais na placa de vídeo.",
+        "Imagem mais nítida, mas pesa mais na placa de vídeo. FSR desenha menor e amplia para a janela (mais leve).",
         "Sombras com bordas mais definidas (mais pesadas).",
         "Suaviza as bordas serrilhadas da imagem.",
         "30 como o original, 60 mais fluido. Sem limite é experimental.",
         "Evita \"rasgos\" na imagem, mas pode baixar o FPS.",
     };
     static const char* e[] = {
-        "Sharper image, but heavier on the graphics card.",
+        "Sharper image, but heavier on the graphics card. FSR draws smaller and upscales to the window (lighter).",
         "Shadows with sharper edges (heavier).",
         "Smooths the jagged edges of the image.",
         "30 like the original, 60 smoother. Unlocked is experimental.",
         "Avoids image \"tearing\", but may lower the FPS.",
     };
-    return TR(n, e)[l];
+    return TR(n[l], e[l]);
 }
 
 void Mudar(Linha l, int v)
@@ -195,7 +198,7 @@ void Mudar(Linha l, int v)
     if (v == Valor(l)) return;
     switch (l)
     {
-    case RESOLUCAO: o.escala = v; xdraw::PedirNovaEscala(); break;
+    case RESOLUCAO: if (v <= 3) { o.escala = v; o.fsr = 0; } else o.fsr = FsrDaLista(v - 3); xdraw::PedirNovaEscala(); break;
     case SOMBRAS: o.sombras = v; xdraw::PedirNovaEscala(); break;
     case SUAVIZACAO: o.antisserrilhado = v; xdraw::RecarregarSuavizacao(); break;
     case FPS: o.fps = v; break;
@@ -376,12 +379,276 @@ GUEST_FUNC(sub_821D8D00)
     SetGpr(ctx, 3, 0);
 }
 
+// ---------------------------------------------------------------- menu de pausa (pular_cena.cpp)
+// Dentro da fase a pagina de OPCOES DE JOGO e outra (pacote CryInGame): o menu de pausa (P_StartMenu) guarda a sua em
+// pausa+248 (sub_821AF940: B_Video -> R32(pausa+248)->[9](pagina, 1), se pausa+244 existir), da mesma classe da P_Video
+// (mesma tabela de virtuais). O item escondido do menu de pausa abre ela no modo video; o voltar dela tira a pagina da
+// pilha e o menu de pausa volta.
+constexpr uint32_t VT_VIDEO = 0x8205C430;
+
+uint32_t PaginaVideoDaPausa(uint32_t pausa) { return pausa && R32(pausa + 244) ? R32(pausa + 248) : 0; }
+
+bool MenuVideoDisponivel(uint32_t pausa)
+{
+    const uint32_t p = PaginaVideoDaPausa(pausa);
+    const bool ok = p && R32(p) == VT_VIDEO && R32(p + 80) && Conjunto(p);
+    static uint32_t antes = 1;
+    if (!ok && p != antes)
+        Log("[video] pagina de video da pausa indisponivel: %08X vt %08X conjuntos %08X", p, p ? R32(p) : 0, p ? R32(p + 80) : 0);
+    antes = ok ? 1 : p;
+    return ok;
+}
+
+bool MenuVideoAbrir(GuestCpu& ctx, uint32_t pausa)
+{
+    if (!MenuVideoDisponivel(pausa)) return false;
+    const uint32_t p = PaginaVideoDaPausa(pausa);
+    g_video = true;
+    GuestCpu salvo = ctx;
+    SetGpr(ctx, 3, p); SetGpr(ctx, 4, 1);
+    GuestCall(ctx, R32(VT_VIDEO + 9 * 4));
+    ctx = salvo;
+    Log("[video] OPCOES DE VIDEO aberta pelo menu de pausa (pagina %08X)", p);
+    return true;
+}
+
+// menu de pausa aberto (devolver = true) ou montado numa fase nova (os widgets da fase anterior ja nao existem): se a
+// pagina de video ficou no modo video (o menu fechou com START em cima dela), sai dele
+void MenuVideoFechar(GuestCpu& ctx, bool devolver)
+{
+    if (!g_video && g_originais.empty()) return;
+    if (devolver) DevolverRotulos(ctx); else g_originais.clear();
+    g_video = false;
+}
+
+// ---------------------------------------------------------------- pausa > OPCOES > "OPCOES DE VIDEO"
+// A pagina OPCOES da pausa (P_EditProfile do pacote CryInGame) so tem OPCOES DO CONTROLE (B_ControlSetup) e OPCOES DE
+// JOGO (B_Video), sem item escondido. Na primeira vez que a lista dela e desenhada (MM_LISTA, menu_mouse.cpp, thread
+// dos menus), o item OPCOES DE JOGO e copiado como um terceiro, embaixo dele, com o id do B_MultiplayerSetup:
+//  - lista (+8/+12/+16 = vetor dos elementos da pagina, que o jogo desenha e o direcional percorre): vetor novo com o
+//    item copiado no fim; vizinhos (+60 cima, +64 baixo) refeitos: CONTROLE <-> JOGO <-> VIDEO <-> CONTROLE.
+//  - elemento (80 bytes, tabela 0x82078BC4): +4 id, +8 widget, +12 estados (animacoes de foco; dono = elemento),
+//    +48..+56 vetor dos ouvintes (a pagina: o A no item chega a sub_821AF940 com o id do item).
+//  - widget (128 bytes, tabela 0x820791C0): +24 posicao (x, y int16), wstring do texto em +60.
+// Tudo com o alocador dos menus do jogo (sub_823ECDA8), que o jogo libera do jeito dele quando a pagina e desfeita.
+// Os estados (+12) sao os do OPCOES DE JOGO (os mesmos objetos): no destrutor do item copiado o +12 e zerado antes,
+// para nao serem liberados duas vezes. Os estados trazem a posicao do OPCOES DE JOGO: a altura do item copiado e
+// refeita a cada desenho (a do OPCOES DE JOGO + o espaco entre os dois primeiros). A ajuda do item (embaixo) e
+// escrita em pular_cena.cpp (sub_821AFD28, item focado do menu de pausa).
+namespace
+{
+constexpr uint32_t ID_CONTROLE = 2003165906;
+constexpr uint32_t VT_ELEMENTO = 0x82078BC4, VT_WIDGET_TEXTO = 0x820791C0;
+constexpr uint32_t ALOCA_MENU = 0x823ECDA8;   // (r3 = 2872, r4 = 19, r5 = 196, r6 = tamanho, r7 = 0) -> memoria
+
+struct ItemCopiado { uint32_t lista, controle, jogo, item, widget; };
+std::vector<ItemCopiado> g_copiados;
+
+// posicao do item copiado a cada desenho: a mesma distancia do OPCOES DE JOGO que ele tem do OPCOES DO CONTROLE
+// (os itens entram animados: durante a entrada a copia anda junto); os estados copiados levariam para a do JOGO
+void PosicionarCopia(const ItemCopiado& c)
+{
+    const uint32_t w1 = R32(c.controle + 8), w2 = R32(c.jogo + 8);
+    if (!w1 || !w2 || c.jogo == c.item) return;
+    W16(c.widget + 24, R16(w2 + 24));
+    W16(c.widget + 26, (uint16_t)(2 * (int16_t)R16(w2 + 26) - (int16_t)R16(w1 + 26)));
+}
+
+uint32_t AlocarMenu(GuestCpu& ctx, uint32_t tam)
+{
+    GuestCpu salvo = ctx;
+    SetGpr(ctx, 3, 2872); SetGpr(ctx, 4, 19); SetGpr(ctx, 5, 196); SetGpr(ctx, 6, tam); SetGpr(ctx, 7, 0);
+    GuestCall(ctx, ALOCA_MENU);
+    const uint32_t r = Gpr32(ctx, 3);
+    ctx = salvo;
+    return r;
+}
+
+void CopiarItemVideo(GuestCpu& ctx, uint32_t L)
+{
+    const uint32_t ini = R32(L + 8), fim = R32(L + 12);
+    if (!ini || fim < ini || fim - ini > 32 * 4) return;
+    uint32_t e1 = 0, e2 = 0;
+    for (uint32_t p = ini; p < fim; p += 4)
+    {
+        const uint32_t e = R32(p);
+        if (!e || R32(e) != VT_ELEMENTO) continue;
+        const uint32_t id = R32(e + 4);
+        if (id == ID_MULTIJOGADOR || id == 766419915u || id == 1011537169u) return;   // ja tem / menu do perfil
+        if (id == ID_CONTROLE) e1 = e;
+        if (id == ID_VIDEO) e2 = e;
+    }
+    if (!e1 || !e2) return;
+    const uint32_t w1 = R32(e1 + 8), w2 = R32(e2 + 8);
+    // o OPCOES DE JOGO sem foco, sem filhos e ligado so ao OPCOES DO CONTROLE (a copia sai como ele esta)
+    if (!w1 || !w2 || R32(w2) != VT_WIDGET_TEXTO || R32(w2 + 92) || R32(w2 + 96) || R32(e2 + 16) || R32(L + 32) == e2 ||
+        R32(e1 + 64) != e2 || R32(e2 + 60) != e1 || R32(e2 + 64) != e1)
+        return;
+    const uint32_t n = (fim - ini) / 4, o0 = R32(e2 + 48), o1 = R32(e2 + 52);
+    const uint32_t no = o1 >= o0 && o1 - o0 <= 64 * 4 ? (o1 - o0) / 4 : 0;
+    const uint32_t w = AlocarMenu(ctx, 128), e = AlocarMenu(ctx, 80), v = AlocarMenu(ctx, (n + 1) * 4),
+                   ouv = AlocarMenu(ctx, std::max(no, 1u) * 4);
+    if (!w || !e || !v || !ouv)
+    {
+        Log("[video] pausa > OPCOES: sem memoria para o item OPCOES DE VIDEO");
+        return;
+    }
+    // widget: copia do OPCOES DE JOGO, com texto proprio, mais embaixo
+    memcpy(G(w), G(w2), 128);
+    W32(w + 4, w + 8);
+    memset(G(w + 64), 0, 16); W32(w + 80, 0); W32(w + 84, 7);   // wstring vazia (sem buffer)
+    EscreverTexto(ctx, w, TR("OPÇÕES DE VÍDEO", "VIDEO OPTIONS"));
+    // elemento
+    memcpy(G(e), G(e2), 80);
+    W32(e + 4, ID_MULTIJOGADOR);
+    W32(e + 8, w);
+    for (uint32_t k = 0; k < no; k++) W32(ouv + k * 4, R32(o0 + k * 4));
+    W32(e + 48, ouv); W32(e + 52, ouv + no * 4); W32(e + 56, ouv + no * 4);
+    // vizinhos: CONTROLE <-> JOGO <-> VIDEO <-> CONTROLE
+    W32(e2 + 64, e); W32(e + 60, e2); W32(e + 64, e1); W32(e1 + 60, e);
+    // vetor da lista com o item novo no fim (o antigo fica para o jogo, sem uso)
+    for (uint32_t k = 0; k < n; k++) W32(v + k * 4, R32(ini + k * 4));
+    W32(v + n * 4, e);
+    W32(L + 8, v); W32(L + 12, v + (n + 1) * 4); W32(L + 16, v + (n + 1) * 4);
+    g_copiados.push_back({ L, e1, e2, e, w });
+    PosicionarCopia(g_copiados.back());
+    Log("[video] pausa > OPCOES: item OPCOES DE VIDEO %08X (widget %08X) copiado de %08X na lista %08X (%u ouvintes)", e, w, e2, L, no);
+}
+}
+
+// MM_LISTA (menu_mouse.cpp): lista do menu desenhada (thread dos menus)
+static void PosicionarSair();   // menu principal (mais abaixo)
+void MenuVideoLista(GuestCpu& ctx, uint32_t L)
+{
+    if (!L) return;
+    PosicionarSair();   // menu principal: SAIR DO JOGO na coluna dos outros itens
+    for (auto& c : g_copiados)
+        if (c.lista == L)
+        {
+            PosicionarCopia(c);
+            return;
+        }
+    CopiarItemVideo(ctx, L);
+}
+
+// destrutor dos elementos: o item copiado nao libera os estados (sao os do OPCOES DE JOGO)
+GUEST_DECLARE_ORIGINAL(sub_82478088);
+GUEST_FUNC(sub_82478088)
+{
+    const uint32_t e = Gpr32(ctx, 3);
+    for (size_t k = 0; k < g_copiados.size(); k++)
+    {
+        auto& c = g_copiados[k];
+        if (c.item != e && c.jogo != e && c.controle != e) continue;
+        W32(c.item + 12, 0);
+        if (c.item == e) g_copiados.erase(g_copiados.begin() + k);
+        else c.jogo = c.controle = c.item;   // os outros itens foram embora: a altura fica onde esta
+        break;
+    }
+    GUEST_ORIGINAL(sub_82478088)(ctx, base);
+}
+
+// pausa > OPCOES: A num item. OPCOES DE JOGO abre a pagina normal (nunca no modo video); o item copiado abre o modo video
+GUEST_DECLARE_ORIGINAL(sub_821AF940);
+GUEST_FUNC(sub_821AF940)
+{
+    const uint32_t ev = Gpr32(ctx, 4);
+    if (ev && R32(ev + 4) == ID_MULTIJOGADOR) { MenuVideoAbrir(ctx, Gpr32(ctx, 3)); return; }   // OPCOES DE VIDEO (item copiado)
+    if (ev && R32(ev + 4) == ID_VIDEO && g_video) { g_video = false; DevolverRotulos(ctx); }
+    GUEST_ORIGINAL(sub_821AF940)(ctx, base);
+}
+
 // voltar: sai do modo video
 GUEST_DECLARE_ORIGINAL(sub_821D91B8);
 GUEST_FUNC(sub_821D91B8)
 {
     GUEST_ORIGINAL(sub_821D91B8)(ctx, base);
     if (g_video) { g_video = false; DevolverRotulos(ctx); }
+}
+
+// ---------------------------------------------------------------- menu principal (P_Main): "SAIR DO JOGO"
+// A P_Main tem um item de depuracao que o jogo sempre esconde, "CHEATS (DEBUG)" (B_CheatsDebug): sub_821B0DE0 (montagem
+// dos menus, r3 = pagina, guardada em 0x82911A2C) zera o bit 0x80 de elemento+24 (visivel) e o 0x40 de +76
+// (escolhivel). Aqui ele volta com o nome "SAIR DO JOGO" e, escolhido (sub_821B1FD0 = A num item da P_Main, r4 = evento
+// com o id em +4), fecha o jogo pelo mesmo caminho do fechar da janela (evento FCRecomp_Sair, gpu.cpp).
+namespace
+{
+constexpr uint32_t PAGINA_MAIN = 0x82911A2C;
+uint32_t g_sair = 0, g_sairAcima = 0;   // o item e o ultimo item visivel acima dele (MENU DE TRAPACAS ou CREDITOS)
+
+// o item fica onde o jogo o pos no XML (fora da coluna): a cada desenho da lista vai para baixo do item de cima, com o
+// mesmo espaco entre os dois itens de cima (os estados de animacao do item mexem na posicao)
+}
+static void PosicionarSair()
+{
+    if (!g_sair || R32(g_sair) != VT_ELEMENTO || !g_sairAcima || R32(g_sairAcima) != VT_ELEMENTO) return;
+    const uint32_t antes = R32(g_sairAcima + 60);
+    const uint32_t w = R32(g_sair + 8), wa = R32(g_sairAcima + 8), wb = antes ? R32(antes + 8) : 0;
+    if (!w || !wa || !wb) return;
+    W16(w + 24, R16(wa + 24));
+    W16(w + 26, (uint16_t)(2 * (int16_t)R16(wa + 26) - (int16_t)R16(wb + 26)));
+}
+namespace
+{
+
+uint32_t ItemSair(GuestCpu& ctx, uint32_t pagina, uint32_t* irmao = nullptr)
+{
+    if (!pagina || !R32(pagina + 80)) return 0;
+    const uint32_t conjunto = R32(R32(pagina + 80) + 4);
+    if (irmao)
+    {
+        // ultimo item visivel: MENU DE TRAPACAS (B_Cheats) ou, sem ele, CREDITOS
+        const uint32_t trapacas = Elemento(ctx, conjunto, IdDoNome(ctx, "B_Cheats"));
+        *irmao = trapacas && (R8(trapacas + 24) & 0x80) ? trapacas : Elemento(ctx, conjunto, IdDoNome(ctx, "B_Credits"));
+    }
+    return Elemento(ctx, conjunto, IdDoNome(ctx, "B_CheatsDebug"));
+}
+}
+
+GUEST_DECLARE_ORIGINAL(sub_821B0DE0);
+GUEST_FUNC(sub_821B0DE0)
+{
+    GUEST_ORIGINAL(sub_821B0DE0)(ctx, base);
+    GuestCpu salvo = ctx;
+    uint32_t acima = 0;
+    const uint32_t e = ItemSair(ctx, R32(PAGINA_MAIN), &acima);
+    if (e && acima)
+    {
+        W8(e + 24, R8(e + 24) | 0x80);
+        W8(e + 76, R8(acima + 76));   // escolhivel como o item de cima (sem o 0x40 o jogo desenha apagado)
+        // direcional: ... -> item de cima <-> SAIR DO JOGO <-> o que vinha depois do item de cima (o primeiro)
+        if (e != g_sair || R32(acima + 64) != e)
+        {
+            const uint32_t depois = R32(acima + 64);
+            W32(acima + 64, e); W32(e + 60, acima);
+            if (depois && depois != e) { W32(e + 64, depois); W32(depois + 60, e); }
+        }
+        g_sair = e; g_sairAcima = acima;
+        PosicionarSair();
+        if (const uint32_t w = R32(e + 8))
+        {
+            EscreverTexto(ctx, w, TR("SAIR DO JOGO", "QUIT GAME"));
+            SetGpr(ctx, 3, w); SetGpr(ctx, 4, e);   // como em 821B1044: r3 = widget, r4 = elemento
+            GuestCall(ctx, R32(R32(w) + 72));   // o mesmo que o jogo chama depois de mudar o estado do item
+        }
+        static bool uma = false;
+        if (!uma) { uma = true; Log("[menu] SAIR DO JOGO no menu principal (item %08X)", e); }
+    }
+    ctx = salvo;
+}
+
+GUEST_DECLARE_ORIGINAL(sub_821B1FD0);
+GUEST_FUNC(sub_821B1FD0)
+{
+    const uint32_t ev = Gpr32(ctx, 4);
+    if (ev && R32(ev + 4) == IdDoNome(ctx, "B_CheatsDebug"))
+    {
+        Log("[menu] SAIR DO JOGO escolhido no menu principal");
+        if (HANDLE h = OpenEventW(EVENT_MODIFY_STATE, FALSE, L"FCRecomp_Sair")) { SetEvent(h); CloseHandle(h); }
+        SetGpr(ctx, 3, 0);
+        return;
+    }
+    GUEST_ORIGINAL(sub_821B1FD0)(ctx, base);
 }
 #endif
 

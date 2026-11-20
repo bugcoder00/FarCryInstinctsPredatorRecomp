@@ -22,7 +22,8 @@ namespace xdraw
         ShaderRef vs, ps;
     };
 
-    // Resolucao interna em meios (2 = 1x, 3 = 1,5x, 4 = 2x): opcao "escala" do launcher ou FCRECOMP_ESCALA
+    // Resolucao interna em quartos (4 = 1x, 6 = 1,5x, 8 = 2x, 12 = 3x; 3 = 0,75x e 2 = 0,5x so com o FSR): opcao
+    // "escala" do launcher, FSR ou FCRECOMP_ESCALA
     uint32_t EscalaMeios();
     void RecarregarSuavizacao();
     void PedirNovaEscala();        // resolucao interna/sombras mudaram (OPCOES DE VIDEO): troca no fim do quadro   // a opcao antisserrilhado mudou (OPCOES DE VIDEO no jogo): vale no proximo quadro
@@ -42,6 +43,15 @@ namespace xdraw
     // pela GPU do PC. O resultado chega ~2 quadros depois; Result devolve o ultimo resultado conhecido desse bloco
     // (ou "fallback" se ainda nao houver nenhum).
     void QueryBegin(uint32_t block);
+    void NotaCaptura(const char* texto);   // linha extra no desenhos.txt da captura (F9/F12)
     void QueryEnd(uint32_t block);
     uint32_t QueryResult(uint32_t block, uint32_t fallback);
+    uint32_t QuerySerial();   // numero da ultima consulta aberta (QueryBegin)
+    bool QueryAberta();       // ha uma consulta de oclusao aberta
+    // "mar otimista": caixa 3D sem tesoura na faixa 1 (o mar da 26_SHANTYNIGHT herda a tesoura vazia do ultimo pedaco
+    // da grade). A resposta chega 2-4 quadros depois e o jogo escondia o mar ao virar: essa consulta nunca responde 0.
+    // FCRECOMP_MARREAL=1 desliga.
+    bool QueryOtimista(uint32_t block);
+    // contagem da propria caixa (consulta 'serial' ou mais nova); fallback se ainda nao chegou da placa
+    uint32_t QueryResultDesde(uint32_t block, uint32_t serial, uint32_t fallback);
 }

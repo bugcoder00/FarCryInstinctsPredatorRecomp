@@ -33,6 +33,9 @@ std::string TranslateXenosShader(const std::vector<uint32_t>& code, bool pixelSh
     if (cubeMask) *cubeMask = t.cubeMask;
 
     static const bool noTex = getenv("FCRECOMP_NOTEX") != nullptr;
+    static const bool semAlfaCedo = getenv("FCRECOMP_SEMALFACEDO") != nullptr;
+    static const bool simplePs0 = getenv("FCRECOMP_SIMPLEPS") != nullptr;
+    const bool earlyAlpha = pixelShader && t.earlyAlpha && !semAlfaCedo && !simplePs0;
     std::string s = noTex ? "#define NOTEX\n" : "";
     if (!pixelShader) s += "#define XE_VERTEX\n";   // no shader de vertices a textura e lida no nivel 0 (sem derivadas)
     s += XENOS_COMMON_HLSL;
@@ -40,6 +43,11 @@ std::string TranslateXenosShader(const std::vector<uint32_t>& code, bool pixelSh
     if (pixelShader)
     {
         s += "struct PSOut { float4 c0 : SV_Target0; };\n";
+        // alpha test antecipado (XenosHlsl.cpp, EarlyAlphaWorthIt): o corpo vira uma funcao chamada duas vezes. Na variante
+        // com alpha test, a 1a chamada usa copias dos registradores e so a transparencia dela importa (o compilador corta
+        // o resto); os pixels que falham saem ali, antes da conta cara. FCRECOMP_SEMALFACEDO=1 desliga.
+        if (earlyAlpha)
+            s += "void XeCorpo(inout float4 r[64], inout float4 oC0, inout float4 oC1, inout float4 oC2, inout float4 oC3, inout float4 oDepth4, inout float4 oDummy)\n{\n" + t.body + "}\n";
         s += "PSOut ps(Interp input, bool frontFace : SV_IsFrontFace)\n{\n";
         s += "\tfloat4 r[64] = (float4[64])0;\n";
         s += "\t[unroll] for (int i = 0; i < 16; i++) r[i] = input.o[i];\n";
@@ -62,7 +70,20 @@ std::string TranslateXenosShader(const std::vector<uint32_t>& code, bool pixelSh
         s += "\tfloat4 o[16] = (float4[16])0;\n";
     }
     static const bool simplePs = getenv("FCRECOMP_SIMPLEPS") != nullptr;   // depuracao: mede o custo dos pixel shaders
-    if (pixelShader && simplePs) s += "\toC0 = float4(0.5, 0.5, 0.5, 1);\n"; else s += t.body;
+    if (pixelShader && simplePs) s += "\toC0 = float4(0.5, 0.5, 0.5, 1);\n";
+    else if (earlyAlpha)
+    {
+        s += "#ifdef XE_ALPHA_TEST\n"
+             "\tif (alphaCtl & 8u) { float4 rA[64] = r; float4 aC0 = 0, aC1 = 0, aC2 = 0, aC3 = 0, aD = 0, aX = 0;\n"
+             "\t\tXeCorpo(rA, aC0, aC1, aC2, aC3, aD, aX);\n"
+             "\t\tuint f = alphaCtl & 7u; float a = (alphaCtl & 0x10000u) ? saturate(aC0.a) : aC0.a; bool pass =\n"
+             "\t\tf == 0 ? false : f == 1 ? a < alphaRef : f == 2 ? a == alphaRef : f == 3 ? a <= alphaRef :\n"
+             "\t\tf == 4 ? a > alphaRef : f == 5 ? a != alphaRef : f == 6 ? a >= alphaRef : true;\n"
+             "\t\tif (!pass) discard; }\n"
+             "#endif\n";
+        s += "\tXeCorpo(r, oC0, oC1, oC2, oC3, oDepth4, oDummy);\n";
+    }
+    else s += t.body;
     // depuracao: FCRECOMP_PSTESTE=HASH:modo troca a saida desse pixel shader (1 = textura x cor do vertice, sem a
     // mistura de nevoa; 2 = mostra os fatores de nevoa interpolados o[1] como cor)
     if (static const char* pt = getenv("FCRECOMP_PSTESTE"); pixelShader && pt && strtoull(pt, nullptr, 16) == g_translateHash)

@@ -108,6 +108,17 @@ namespace
             else if (vk == VK_CONTROL) vk = ext ? VK_RCONTROL : VK_LCONTROL;
             else if (vk == VK_MENU) vk = ext ? VK_RMENU : VK_LMENU;
             g_engolirSoltar = 1;
+            // BACKSPACE: o campo fica sem tecla ("(nenhuma)") e pisca vermelho
+            if (vk == VK_BACK)
+            {
+                const int o = g_esperando;
+                ParouDeEsperar(j, 0);
+                if (g_perdeu >= 0 && g_perdeu != o) InvalidateRect(GetDlgItem(j, ID_TECLA + g_perdeu), nullptr, TRUE);
+                g_perdeu = o;
+                InvalidateRect(GetDlgItem(j, ID_TECLA + o), nullptr, TRUE);
+                SetTimer(j, TIMER_AVISO, 1200, nullptr);
+                return true;
+            }
             break;
         }
         case WM_KEYUP: case WM_SYSKEYUP: case WM_CHAR: case WM_SYSCHAR: return true;

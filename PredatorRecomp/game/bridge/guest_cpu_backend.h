@@ -35,11 +35,8 @@ constexpr uint64_t GUEST_CODE_BASE = 0x820C0000ull;
 constexpr uint64_t GUEST_CODE_SIZE = 0x7C0000ull;
 constexpr uint32_t GUEST_ENTRY_POINT = 0x82636B58;
 #define GUEST_XEX_NAME "ige.xex"
-#ifdef PREDATOR_INGLES
-#define GUEST_TITULO "Far Cry Instincts Predator Recomp - Map editor"
-#else
-#define GUEST_TITULO "Far Cry Instincts Predator Recomp - Editor de mapas"
-#endif
+// (o mesmo nos dois idiomas: e o nome do menu MAP EDITOR do jogo)
+#define GUEST_TITULO "Far Cry Instincts Predator Recomp - Map Editor"
 #define GUEST_IMAGE_FILE "image_editor.bin"
 #define GUEST_IMAGE_SHA256 "3a704773204a67eb94a20c4deedfbb37d35861257457bd0bbebad7a671143c0e"
 // funcoes do programa que o runtime substitui (as mesmas do jogo, achadas no editor pelo codigo igual)

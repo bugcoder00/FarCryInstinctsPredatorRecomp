@@ -1,9 +1,12 @@
 // Arquivos: traduz caminhos do Xbox (game:\, d:\, \Device\Cdrom0\) para a pasta do jogo no PC
+#include <atomic>
 #include <map>
 #include "diag.h"
 #include "perf.h"
 #include <mutex>
 #include "objects.h"
+#include "traducao_jogo.h"
+#include "iso.h"
 #include <windows.h>
 #include <filesystem>
 #include <algorithm>
@@ -12,6 +15,7 @@ std::filesystem::path g_gameDir;
 std::filesystem::path g_saveDir;
 
 namespace fs = std::filesystem;
+namespace xdraw { bool ColetaReceitaLigada(); void ColetarFase(const std::string& fase); }   // xenos_draw.cpp: coleta da receita
 
 struct KFile : KObject
 {
@@ -22,7 +26,13 @@ struct KFile : KObject
     std::mutex lock;
     uint64_t pos = 0;
     bool directory = false;
+    bool virtualizado = false;   // traducao do jogo (traducao_jogo.cpp): o jogo ve o conteudo de "virt"
+    traducao::Virtual virt;
     HANDLE find = INVALID_HANDLE_VALUE;
+    // jogo direto da ISO (iso.h): a entrada dentro do .iso; h e uma copia do HANDLE da ISO e o arquivo comeca em "base"
+    const iso::Entrada* isoE = nullptr;
+    uint64_t base = 0;
+    size_t isoProximo = 0;   // pasta da ISO: proximo filho a listar
     ~KFile() override
     {
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
@@ -102,14 +112,45 @@ static uint64_t ToFileTime(const FILETIME& ft) { return ((uint64_t)ft.dwHighDate
 static uint32_t OpenFile(uint32_t handlePtr, uint32_t access, uint32_t attr, uint32_t io, uint32_t disposition, uint32_t options)
 {
     fs::path path = PathFromAttributes(attr);
+#ifndef PREDATOR_EDITOR
+    // FCRECOMP_VIDEO (cena_direta.cpp, tools\cutscenes.ps1): o primeiro video Bink aberto vira o escolhido
+    if (std::string ext = path.extension().string(); ext.size() == 4 && _stricmp(ext.c_str(), ".bik") == 0)
+    {
+        std::string CenaDiretaVideo(const std::string& nome);
+        if (const std::string outro = CenaDiretaVideo(path.filename().string()); !outro.empty()) path = path.parent_path() / outro;
+    }
+#endif
     auto f = std::make_shared<KFile>();
     f->path = path;
 
     std::error_code ec;
-    bool exists = fs::exists(path, ec);
-    bool isDir = exists && fs::is_directory(path, ec);
+    bool naIso = false;
+    const iso::Entrada* ie = iso::Achar(path, &naIso);
+    naIso = naIso || ie;
+    bool exists = naIso ? ie != nullptr : fs::exists(path, ec);
+    bool isDir = exists && (naIso ? ie->pasta : fs::is_directory(path, ec));
 
-    if (isDir || (options & 1))   // FILE_DIRECTORY_FILE
+    if (naIso)   // dentro da ISO do jogo: so leitura
+    {
+        const bool write = access & (0x40000000 | 0x2 | 0x4 | 0x10000000);
+        if (!ie || write || (disposition != 1 && disposition != 3))
+        {
+            const uint32_t st = !ie ? STATUS_OBJECT_NAME_NOT_FOUND : 0xC0000022;   // STATUS_ACCESS_DENIED
+            Log("[fs] nao abriu (ISO): %s", path.string().c_str());
+            diag::Note(diag::File, path.string(), !ie ? "nao esta na ISO" : "ISO e so leitura");
+            WriteIoStatus(io, st, 0);
+            return st;
+        }
+        f->isoE = ie;
+        if (ie->pasta) f->directory = true;
+        else
+        {
+            f->h = iso::AbrirHandle(path);
+            f->base = ie->inicio;
+            if (f->h == INVALID_HANDLE_VALUE) { WriteIoStatus(io, STATUS_OBJECT_NAME_NOT_FOUND, 0); return STATUS_OBJECT_NAME_NOT_FOUND; }
+        }
+    }
+    else if (isDir || (options & 1))   // FILE_DIRECTORY_FILE
     {
         if (!exists)
         {
@@ -147,7 +188,17 @@ static uint32_t OpenFile(uint32_t handlePtr, uint32_t access, uint32_t attr, uin
         }
     }
 
-    Log("[fs] abriu: %s", path.string().c_str());
+    if (!f->directory && traducao::Arquivo(path, 0, f->virt)) f->virtualizado = true;
+    Log("[fs] abriu: %s%s", path.string().c_str(), f->virtualizado ? " (pela traducao_jogo.cpp)" : "");
+    // coleta da receita (xenos_draw.cpp): a fase atual e a pasta levels\NOME do ultimo arquivo de fase aberto
+    if (xdraw::ColetaReceitaLigada())
+    {
+        std::string low = path.string();
+        for (auto& c : low) c = (char)tolower((unsigned char)c);
+        if (size_t p = low.find("\\levels\\"); p != std::string::npos)
+            if (size_t e = low.find('\\', p + 8); e != std::string::npos)
+                xdraw::ColetarFase(low.substr(p + 8, e - (p + 8)));
+    }
     if (perf::AvLog() && path.extension() == ".bik") Log("[av] %.1f ms: video aberto %s", perf::Now(), path.filename().string().c_str());
     W32(handlePtr, HandleCreate(f));
     WriteIoStatus(io, STATUS_SUCCESS, exists ? 1 : 2);   // FILE_OPENED / FILE_CREATED
@@ -228,7 +279,38 @@ KFUNC(NtReadFile)
         OVERLAPPED ov{};   // leitura na posicao pedida num passo so
         ov.Offset = (DWORD)at;
         ov.OffsetHigh = (DWORD)(at >> 32);
-        ReadFile(f->h, G(Gpr32(ctx, 8)), Gpr32(ctx, 9), &read, &ov);
+        if (f->virtualizado) read = traducao::Ler(f->virt, f->h, at, (uint8_t*)G(Gpr32(ctx, 8)), Gpr32(ctx, 9), f->base);
+        else if (f->isoE)   // dentro da ISO: a posicao do arquivo no .iso, sem passar do fim dele
+        {
+            const uint32_t n = at >= f->isoE->tamanho ? 0 : (uint32_t)std::min<uint64_t>(Gpr32(ctx, 9), f->isoE->tamanho - at);
+            ov.Offset = (DWORD)(f->base + at);
+            ov.OffsetHigh = (DWORD)((f->base + at) >> 32);
+            if (n) ReadFile(f->h, G(Gpr32(ctx, 8)), n, &read, &ov);
+        }
+        else ReadFile(f->h, G(Gpr32(ctx, 8)), Gpr32(ctx, 9), &read, &ov);
+#ifdef PREDATOR_EDITOR
+        // teste de NPC: FCRECOMP_NPCLEITURAS=1 anota as leituras dos .dat (posicao e tamanho)
+        if (static const bool lt = getenv("FCRECOMP_NPCLEITURAS") != nullptr; lt && f->path.extension() == ".dat")
+            Log("[npcler] %s %llu %u", f->path.filename().string().c_str(), (unsigned long long)at, Gpr32(ctx, 9));
+#endif
+#ifdef PREDATOR_EDITOR
+        // teste de NPC (traducao_jogo.cpp, PrepararNpcAnims): quem le os arquivos acrescentados (pilha do Xbox)
+        if (static std::atomic<int> pilhas{ 0 }; f->virtualizado && f->virt.extra && at >= f->virt.inicioExtra && getenv("FCRECOMP_NPCPILHA") && pilhas++ < 40)
+        {
+            std::string t;
+            uint32_t sp = Gpr32(ctx, 1);
+            for (int i = 0; i < 24 && sp; i++)
+            {
+                const uint32_t ant = R32(sp);
+                if (!ant || ant <= sp) break;
+                char b[16];
+                snprintf(b, sizeof(b), " %08X", R32(ant - 8));
+                t += b;
+                sp = ant;
+            }
+            Log("[npc] leitura +%llu (%u bytes) thread %u, pilha:%s", (unsigned long long)(at - f->virt.inicioExtra), Gpr32(ctx, 9), GetCurrentThreadId(), t.c_str());
+        }
+#endif
         f->pos = at + read;
         ApplyPatches(*f, at, (uint8_t*)G(Gpr32(ctx, 8)), read);
     }
@@ -277,7 +359,13 @@ KFUNC(NtQueryInformationFile)
     if (!f) { Ret(ctx, STATUS_INVALID_HANDLE); return; }
     uint32_t info = Gpr32(ctx, 5), cls = Gpr32(ctx, 7);
     WIN32_FILE_ATTRIBUTE_DATA d{};
-    GetFileAttributesExW(f->path.c_str(), GetFileExInfoStandard, &d);
+    if (f->isoE)
+    {
+        d.nFileSizeLow = (DWORD)f->isoE->tamanho; d.nFileSizeHigh = (DWORD)(f->isoE->tamanho >> 32);
+        d.dwFileAttributes = f->isoE->pasta ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_READONLY;
+    }
+    else GetFileAttributesExW(f->path.c_str(), GetFileExInfoStandard, &d);
+    if (f->virtualizado) { d.nFileSizeLow = (DWORD)f->virt.tamanho; d.nFileSizeHigh = (DWORD)(f->virt.tamanho >> 32); }
     uint64_t size = ((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow;
 
     switch (cls)
@@ -342,11 +430,18 @@ KFUNC(NtQueryFullAttributesFile)
 {
     fs::path path = PathFromAttributes(Gpr32(ctx, 3));
     WIN32_FILE_ATTRIBUTE_DATA d{};
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &d))
+    bool naIso = false;
+    if (const iso::Entrada* e = iso::Achar(path, &naIso))
+    {
+        d.nFileSizeLow = (DWORD)e->tamanho; d.nFileSizeHigh = (DWORD)(e->tamanho >> 32);
+        d.dwFileAttributes = e->pasta ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_READONLY;
+    }
+    else if (naIso || !GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &d))
     {
         Ret(ctx, STATUS_OBJECT_NAME_NOT_FOUND);
         return;
     }
+    if (uint64_t t; traducao::Tamanho(path, t)) { d.nFileSizeLow = (DWORD)t; d.nFileSizeHigh = (DWORD)(t >> 32); }
     FillNetworkOpenInfo(Gpr32(ctx, 4), d);
     Ret(ctx, STATUS_SUCCESS);
 }
@@ -370,6 +465,15 @@ KFUNC(NtQueryVolumeInformationFile)
     Ret(ctx, STATUS_SUCCESS);
 }
 
+// mascara de busca do Xbox (* e ?), sem diferenca de maiusculas
+static bool Casa(const char* m, const char* s)
+{
+    if (!*m) return !*s;
+    if (*m == '*') return Casa(m + 1, s) || (*s && Casa(m, s + 1));
+    if (!*s) return false;
+    return (*m == '?' || tolower((unsigned char)*m) == tolower((unsigned char)*s)) && Casa(m + 1, s + 1);
+}
+
 // NtQueryDirectoryFile(handle, event, apc, apcCtx, io, info, length, mask (ANSI_STRING*), [restart na pilha])
 KFUNC(NtQueryDirectoryFile)
 {
@@ -383,7 +487,25 @@ KFUNC(NtQueryDirectoryFile)
     for (;;)
     {
         bool ok;
-        if (f->find == INVALID_HANDLE_VALUE)
+        if (f->isoE)   // pasta da ISO: os filhos em ordem, os que casam com a mascara
+        {
+            ok = false;
+            while (f->isoProximo < f->isoE->filhos.size())
+            {
+                const iso::Entrada& e = iso::Filho(*f->isoE, f->isoProximo++);
+                // como no Windows, "*.*" no fim tambem pega nome sem ponto (o jogo lista as fases com "0*.*", "1*.*")
+                const bool semPonto = mask.size() >= 2 && mask.compare(mask.size() - 2, 2, ".*") == 0 &&
+                                      Casa(mask.substr(0, mask.size() - 2).c_str(), e.nome.c_str());
+                if (!semPonto && !Casa(mask.c_str(), e.nome.c_str())) continue;
+                fd = {};
+                strncpy_s(fd.cFileName, e.nome.c_str(), _TRUNCATE);
+                fd.nFileSizeLow = (DWORD)e.tamanho; fd.nFileSizeHigh = (DWORD)(e.tamanho >> 32);
+                fd.dwFileAttributes = e.pasta ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_READONLY;
+                ok = true;
+                break;
+            }
+        }
+        else if (f->find == INVALID_HANDLE_VALUE)
         {
             f->find = FindFirstFileA((f->path / mask).string().c_str(), &fd);
             ok = f->find != INVALID_HANDLE_VALUE;

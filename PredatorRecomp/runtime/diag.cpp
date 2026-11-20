@@ -14,6 +14,8 @@ bool ProfilerKeyRequest();   // profiler.cpp: medicao na tecla F3 (FCRECOMP_PROF
 bool InputStopRecording();   // input.cpp: F4 termina a gravacao do roteiro (FCRECOMP_GRAVAR)
 extern std::atomic<uint64_t> g_missionStartFrame;   // gpu.cpp
 
+namespace xdraw { void IniciarRajada(); }   // xenos_draw.cpp: tecla ' (rajada de fotos)
+
 namespace diag
 {
     bool g_loopShaders = false;
@@ -172,6 +174,10 @@ namespace diag
             return true;
         case VK_F9:
             RequestCapture();
+            return true;
+        case VK_OEM_7:   // tecla ' : 60 fotos seguidas (ABNT2: a mesma tecla e VK_OEM_3, a esquerda do 1)
+        case VK_OEM_3:
+            xdraw::IniciarRajada();
             return true;
         case VK_F11:
             g_memDumpRequest = true;

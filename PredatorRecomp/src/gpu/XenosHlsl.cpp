@@ -646,11 +646,186 @@ namespace predator::gpu
         };
     }
 
+    namespace
+    {
+        // Alpha test antecipado. O teste do alpha fica no fim do pixel shader (descarta se oC0.w falhar), e um shader
+        // com "discard" perde o teste de profundidade antecipado da GPU: cada pixel transparente ou escondido roda a
+        // conta inteira (ex.: a luz no cabelo da mulher na cena da cabana custava 6-9 ms numa GPU integrada). Aqui se
+        // acha, de tras para frente a partir da saida oC0.w, quais instrucoes a transparencia usa. Se essa parte for
+        // pequena perto do shader inteiro, o runtime roda ela antes, descarta os pixels que falham e so entao faz o
+        // resto. So shaders sem saltos, lacos, chamadas, enderecamento relativo por aL e sem "kill" (simples e seguro).
+        bool EarlyAlphaWorthIt(const Microcode& mc)
+        {
+            struct Item { bool fetch; AluInstruction a; FetchInstruction f; bool cond; bool readsP0; };
+            std::vector<Item> items;
+            for (const CfInstruction& c : mc.controlFlow)
+            {
+                if (c.opcode == CfOpcode::Nop || c.opcode == CfOpcode::Alloc || c.opcode == CfOpcode::MarkVsFetchDone) continue;
+                if (!c.IsExec()) return false;
+                bool cond = false, readsP0 = false;
+                switch (c.opcode)
+                {
+                case CfOpcode::CondExec: case CfOpcode::CondExecEnd:
+                case CfOpcode::CondExecPredClean: case CfOpcode::CondExecPredCleanEnd:
+                    cond = true;
+                    break;
+                case CfOpcode::CondPredExec: case CfOpcode::CondPredExecEnd:
+                    cond = readsP0 = true;
+                    break;
+                default:
+                    break;
+                }
+                for (std::uint32_t k = 0; k < c.count; ++k)
+                {
+                    const std::size_t at = (std::size_t{ c.address } + k) * 3;
+                    if (at + 3 > mc.code.size()) return false;
+                    Item it{};
+                    it.fetch = ((c.sequence >> (2 * k)) & 1) != 0;
+                    if (it.fetch) it.f = DecodeFetch(mc.code.data() + at);
+                    else it.a = DecodeAlu(mc.code.data() + at);
+                    it.cond = cond;
+                    it.readsP0 = readsP0;
+                    items.push_back(it);
+                }
+                if (c.EndsProgram()) break;
+            }
+
+            std::uint8_t need[64] = {};   // componentes (bits xyzw) de cada registrador que a transparencia ainda usa
+            bool needOut = true, needP0 = false, needPs = false, needA0 = false;
+            int total = 0, slice = 0;
+            auto comps = [](std::uint32_t swizzle) {   // componentes lidas por um operando de ALU (todas as posicoes)
+                std::uint8_t m = 0;
+                for (unsigned i = 0; i < 4; ++i) m |= std::uint8_t(1u << AluComponent(swizzle, i));
+                return m;
+            };
+            for (auto it = items.rbegin(); it != items.rend(); ++it)
+            {
+                if (it->fetch)
+                {
+                    const FetchInstruction& f = it->f;
+                    if (f.opcode == FetchOpcode::Vertex || f.srcRelative || f.dstRelative) return false;
+                    if (f.opcode == FetchOpcode::SetLod || f.opcode == FetchOpcode::SetGradientsHorizontal ||
+                        f.opcode == FetchOpcode::SetGradientsVertical) continue;   // ignorados pelo tradutor
+                    std::uint8_t wm = 0;
+                    for (unsigned i = 0; i < 4; ++i)
+                        if (((f.dstSwizzle >> (3 * i)) & 7) <= 5) wm |= std::uint8_t(1u << i);
+                    if (!wm) continue;
+                    const int cost = f.opcode == FetchOpcode::GetGradients ? 1 : 4;
+                    total += cost;
+                    if (!(need[f.dstRegister & 63] & wm)) continue;
+                    slice += cost;
+                    if (!it->cond && !f.predicated) need[f.dstRegister & 63] &= std::uint8_t(~wm);
+                    for (unsigned i = 0; i < 3; ++i) need[f.srcRegister & 63] |= std::uint8_t(1u << ((f.srcSwizzle >> (2 * i)) & 3));
+                    if (f.predicated || it->readsP0) needP0 = true;
+                    continue;
+                }
+
+                const AluInstruction& a = it->a;
+                const VectorOpcode vop = a.vectorOpcode;
+                const ScalarOpcode sop = a.scalarOpcode;
+                const bool vectorKill = vop >= VectorOpcode::KillEq && vop <= VectorOpcode::KillNe;
+                const bool scalarKill = sop >= ScalarOpcode::KillEq && sop <= ScalarOpcode::KillOne;
+                if (vectorKill || scalarKill) return false;
+                const bool vectorPush = vop >= VectorOpcode::PredSetEqPush && vop <= VectorOpcode::PredSetGePush;
+                const bool vectorNeeded = a.vectorWriteMask || vectorPush || vop == VectorOpcode::MaxA;
+                const bool scalarNeeded = sop != ScalarOpcode::RetainPrev || (a.scalarWriteMask && !a.exportData) ||
+                                          (a.exportData && (a.scalarWriteMask & ~a.vectorWriteMask));
+                const bool exportConstants = a.exportData && a.scalarDestRelative;
+                if (!vectorNeeded && !scalarNeeded && !exportConstants) continue;
+                total += 1;
+
+                const bool writesP0 = vectorPush || (sop >= ScalarOpcode::PredSetEq && sop <= ScalarOpcode::PredSetRestore);
+                const bool writesPs = sop != ScalarOpcode::RetainPrev;
+                const bool writesA0 = vop == VectorOpcode::MaxA || sop == ScalarOpcode::MaxA || sop == ScalarOpcode::MaxAFloor;
+                bool in = (writesP0 && needP0) || (writesPs && needPs) || (writesA0 && needA0);
+                bool outHere = false;
+                if (a.exportData)
+                {
+                    std::uint32_t om = a.vectorWriteMask | a.scalarWriteMask;
+                    if (a.scalarDestRelative) om = 15u;
+                    if (a.vectorDest == 0 && needOut && (om & 8u)) in = outHere = true;
+                }
+                else
+                {
+                    if (a.vectorDestRelative || a.scalarDestRelative) return false;
+                    if (need[a.vectorDest & 63] & a.vectorWriteMask) in = true;
+                    if (need[a.scalarDest & 63] & a.scalarWriteMask) in = true;
+                }
+                if (!in) continue;
+                slice += 1;
+
+                if (!it->cond && !a.predicated)
+                {
+                    if (outHere) needOut = false;
+                    if (!a.exportData)
+                    {
+                        need[a.vectorDest & 63] &= std::uint8_t(~a.vectorWriteMask);
+                        need[a.scalarDest & 63] &= std::uint8_t(~a.scalarWriteMask);
+                    }
+                    if (writesP0) needP0 = false;
+                    if (writesPs) needPs = false;
+                    if (writesA0) needA0 = false;
+                }
+
+                // leituras (todas as componentes dos operandos: sobra um pouco, nunca falta)
+                const unsigned used = static_cast<unsigned>(VectorOperandCount(vop));
+                auto constSlot = [&](unsigned k) {
+                    unsigned slot = 0;
+                    for (unsigned j = 0; j < k && j < used; ++j)
+                        if (!a.src[j].isRegister) ++slot;
+                    return std::min(slot, 1u);
+                };
+                auto readConst = [&](unsigned k) {
+                    if (!a.constRelative[constSlot(k)]) return true;
+                    if (!a.relativeUsesA0) return false;   // relativo a aL
+                    needA0 = true;
+                    return true;
+                };
+                if (vectorNeeded)
+                    for (unsigned k = 0; k < used; ++k)
+                    {
+                        const AluSource& s = a.src[k];
+                        if (s.isRegister)
+                        {
+                            if (s.index & 64) return false;
+                            need[s.index & 63] |= comps(s.swizzle);
+                        }
+                        else if (!readConst(k)) return false;
+                    }
+                if (scalarNeeded && sop != ScalarOpcode::RetainPrev)
+                {
+                    const AluSource& s = a.src[2];
+                    if (IsScalarConstOp(sop))
+                    {
+                        if (!readConst(2)) return false;
+                        const std::uint32_t reg = (static_cast<std::uint32_t>(sop) & 1) | (s.isRegister ? 2u : 0u) | (s.swizzle & 0x3C);
+                        need[reg & 63] |= std::uint8_t(1u << (s.swizzle & 3));
+                    }
+                    else if (s.isRegister)
+                    {
+                        if (s.index & 64) return false;
+                        need[s.index & 63] |= std::uint8_t(1u << AluComponent(s.swizzle, 3));
+                        if (ScalarUsesSecondOperand(sop)) need[s.index & 63] |= std::uint8_t(1u << AluComponent(s.swizzle, 0));
+                    }
+                    else if (!readConst(2)) return false;
+                }
+                if (sop == ScalarOpcode::AddPrev || sop == ScalarOpcode::MulPrev || sop == ScalarOpcode::MulPrev2 ||
+                    sop == ScalarOpcode::SubPrev || (sop == ScalarOpcode::RetainPrev && scalarNeeded))
+                    needPs = true;
+                if (a.predicated || it->readsP0) needP0 = true;
+            }
+            if (needOut) return false;   // oC0.w nunca e gravado
+            // a parte da transparencia (repetida antes) tem que ser no maximo 1/3 do shader, e o shader nao trivial
+            return total >= 16 && slice * 3 <= total;
+        }
+    }
+
     HlslShader TranslateToHlsl(std::span<const std::uint32_t> code, const HlslOptions& options)
     {
         HlslShader out;
         const Microcode mc = DecodeShader(code);
         Emitter(mc, options, out).Run();
+        if (options.pixel && !out.loopMode) out.earlyAlpha = EarlyAlphaWorthIt(mc);
         return out;
     }
 }

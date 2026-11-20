@@ -47,9 +47,23 @@ def juntar(pasta, saida):
     shaders, pipes, sups = {}, [], []
     arquivos = ([saida] if os.path.exists(saida) else []) + sorted(glob.glob(os.path.join(pasta, '*.txt')))
     antes = None
+    # fase de cada coleta (comentarios "# fase NOME" e "# usa p|v HASH" das receitas coletadas): resumo no fim
+    usosPorFase, novosPorFase, coletasPorFase = {}, {}, {}
     for arq in arquivos:
+        fase = None
         for l in open(arq, encoding='ascii', errors='ignore'):
             l = l.rstrip('\r\n')
+            if l.startswith('# fase '):
+                fase = l[7:].strip()
+                coletasPorFase.setdefault(fase, set()).add(arq)
+                continue
+            if l.startswith('# usa ') and fase:
+                c = l.split()
+                if len(c) >= 4: usosPorFase.setdefault(fase, set()).add((c[2], c[3].upper()))
+                continue
+            if l.startswith('S ') and fase:
+                c = l.split()
+                novosPorFase.setdefault(fase, set()).add((c[1], c[2].upper()))
             if l.startswith('S '):
                 c = l.split()
                 shaders.setdefault((c[1], c[2].upper()), l)
@@ -68,6 +82,13 @@ def juntar(pasta, saida):
     antes = antes or (0, 0, 0)
     print('receita: %d shaders, %d pipelines, %d superficies (antes %d/%d/%d), de %d arquivo(s)' % (
         len(shaders), len(pipes), len(sups), antes[0], antes[1], antes[2], len(arquivos)))
+    if coletasPorFase:
+        print('fases coletadas (coletas com a fase anotada; "usados" = shaders que a fase usou, "na receita" = quantos deles a receita tem):')
+        for fase in sorted(coletasPorFase):
+            usados = usosPorFase.get(fase, set())
+            tem = sum(1 for k in usados if k in shaders)
+            print('  %-28s %3d coleta(s)  %5d usados  %5d na receita  %4d novos nesta fase' % (
+                fase, len(coletasPorFase[fase]), len(usados), tem, len(novosPorFase.get(fase, ()))))
 
 def main():
     if sys.argv[1] == 'juntar':

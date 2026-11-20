@@ -1,6 +1,8 @@
 // XAM (sistema do Xbox: usuario, controle, conteudo) e video (Vd*) - versao minima
+#include "conquistas.h"
 #include "objects.h"
 #include "diag.h"
+#include "opcoes.h"
 #include <windows.h>
 #include <vector>
 #include <algorithm>
@@ -16,7 +18,20 @@ constexpr uint32_t X_ERROR_NO_SUCH_USER = 0x525;
 
 // ---------------------------------------------------------------- sistema
 
-KFUNC(XGetLanguage) { Ret(ctx, 1); }          // ingles
+// Idioma do jogo: ingles (1), ou o escolhido no launcher (opcoes.h idioma 2..5 = frances 4, alemao 3, espanhol 5,
+// italiano 6; os textos desses idiomas ja estao no disco). Portugues = ingles + traducao PT-BR (traducao_jogo.cpp).
+// FCRECOMP_IDIOMAJOGO=n forca o codigo do Xbox (testes).
+KFUNC(XGetLanguage)
+{
+    static const uint32_t codigo = []
+    {
+        if (const char* e = getenv("FCRECOMP_IDIOMAJOGO")) return (uint32_t)atoi(e);
+        static const uint32_t xbox[] = { 1, 1, 4, 3, 5, 6 };
+        const int i = OpcoesAtuais().idioma;
+        return i >= 0 && i <= 5 ? xbox[i] : 1u;
+    }();
+    Ret(ctx, codigo);
+}
 KFUNC(XamGetSystemVersion) { Ret(ctx, 0x20096B00); }
 KFUNC(XamGetExecutionId)
 {
@@ -215,7 +230,23 @@ KFUNC(XMsgInProcessCall)
 static void FailIORequest(GuestCpu& ctx, const char* fn)
 {
     uint32_t r = X_E_FAIL;
-    bool tratada = RedeXMsg(fn, Gpr32(ctx, 3), Gpr32(ctx, 4), Gpr32(ctx, 6), Gpr32(ctx, 7), r);
+    bool tratada = false;
+    // XUserWriteAchievements: app 0xFB mensagem 0x000B0008, buffer {u32 quantas, u32 lista} e a lista com
+    // XUSER_ACHIEVEMENT {u32 jogador, u32 conquista} (o wrapper do jogo em 82643910). Anota em conquistas.txt.
+    if (Gpr32(ctx, 3) == 0xFB && Gpr32(ctx, 4) == 0x000B0008 && Gpr32(ctx, 6) && Gpr32(ctx, 7) >= 8)
+    {
+        const uint32_t buf = Gpr32(ctx, 6), n = R32(buf), lista = R32(buf + 4);
+        for (uint32_t i = 0; lista && i < n && i < 64; i++)
+        {
+            const uint32_t id = R32(lista + i * 8 + 4);
+            const bool nova = id < 65536 && ConquistaDesbloquear((uint16_t)id);
+            Log("[conquista] jogador %u desbloqueou a conquista %u%s", R32(lista + i * 8), id, nova ? " (nova)" : " (ja tinha)");
+            if (nova) ConquistaAvisar((uint16_t)id);
+        }
+        r = 0;
+        tratada = true;
+    }
+    if (!tratada) tratada = RedeXMsg(fn, Gpr32(ctx, 3), Gpr32(ctx, 4), Gpr32(ctx, 6), Gpr32(ctx, 7), r);
     if (!tratada) NoteXMsg(fn, Gpr32(ctx, 3), Gpr32(ctx, 4));
     if (uint32_t ov = Gpr32(ctx, 5))
     {

@@ -8,7 +8,8 @@
 
 // ---------------------------------------------------------------- dispositivos (controles_pad.cpp)
 // Identificadores guardados na configuracao: "teclado" (teclado e mouse), "auto" (primeiro controle ligado),
-// "sony1".."sony4" (DualSense/DualShock 4 lidos direto pelo USB/Bluetooth), "xbox1".."xbox4" (XInput), "nenhum"
+// "sony1".."sony4" (DualSense/DualShock 4 lidos direto pelo USB/Bluetooth), "xbox1".."xbox4" (XInput), "hid1".. (controles
+// genericos DirectInput/HID), "steam1".. (Steam Controller), "nenhum"
 struct PadInfo { std::string id, nome; };
 void PadsIniciar();                                   // comeca a procurar controles (thread propria)
 std::vector<PadInfo> PadsLigados();                   // controles ligados agora (Sony e XInput)
@@ -16,6 +17,14 @@ bool PadLer(const std::string& id, XINPUT_GAMEPAD& g); // false = nao esta ligad
 void PadVibrar(const std::string& id, WORD esquerda, WORD direita);
 std::string PadNome(const std::string& id);          // nome para mostrar ("DualSense (USB)", "Teclado e mouse"...)
 std::string PadResolver(const std::string& id);      // "auto" -> id do controle que esta sendo usado ("" = nenhum)
+// controles genericos (DirectInput/HID, "hid1"..) e Steam Controller ("steam1"..) (controles_hid.cpp)
+bool HidTalvezAdotar(const std::wstring& caminho, HANDLE h, const struct _HIDD_ATTRIBUTES& at);   // true = ficou com a interface
+bool HidJaAberto(const std::wstring& caminho);
+void HidIds(std::vector<std::string>& ids);          // acrescenta os ligados
+bool HidLer(const std::string& id, XINPUT_GAMEPAD& g, ULONGLONG* ultimoMovimento = nullptr);
+bool HidNome(const std::string& id, std::string& nome);   // false = nao e generico/Steam
+void HidDefinirBotoes(const std::string& lista);     // controles.ini "generico_botoes": botao 1, 2... -> A, B, LB...
+std::string HidBotoesPadrao();
 
 // ---------------------------------------------------------------- configuracao (input.cpp)
 struct ControlesCfg
@@ -43,3 +52,4 @@ std::vector<int> InputTodasTeclas();                 // teclas que a janela ofer
 
 // ---------------------------------------------------------------- janela (controles_janela.cpp)
 void ControlesAbrirJanela(bool esperarFechar);       // abre (ou traz para a frente) a janela de configuracao
+void VideoAbrirJanela();                             // F2: janela das opcoes de video (video_janela.cpp)

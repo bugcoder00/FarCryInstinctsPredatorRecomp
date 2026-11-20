@@ -8,6 +8,7 @@
 // console (AES-ECB); com ela os dados se abrem em AES-CBC com vetor inicial zero.
 // O resultado e conferido pelo SHA-256 da versao do jogo para a qual este executavel foi gerado.
 #include "guest.h"
+#include "iso.h"
 #include <windows.h>
 #include <bcrypt.h>
 #include <filesystem>
@@ -67,9 +68,8 @@ namespace
 // conferir = false (so para depuracao, "--extrair-imagem"): aceita qualquer executavel, sem conferir tamanho nem hash.
 bool XexCriarImagem(const std::filesystem::path& xex, const std::filesystem::path& saida, std::string& erro, bool conferir)
 {
-    std::ifstream f(xex, std::ios::binary);
-    if (!f) { erro = "nao achei o default.xex na pasta do jogo"; return false; }
-    std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), {});
+    std::vector<uint8_t> d = JogoLer(xex);   // da pasta ou da ISO (iso.h)
+    if (d.empty()) { erro = "nao achei o default.xex na pasta do jogo"; return false; }
     if (d.size() < 0x200 || memcmp(d.data(), "XEX2", 4) != 0) { erro = "o default.xex nao e um executavel do Xbox 360 (XEX2)"; return false; }
 
     uint32_t dadosPe = Be32(d, 0x08), seg = Be32(d, 0x10), nCab = Be32(d, 0x14);

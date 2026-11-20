@@ -1,5 +1,5 @@
-// Controles do PC: DualSense e DualShock 4 lidos direto pelo HID (USB ou Bluetooth, sem programas extras) e controles
-// XInput (Xbox). Tudo vira o XINPUT_GAMEPAD do Xbox 360: Cruz = A, Bola = B, Quadrado = X, Triangulo = Y, L1/R1 = LB/RB,
+// Controles do PC: DualSense e DualShock 4 lidos direto pelo HID (USB ou Bluetooth, sem programas extras), controles
+// XInput (Xbox) e, em controles_hid.cpp, os genericos (DirectInput/HID) e o Steam Controller. Tudo vira o XINPUT_GAMEPAD do Xbox 360: Cruz = A, Bola = B, Quadrado = X, Triangulo = Y, L1/R1 = LB/RB,
 // L2/R2 = gatilhos, Options = START, Create/Share = BACK.
 //
 // Relatorios de entrada (bytes depois do numero do relatorio):
@@ -174,6 +174,7 @@ namespace
                 std::lock_guard lock(g_mutex);
                 if (std::any_of(g_sony.begin(), g_sony.end(), [&](auto& s) { return s->ligado && s->caminho == caminho; })) continue;
             }
+            if (HidJaAberto(caminho)) continue;
             HANDLE h = CreateFileW(caminho.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                    OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
             if (h == INVALID_HANDLE_VALUE) continue;
@@ -187,7 +188,13 @@ namespace
             PHIDP_PREPARSED_DATA pp = nullptr;
             if (sony && HidD_GetPreparsedData(h, &pp)) { HidP_GetCaps(pp, &caps); HidD_FreePreparsedData(pp); }
             // so a interface de controle (Usage Page 1, Usage 5 = gamepad)
-            if (!sony || caps.UsagePage != 0x01 || caps.Usage != 0x05) { CloseHandle(h); continue; }
+            if (!sony || caps.UsagePage != 0x01 || caps.Usage != 0x05)
+            {
+                // nao e Sony: controle generico ou Steam Controller (controles_hid.cpp fica com a interface)
+                if (!sony && HidTalvezAdotar(caminho, h, at)) continue;
+                CloseHandle(h);
+                continue;
+            }
             auto s = std::make_shared<Sony>();
             s->caminho = caminho; s->modelo = modelo; s->h = h;
             s->tamEntrada = caps.InputReportByteLength; s->tamSaida = caps.OutputReportByteLength;
@@ -249,6 +256,11 @@ std::vector<PadInfo> PadsLigados()
         for (size_t i = 0; i < g_sony.size(); i++)
             if (g_sony[i]->ligado) v.push_back({ "sony" + std::to_string(i + 1), "" });
     }
+    {
+        std::vector<std::string> ids;
+        HidIds(ids);   // genericos e Steam Controller
+        for (auto& id : ids) v.push_back({ id, "" });
+    }
     for (auto& p : v) p.nome = PadNome(p.id);   // fora da trava (PadNome tambem a usa)
     for (int k = 0; k < 4; k++)
     {
@@ -268,6 +280,7 @@ std::string PadNome(const std::string& id)
     if (id == "controle4") return TR("Controle 4 (o 4º controle ligado)", "Controller 4 (the 4th connected)");
     if (id == "nenhum" || id.empty()) return TR("Nenhum", "None");
     if (int k = XboxPorId(id); k >= 0) return TR("Controle Xbox/XInput ", "Xbox/XInput controller ") + std::to_string(k + 1);
+    if (std::string n; HidNome(id, n)) return n;
     if (id.rfind("sony", 0) == 0)
     {
         auto s = SonyPorId(id);
@@ -289,6 +302,7 @@ static std::string PadPorOrdem(size_t n)
         for (size_t i = 0; i < g_sony.size(); i++)
             if (g_sony[i]->ligado) ids.push_back("sony" + std::to_string(i + 1));
     }
+    HidIds(ids);
     for (int k = 0; k < 4 && ids.size() <= n; k++) { XINPUT_STATE st; if (XboxLer(k, st)) ids.push_back("xbox" + std::to_string(k + 1)); }
     return n < ids.size() ? ids[n] : "";
 }
@@ -309,6 +323,16 @@ std::string PadResolver(const std::string& id)
                 if (!algum || g_sony[i]->ultimoMovimento > t) { melhor = "sony" + std::to_string(i + 1); t = g_sony[i]->ultimoMovimento; algum = true; }
             }
     }
+    // genericos e Steam Controller entram na mesma conta (o mexido por ultimo)
+    {
+        std::vector<std::string> ids;
+        HidIds(ids);
+        for (auto& id : ids)
+        {
+            XINPUT_GAMEPAD g; ULONGLONG u = 0;
+            if (HidLer(id, g, &u) && (!algum || u > t)) { melhor = id; t = u; algum = true; }
+        }
+    }
     if (algum) return melhor;
     for (int k = 0; k < 4; k++) { XINPUT_STATE st; if (XboxLer(k, st)) return "xbox" + std::to_string(k + 1); }
     return "";
@@ -318,6 +342,7 @@ bool PadLer(const std::string& id0, XINPUT_GAMEPAD& g)
 {
     std::string id = PadResolver(id0);
     if (auto s = SonyPorId(id)) { std::lock_guard lock(s->m); g = s->estado; return true; }
+    if (HidLer(id, g)) return true;
     XINPUT_STATE st;
     if (int k = XboxPorId(id); k >= 0 && XboxLer(k, st)) { g = st.Gamepad; return true; }
     return false;

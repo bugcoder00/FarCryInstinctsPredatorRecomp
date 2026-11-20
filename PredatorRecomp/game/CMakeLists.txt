@@ -23,8 +23,7 @@ set(RUNTIME_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../runtime)
 # PREDATOR_EDITOR=ON: monta o editor de mapas (ige.xex -> PredatorEditor.exe, imagem em <projeto>/editor) com o mesmo
 # runtime; o menu MAP EDITOR do jogo abre esse programa (xam.cpp, XamLoaderLaunchTitle)
 option(PREDATOR_EDITOR "monta o editor de mapas (ige.xex) em vez do jogo" OFF)
-# PREDATOR_INGLES=ON: textos do programa em ingles (launcher, controles, tela de carregamento; runtime/idioma.h)
-option(PREDATOR_INGLES "textos do programa em ingles" OFF)
+# (portugues e ingles no mesmo executavel: o idioma e escolhido no launcher; runtime/idioma.h)
 if(PREDATOR_EDITOR)
     set(PROGRAMA PredatorEditor)
     set(GAME_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../editor)
@@ -54,10 +53,19 @@ set(PREDATOR_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 enable_language(RC)
 add_executable(${PROGRAMA} ${RUNTIME_SOURCES} bridge/predator_bridge.cpp
     ${PREDATOR_SRC}/gpu/XenosHlsl.cpp ${PREDATOR_SRC}/gpu/XenosMicrocode.cpp ${RUNTIME_DIR}/recursos/predator.rc)
+# traducao PT-BR do jogo (runtime/traducao_jogo.cpp): traducao/patch_ptbr.bin entra no exe como recurso 100, so quando
+# existe (fica fora do git); sem ele o exe procura um patch_ptbr.bin ao lado dele
+set(PATCH_PTBR ${CMAKE_CURRENT_SOURCE_DIR}/../../traducao/patch_ptbr.bin)
+if(EXISTS ${PATCH_PTBR})
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/traducao.rc "100 RCDATA \"${PATCH_PTBR}\"\n")
+    set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/traducao.rc PROPERTIES OBJECT_DEPENDS ${PATCH_PTBR})
+    target_sources(${PROGRAMA} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/traducao.rc)
+    message(STATUS "traducao PT-BR do jogo: ${PATCH_PTBR}")
+endif()
 # bridge/ vem antes: e de la que sai o guest_cpu_backend.h
 target_include_directories(${PROGRAMA} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/bridge ${RUNTIME_DIR} ${PREDATOR_SRC})
 target_link_libraries(${PROGRAMA} PRIVATE predator_game_code)
-target_compile_definitions(${PROGRAMA} PRIVATE $<$<BOOL:${PREDATOR_EDITOR}>:PREDATOR_EDITOR> $<$<BOOL:${PREDATOR_INGLES}>:PREDATOR_INGLES> NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+target_compile_definitions(${PROGRAMA} PRIVATE $<$<BOOL:${PREDATOR_EDITOR}>:PREDATOR_EDITOR> NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 target_compile_options(${PROGRAMA} PRIVATE /clang:-march=x86-64-v2 /EHsc -Wno-microsoft-cast -Wno-duplicate-decl-specifier)
 # programa de janela: o cmd nao abre; main.cpp cria o console so com "mostrar registro" ou FCRECOMP_CONSOLE=1
 target_link_options(${PROGRAMA} PRIVATE /MAP:${CMAKE_BINARY_DIR}/FCRecomp.map /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)

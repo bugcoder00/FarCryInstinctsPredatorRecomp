@@ -57,6 +57,7 @@ namespace render
     int OcclusionBegin(uint64_t tag);
     void OcclusionEnd(int index);
     extern void (*g_onOcclusion)(uint64_t tag, uint64_t samples);
+    bool ColherOclusao(bool esperar);   // entrega ja os resultados do quadro anterior se a placa terminou
 
     // Espera a placa de video terminar tudo que ja foi enviado
     void WaitIdle();
@@ -68,6 +69,16 @@ namespace render
     // Antisserrilhado (nivel 1-3) de src (estado PIXEL_SHADER_RESOURCE) para o alvo rtv (RGBA16F, w x h, estado
     // RENDER_TARGET). Troca assinatura, pipeline, heaps, viewport e alvo da lista. false = nivel indisponivel.
     bool Antisserrilhar(ID3D12GraphicsCommandList* list, ID3D12Resource* src, D3D12_CPU_DESCRIPTOR_HANDLE rtv, UINT w, UINT h, int nivel);
+
+    // Oclusao de ambiente (AO) na cena 3D: cena (PIXEL_SHADER_RESOURCE) + profundidade (leitura) -> ao (R8, alvo) ->
+    // saida (RGBA16F, alvo); ao chega como RENDER_TARGET e sai como PIXEL_SHADER_RESOURCE. Troca assinatura, pipeline, heaps,
+    // viewport e alvo da lista. k: as 13 constantes do shader (render.cpp, AO_HLSL). false = indisponivel.
+    struct AoEntrada
+    {
+        ID3D12Resource* cena; ID3D12Resource* prof; DXGI_FORMAT formatoProf; ID3D12Resource* ao;
+        D3D12_CPU_DESCRIPTOR_HANDLE aoRtv, saidaRtv; UINT w, h; float k[13];
+    };
+    bool OclusaoAmbiente(ID3D12GraphicsCommandList* list, const AoEntrada& e);
 
     // Mostra uma imagem BGRA (ex.: quadro de video) na janela
     void PresentPixels(const uint32_t* pixels, uint32_t width, uint32_t height);

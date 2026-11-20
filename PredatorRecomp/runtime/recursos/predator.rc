@@ -1,2 +1,4 @@
 // Recursos do PredatorGame.exe: icone (gerado por tools\gerar_icone.py)
 1 ICON "predator.ico"
+// arte do topo do launcher (PNG, gerada pelo mesmo script; launcher.cpp PintarFundo)
+2 RCDATA "topo_launcher.png"

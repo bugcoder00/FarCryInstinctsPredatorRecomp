@@ -2,6 +2,7 @@
 #include "diag.h"
 #include "thread.h"
 #include "opcoes.h"
+#include "iso.h"
 #include <windows.h>
 #include <filesystem>
 #include <fstream>
@@ -387,15 +388,19 @@ static int MainPrograma(int argc, char** argv)
     // Launcher (launcher.cpp): aparece ao abrir o executavel com dois cliques. Nao aparece nas execucoes de teste
     // (pasta do jogo na linha de comando ou qualquer variavel FCRECOMP_*), nem com "abrir direto" (Shift mostra).
     OpcoesCarregar(exeDir);
+    // Gravacao de roteiro (tools\gravar_roteiro.ps1, so FCRECOMP_GRAVAR): e quem joga jogando, nao um teste. Usa e grava
+    // o opcoes.ini como sempre (antes as opcoes do ini eram ignoradas e as do F2 nao ficavam salvas), so sem o launcher.
+    const bool gravando = getenv("FCRECOMP_GRAVAR") != nullptr;
     bool modoTeste = argc > 1;
-    for (char** e = _environ; e && *e && !modoTeste; e++) modoTeste = strncmp(*e, "FCRECOMP_", 9) == 0;
+    for (char** e = _environ; e && *e && !modoTeste; e++)
+        modoTeste = strncmp(*e, "FCRECOMP_", 9) == 0 && strncmp(*e, "FCRECOMP_GRAVAR=", 16) != 0;
     // troca de fase (xam.cpp, XamLoaderLaunchTitle): o jogo se reabre com PREDATOR_REINICIO; o launcher nao aparece
     const bool reinicio = getenv("PREDATOR_REINICIO") != nullptr;
-    if (!modoTeste && !reinicio)
+    if (!modoTeste && !reinicio && !gravando)
     {
         auto& op = OpcoesAtuais();
         std::error_code ec;
-        bool pastaOk = std::filesystem::exists(op.pastaJogo / "default.xex", ec);
+        bool pastaOk = JogoExiste(op.pastaJogo / "default.xex");   // pasta ou .iso (iso.h)
         bool imagemOk = std::filesystem::file_size(exeDir / GUEST_IMAGE_FILE, ec) == GUEST_IMAGE_SIZE;
         if (!op.pularLauncher || !pastaOk || !imagemOk || (GetAsyncKeyState(VK_SHIFT) & 0x8000))
             if (!LauncherMostrar(exeDir)) return 0;
@@ -413,8 +418,23 @@ static int MainPrograma(int argc, char** argv)
         // testes: janela 1280x720, imagem sem filtro e resolucao interna 1x, como antes do launcher (prints e medicoes
         // comparaveis). FCRECOMP_AA=1-3 e FCRECOMP_ESCALA=1.5/2 testam. (Antes isto era o "senao" da janela de registro
         // e valia tambem para quem joga sem ela: o tamanho da janela e o antisserrilhado do launcher eram ignorados.)
-        OpcoesAtuais().janela = 1; OpcoesAtuais().telaCheia = false; OpcoesAtuais().antisserrilhado = getenv("FCRECOMP_AA") ? atoi(getenv("FCRECOMP_AA")) : 0;
+        OpcoesAtuais().janela = 1; OpcoesAtuais().telaCheia = getenv("FCRECOMP_TELACHEIA") != nullptr;   // FCRECOMP_TELACHEIA=1 testa a tela cheia
+        OpcoesAtuais().antisserrilhado = getenv("FCRECOMP_AA") ? atoi(getenv("FCRECOMP_AA")) : 0;
         OpcoesAtuais().escala = 0; OpcoesAtuais().sombras = 0;   // FCRECOMP_SOMBRAS=2|3 testa
+        // FSR (render.cpp): FCRECOMP_FSR=1-3 (qualidade, equilibrado, desempenho), FCRECOMP_FSRNITIDEZ=0-4
+        OpcoesAtuais().fsr = getenv("FCRECOMP_FSR") ? atoi(getenv("FCRECOMP_FSR")) : 0;
+        if (getenv("FCRECOMP_FSRNITIDEZ")) OpcoesAtuais().fsrNitidez = atoi(getenv("FCRECOMP_FSRNITIDEZ"));
+        OpcoesAtuais().autoHdr = getenv("FCRECOMP_HDR") != nullptr;   // FCRECOMP_HDR=1 testa o Auto HDR (render.cpp)
+        // FCRECOMP_HDRFALSO=1 (HDR falso), FCRECOMP_MOSTRARFPS=1 (contador de FPS e ms), FCRECOMP_AVISOTECLAS=1 (aviso F1/F2/F3)
+        OpcoesAtuais().hdrFalso = getenv("FCRECOMP_HDRFALSO") != nullptr;
+        OpcoesAtuais().msaa = getenv("FCRECOMP_MSAA") ? atoi(getenv("FCRECOMP_MSAA")) : 0;   // 1 = 2x, 2 = 4x, 3 = 8x
+        OpcoesAtuais().mostrarFps = getenv("FCRECOMP_MOSTRARFPS") != nullptr;
+        OpcoesAtuais().avisoTeclas = getenv("FCRECOMP_AVISOTECLAS") != nullptr;
+        // opcoes graficas novas: as do ini nao valem no teste; FCRECOMP_FILTRO=0-4, FCRECOMP_DISTANCIA=-2..3, FCRECOMP_DETALHE=-2..3
+        auto num = [](const char* n) { const char* e = getenv(n); return e ? atoi(e) : 0; };
+        OpcoesAtuais().filtroTextura = num("FCRECOMP_FILTRO"); OpcoesAtuais().distancia = num("FCRECOMP_DISTANCIA");
+        OpcoesAtuais().detalhe = num("FCRECOMP_DETALHE"); OpcoesAtuais().ao = 0;   // FCRECOMP_AO=1-3 (xenos_draw.cpp)
+        // FCRECOMP_CVAR="nome=valor,nome=valor" forca variaveis do motor (graficos_extra.cpp)
         OpcoesAtuais().modoTeste = true;
     }
     // pasta do jogo: linha de comando ou a escolhida no launcher (opcoes.ini; os testes usam a mesma)
@@ -449,6 +469,13 @@ static int MainPrograma(int argc, char** argv)
         return RunShaderTest(dir);
     }
     Log("pasta do jogo: %s", g_gameDir.string().c_str());
+    {
+        // opcoes em uso (para repetir uma gravacao com as mesmas: FCRECOMP_FSR, FCRECOMP_AO etc.)
+        const auto& o = OpcoesAtuais();
+        Log("[opcoes] %s: fxaa %d msaa %d escala %d fsr %d nitidez %d sombras %d filtro %d distancia %d detalhe %d ao %d fps %d hdr %d hdr_falso %d formato %d",
+            o.modoTeste ? "teste" : "opcoes.ini", o.antisserrilhado, o.msaa, o.escala, o.fsr, o.fsrNitidez, o.sombras, o.filtroTextura,
+            o.distancia, o.detalhe, o.ao, o.fps, o.autoHdr ? 1 : 0, o.hdrFalso ? 1 : 0, o.formato);
+    }
     Log("jogos salvos: %s (perfil %s)", g_saveDir.string().c_str(), OpcoesAtuais().perfil.empty() ? "principal" : OpcoesAtuais().perfil.c_str());
 
     if (!MemoryInit()) { Log("falha ao reservar 4 GB de memoria virtual"); return 1; }
@@ -465,7 +492,7 @@ static int MainPrograma(int argc, char** argv)
     memcpy(G(GUEST_IMAGE_BASE), image.data(), image.size());
 
     // cabecalho XEX (para RtlImageXexHeaderField)
-    auto xex = ReadAll(g_gameDir / GUEST_XEX_NAME);
+    auto xex = JogoLer(g_gameDir / GUEST_XEX_NAME);
     if (xex.size() < 0x18) { Log("%s nao encontrado na pasta do jogo", GUEST_XEX_NAME); return 1; }
     uint32_t hdrSize = __builtin_bswap32(*(uint32_t*)&xex[8]);
     g_xexHeader = GuestAlloc(hdrSize);

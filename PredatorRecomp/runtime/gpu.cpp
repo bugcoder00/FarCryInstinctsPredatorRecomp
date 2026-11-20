@@ -12,6 +12,7 @@ bool BugKey(unsigned vk);          // content.cpp: F12 = pacote do bug
 std::wstring PacoteBugPlacaParada(const std::string& explicacao);   // content.cpp: pasta bugs\bug_N para a placa parada
 std::string BugStatus();
 void ProfilerRegisterThread(const char* name);   // profiler.cpp
+bool AoVivoLigado(const char* chave);   // input.cpp: teste ligado no ao_vivo.txt (CHAVE=1)
 void StartFreezeWatch();   // content.cpp: vigia de travamento
 void InputMarkMission();           // input.cpp: a fase comecou (roteiros "F..." do FCRECOMP_AUTOINPUT)
 std::atomic<bool> g_saveOpened{ false };
@@ -30,6 +31,10 @@ std::atomic<uint64_t> g_missionStartFrame{ 0 };   // quadro em que a fase comeco
 #include <algorithm>
 #include <unordered_map>
 #include <memory>
+#ifndef PREDATOR_EDITOR
+extern std::atomic<bool> g_acelerando;   // pular_cena.cpp: cena sendo adiantada = quadros sem limite
+#endif
+void ConquistaAvisar(uint16_t id);   // aviso_conquista.cpp (teste FCRECOMP_TESTE_CONQUISTA)
 [[noreturn]] void SairDoProcesso(unsigned codigo);   // main.cpp
 
 std::string ProfilerStatus();   // profiler.cpp: aviso da medicao na tecla F3 (titulo da janela)
@@ -148,7 +153,7 @@ namespace
     uint32_t QuerySamples(uint32_t reg)
     {
         static const bool fixed = getenv("FCRECOMP_OCLUSAOFIXA") != nullptr;
-        if (fixed || !g_drawReady) return 1000;
+        if (fixed || !g_drawReady || AoVivoLigado("OCLUSAOFIXA")) return 1000;
         return xdraw::QueryResult(reg, 1000);
     }
 
@@ -201,23 +206,48 @@ namespace
     // registro continua) ate a contagem real chegar, como num console com a GPU atrasada: o GetData do jogo pergunta
     // de novo no quadro seguinte. Desiste depois de 3 trocas de tela (responde 0). FCRECOMP_OCLUSAOPADRAO=1 volta ao
     // antigo (1000 na hora).
-    struct QueryAdiada { uint32_t reg1, reg2; uint64_t troca; };   // reg2 = registro da faixa 2 (0 sem faixas)
+    //
+    // Consulta exata (26_SHANTYNIGHT, gravacao 2026-11-18_15-20, bug_60): o registro de cada caixa recebia a contagem
+    // da caixa do quadro ANTERIOR desse bloco. Olhando o chao a caixa do mar conta 0; virando rapido com o mouse para o
+    // mar o jogo ainda lia esse 0 por 2-3 quadros e nao desenhava o mar (ceu abaixo do horizonte). Agora toda consulta
+    // fica "ainda nao pronta" ate a contagem DA PROPRIA caixa chegar (serial). ao_vivo OCLUSAOLENTA=1 ou
+    // FCRECOMP_OCLUSAOANTERIOR=1: volta a contagem do quadro anterior (comparacao).
+    // reg2 = registro da faixa 2 (0 sem faixas); serial/serial2 = consulta de cada faixa (0 = qualquer contagem)
+    struct QueryAdiada { uint32_t reg1, reg2; uint64_t troca; uint32_t serial, serial2; };
     std::vector<QueryAdiada> g_queriesAdiadas;
-    std::vector<uint32_t> g_semContagem;   // registros da faixa 1 fechados sem contagem neste quadro
+    struct SemContagem { uint32_t reg, serial; };
+    std::vector<SemContagem> g_semContagem;   // registros da faixa 1 fechados sem contagem neste quadro
     bool OclusaoAdiar() { static const bool on = getenv("FCRECOMP_OCLUSAOPADRAO") == nullptr; return on; }
+    bool OclusaoExata()
+    {
+        static const bool anterior = getenv("FCRECOMP_OCLUSAOANTERIOR") != nullptr;
+        return !anterior && !AoVivoLigado("OCLUSAOLENTA");
+    }
     void ResponderAdiadas(uint64_t troca)
     {
         size_t keep = 0;
         for (auto& q : g_queriesAdiadas)
         {
-            uint32_t n = xdraw::QueryResult(q.reg1, 0xFFFFFFFFu);
-            if (n == 0xFFFFFFFFu && troca <= q.troca + 3) { g_queriesAdiadas[keep++] = q; continue; }
-            if (n == 0xFFFFFFFFu) n = 0;
+            uint32_t n = q.serial ? xdraw::QueryResultDesde(q.reg1, q.serial, 0xFFFFFFFFu) : xdraw::QueryResult(q.reg1, 0xFFFFFFFFu);
+            // faixa 2: a caixa tambem e contada (caixas em grade da 01_BEACH); sem contagem dela = 0
+            uint32_t n2 = !q.reg2 ? 0 : q.serial2 ? xdraw::QueryResultDesde(q.reg2, q.serial2, 0xFFFFFFFFu) : xdraw::QueryResult(q.reg2, 0);
+            if ((n == 0xFFFFFFFFu || n2 == 0xFFFFFFFFu) && troca <= q.troca + 3) { g_queriesAdiadas[keep++] = q; continue; }
+            if (n == 0xFFFFFFFFu) n = q.serial ? xdraw::QueryResult(q.reg1, 0) : 0;   // desistiu: a ultima conhecida
+            if (n2 == 0xFFFFFFFFu) n2 = xdraw::QueryResult(q.reg2, 0);
             uint32_t* c = (uint32_t*)G(PhysToGuest(q.reg1));
             memset(c, 0, 32);
             c[0] = n;   // Total_A
             c[4] = n;   // ZPass_A
-            if (q.reg2) memset(G(PhysToGuest(q.reg2)), 0, 32);   // faixa 2: nada desenhado (0) e tira a marca
+            if (q.reg2)
+            {
+                uint32_t* c2 = (uint32_t*)G(PhysToGuest(q.reg2));   // tira a marca de fim
+                memset(c2, 0, 32);
+                c2[0] = n2;
+                c2[4] = n2;
+            }
+            if (AoVivoLigado("OCLUSAOREGISTRO"))
+                Log("[oclusao] troca %llu: registro %08X respondido com %u (adiado desde a troca %llu)", (unsigned long long)troca, q.reg1, n,
+                    (unsigned long long)q.troca);
             static const char* qlog = getenv("FCRECOMP_OCLUSAOLOG");
             if (qlog && qlog[0] == 't')
             {
@@ -685,44 +715,66 @@ namespace
             if (addr && !antiga)
             {
                 const uint32_t reg = addr & 0x1FFFFFC0u, meio = addr & 0x3F;
+                // contagem do quadro anterior assim que a placa termina (antes so 2 quadros depois: ceu no mar)
+                if (meio == 0x00 && g_drawReady && !AoVivoLigado("OCLUSAOLENTA")) render::ColherOclusao(AoVivoLigado("OCLUSAOESPERA"));
                 if (g_drawReady)
                 {
                     if (meio == 0x20) xdraw::QueryBegin(reg);
                     else if (meio == 0x00) xdraw::QueryEnd(reg);
                 }
                 // item 40: consulta nova sem contagem ainda -> adiada (veja ResponderAdiadas)
-                if (meio == 0x00 && g_drawReady && OclusaoAdiar())
+                // "mar otimista" (xdraw::QueryOtimista): responde na hora e nunca 0 (registro da faixa 1)
+                const bool otimista = meio == 0x00 && g_drawReady && g_tileState != 0 &&
+                    xdraw::QueryOtimista(g_tileState == 2 ? reg - 0x40 : reg);
+                if (meio == 0x00 && g_drawReady && OclusaoAdiar() && !otimista)
                 {
+                    const bool exata = OclusaoExata();
+                    const uint32_t serial = xdraw::QuerySerial();
                     if (g_tileState == 2)
                     {
-                        auto it = std::find(g_semContagem.begin(), g_semContagem.end(), reg - 0x40);
-                        if (it != g_semContagem.end())
+                        auto it = std::find_if(g_semContagem.begin(), g_semContagem.end(), [&](const SemContagem& e) { return e.reg == reg - 0x40; });
+                        const bool falta1 = it != g_semContagem.end();
+                        const bool falta2 = exata && xdraw::QueryResultDesde(reg, serial, 0xFFFFFFFFu) == 0xFFFFFFFFu;
+                        if (falta1 || falta2)
                         {
-                            g_semContagem.erase(it);
-                            if (g_queriesAdiadas.size() < 1024) g_queriesAdiadas.push_back({ reg - 0x40, reg, g_swapCount.load() });
+                            const uint32_t serial1 = falta1 ? it->serial : 0;
+                            if (falta1) g_semContagem.erase(it);
+                            if (AoVivoLigado("OCLUSAOREGISTRO")) Log("[oclusao] troca %llu: registro %08X adiado (sem contagem)", (unsigned long long)g_swapCount.load(), reg - 0x40);
+                            if (g_queriesAdiadas.size() < 1024) g_queriesAdiadas.push_back({ reg - 0x40, reg, g_swapCount.load(), serial1, falta2 ? serial : 0u });
                             if (meio == 0x00) LogVistoPeloJogo(reg, false);
                             break;   // nao grava: a marca de fim continua (GetData: "ainda nao")
                         }
                     }
-                    else if (xdraw::QueryResult(reg, 0xFFFFFFFFu) == 0xFFFFFFFFu)
+                    else if ((exata ? xdraw::QueryResultDesde(reg, serial, 0xFFFFFFFFu) : xdraw::QueryResult(reg, 0xFFFFFFFFu)) == 0xFFFFFFFFu)
                     {
+                        const uint32_t s = exata ? serial : 0;
                         if (g_tileState == 0)
                         {
-                            if (g_queriesAdiadas.size() < 1024) g_queriesAdiadas.push_back({ reg, 0, g_swapCount.load() });
+                            if (g_queriesAdiadas.size() < 1024) g_queriesAdiadas.push_back({ reg, 0, g_swapCount.load(), s, 0u });
                             LogVistoPeloJogo(reg, false);
+                            if (AoVivoLigado("OCLUSAOREGISTRO")) Log("[oclusao] troca %llu: registro %08X adiado (sem contagem, 1 faixa)", (unsigned long long)g_swapCount.load(), reg);
                             break;
                         }
                         if (g_semContagem.size() > 256) g_semContagem.clear();
-                        g_semContagem.push_back(reg);   // a resposta definitiva sai quando a faixa 2 fechar
+                        g_semContagem.push_back({ reg, s });   // a resposta definitiva sai quando a faixa 2 fechar
                     }
                 }
                 if (meio == 0x00 || meio == 0x20)
                 {
                     uint32_t* c = (uint32_t*)G(PhysToGuest(addr & ~3u));
                     uint32_t n = meio == 0x00 ? QuerySamples(reg) : 0;
+                    if (otimista && g_tileState != 2) n = std::max<uint32_t>(n, 1000);
                     memset(c, 0, 32);
                     c[0] = n;   // Total_A
                     c[4] = n;   // ZPass_A
+                    if (meio == 0x00 && (AoVivoLigado("OCLUSAOREGISTRO") || diag::Capturing(diag::CurrentFrame())))
+                    {
+                        char t[128];
+                        snprintf(t, sizeof(t), "[oclusao] troca %llu: registro %08X (faixa %d) respondido com %u",
+                                 (unsigned long long)g_swapCount.load(), reg, g_tileState, n);
+                        if (AoVivoLigado("OCLUSAOREGISTRO")) Log("%s", t);
+                        xdraw::NotaCaptura(t);
+                    }
                     static const char* qlog = getenv("FCRECOMP_OCLUSAOLOG");
                     if (qlog && qlog[0] == 't' && meio == 0x00)
                     {
@@ -929,6 +981,7 @@ namespace
                 Sleep(12000);
             AnswerPendingQueries(g_swapCount.load());
             g_semContagem.clear();   // item 40
+            if (g_drawReady && !AoVivoLigado("OCLUSAOLENTA")) render::ColherOclusao(false);
             if (!g_queriesAdiadas.empty()) ResponderAdiadas(g_swapCount.load());
             {
                 static const char* seq = getenv("FCRECOMP_SEQLOG");
@@ -1142,6 +1195,14 @@ namespace
             {
                 uint32_t n = ((header >> 16) & 0x3FFF) + 1;
                 uint32_t opcode = (header >> 8) & 0x7F;
+                // captura (F9/F12): pacotes que nao sao desenho nem constante vao para o desenhos.txt (ordem dos comandos)
+                if (opcode != 0x22 && opcode != 0x36 && opcode != 0x2D && opcode != 0x10 && diag::Capturing(diag::CurrentFrame()))
+                {
+                    char t[160];
+                    snprintf(t, sizeof(t), "PACOTE %02X%s n=%u d0=%08X d1=%08X d2=%08X | 2325=%08X 2293=%08X 2316=%08X", opcode, (header & 1) ? " (predicado)" : "",
+                        n, R32(ptr), n > 1 ? R32(ptr + 4) : 0, n > 2 ? R32(ptr + 8) : 0, Reg(0x2325), Reg(0x2293), Reg(0x2316));
+                    xdraw::NotaCaptura(t);
+                }
                 // pacote predicado (bit 0): so executa se a mascara de "bins" do tiling permitir
                 static const char* predLog = getenv("FCRECOMP_PREDLOG");   // quadro: pacotes que so rodam em algumas faixas
                 if ((header & 1) && predLog && g_swapCount >= strtoull(predLog, nullptr, 10) && g_swapCount <= strtoull(strchr(predLog, '-') ? strchr(predLog, '-') + 1 : predLog, nullptr, 10))
@@ -1153,7 +1214,21 @@ namespace
                 if (MergeTiles() && (opcode == 0x22 || opcode == 0x36) && g_tileState != 0 && g_tileState != 3)
                 {
                     bool copy = (Reg(0x2208) & 7) == 6;   // RB_MODECONTROL = copia (resolve)
-                    if (g_tileState == 2) exec = false;
+                    if (g_tileState == 2)
+                    {
+                        // caixa de consulta da segunda faixa: tambem e contada (veja xenos_draw: caixaFaixa)
+                        static const bool gradeAntiga = getenv("FCRECOMP_GRADEANTIGA") != nullptr;
+                        exec = exec && !gradeAntiga && !copy && xdraw::QueryAberta();
+                        // captura: caixa de consulta da segunda faixa (nao desenhada) com a tesoura e o deslocamento da janela
+                        if (!exec && opcode == 0x22 && xdraw::QueryAberta() && diag::Capturing(diag::CurrentFrame()))
+                        {
+                            char t[200];
+                            snprintf(t, sizeof(t), "FAIXA2 caixa nao desenhada: d0=%08X d1=%08X jan=%08X tesTL=%08X tesBR=%08X 2205=%08X tela=%08X/%08X vporte=%08X,%08X",
+                                R32(ptr), n > 1 ? R32(ptr + 4) : 0, Reg(0x2080), Reg(0x2081), Reg(0x2082), Reg(0x2205), Reg(0x200E), Reg(0x200F),
+                                Reg(0x2110), Reg(0x210F));
+                            xdraw::NotaCaptura(t);
+                        }
+                    }
                     else if ((header & 1) && !copy) exec = (g_binMask & (g_tileUnion | g_tileUnionLast)) != 0;
                 }
                 if (!exec && g_fenceLogAddr != 0xFFFFFFFF && (opcode == 0x58 || opcode == 0x3D || opcode == 0x3C || opcode == 0x3F))
@@ -1178,6 +1253,18 @@ namespace
         }
     }
 
+    // Fechamento (bug do .dmp/DRED ao fechar com Alt+F4, 18/11): antes o fechamento so desligava g_drawReady, esperava
+    // 100 ms e liberava os recursos da GPU enquanto o processador de comandos ainda rodava (no log ele continuava
+    // respondendo consultas e apresentando quadros pelo caminho sem desenho) -> falha de pagina na placa / excecao no
+    // driver. Agora o processador para no inicio do proximo comando e avisa; so entao os recursos sao liberados.
+    std::atomic<bool> g_cpParar{ false }, g_cpParado{ false };
+    void PararProcessador()
+    {
+        g_cpParar = true;
+        for (int i = 0; i < 200 && !g_cpParado; i++) Sleep(10);   // ate 2 s (pode estar esperando a placa)
+        if (!g_cpParado) Log("[gpu] processador de comandos nao parou em 2 s; liberando assim mesmo");
+    }
+
     void CommandProcessorThread()
     {
         // (o ring pode ser recriado a qualquer momento: GpuRingInit zera as posicoes de leitura/escrita)
@@ -1192,6 +1279,7 @@ namespace
 
         for (;;)
         {
+            if (g_cpParar) { g_cpParado = true; for (;;) Sleep(1000); }   // fechando: veja PararProcessador
             // o jogo pode recriar o ring buffer
             if (g_ringBufferBase != ringBase)
             {
@@ -1210,7 +1298,11 @@ namespace
                 perf::Scope ps(perf::Idle);
                 if (!idleSince) idleSince = GetTickCount64();
                 if (!g_pendingQueries.empty()) AnswerPendingQueries(g_swapCount.load());
-                if (!g_queriesAdiadas.empty()) ResponderAdiadas(g_swapCount.load());
+                if (!g_queriesAdiadas.empty())
+                {
+                    if (g_drawReady && !AoVivoLigado("OCLUSAOLENTA")) render::ColherOclusao(false);
+                    ResponderAdiadas(g_swapCount.load());
+                }
                 CpWait(idleSpin++);
                 continue;
             }
@@ -1659,6 +1751,20 @@ namespace
                 else InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
+            // teste do aviso de conquista (aviso_conquista.cpp): FCRECOMP_TESTE_CONQUISTA=id[,id...] ~4 s depois do 1o quadro
+            static ULONGLONG testeConq = 0;
+            if (testeConq != ~0ull && g_swapCount > 0)
+            {
+                const char* e = getenv("FCRECOMP_TESTE_CONQUISTA");
+                if (!e) testeConq = ~0ull;
+                else if (!testeConq) testeConq = GetTickCount64();
+                else if (GetTickCount64() - testeConq > 4000)
+                {
+                    for (const char* p = e; *p; p++)
+                        if (p == e || p[-1] == ',') ConquistaAvisar((uint16_t)atoi(p));
+                    testeConq = ~0ull;
+                }
+            }
             // FPS = quadros apresentados (trocas de tela do jogo) por segundo, medido a cada ~1 s
             static uint64_t lastSwaps = 0;
             static ULONGLONG lastTick = GetTickCount64();
@@ -1681,7 +1787,7 @@ namespace
                 snprintf(title, sizeof(title), GUEST_TITULO " - FPS: %.0f  |  quadros: %llu  desenhos: %llu  fb: %08X %ux%u (interna %ux%u)",
                     fps, (unsigned long long)g_swapCount.load(), (unsigned long long)g_drawCount.load(),
                     g_frontBuffer.load(), g_frontWidth.load(), g_frontHeight.load(),
-                    g_frontWidth.load() * meios / 2, g_frontHeight.load() * meios / 2);
+                    (g_frontWidth.load() * meios + 3) / 4, (g_frontHeight.load() * meios + 3) / 4);
             }
             else
                 snprintf(title, sizeof(title), GUEST_TITULO " - FPS: %.0f", fps);
@@ -1689,7 +1795,7 @@ namespace
             if (std::string warm = xdraw::WarmUpStatus(); !warm.empty())
                 full = GUEST_TITULO " - " + warm + "...";
             else if (!g_renderReady)
-                full = GUEST_TITULO TR(" - iniciando a placa de video...", " - starting the graphics card...");
+                full = std::string(GUEST_TITULO) + TR(" - iniciando a placa de video...", " - starting the graphics card...");
             SetWindowTextA(hwnd, full.c_str());
             return 0;
         }
@@ -1701,7 +1807,8 @@ namespace
             diag::WriteReport(g_placaTravou ? "placa de video travou" : "janela fechada");
             RedeEncerrar();   // fecha as portas abertas no roteador (rede.cpp)
             // espera a placa de video terminar antes de sair (evita recursos presos no driver)
-            if (g_drawReady) { g_drawReady = false; Sleep(100); xdraw::Shutdown(); }
+            PararProcessador();
+            if (g_drawReady) { g_drawReady = false; xdraw::Shutdown(); }
             else if (g_renderReady) render::WaitIdle();
             SairDoProcesso(0);
         }
@@ -1847,7 +1954,7 @@ namespace
         std::thread([] {
             // a troca de quadros tem o tamanho da resolucao interna (a imagem e ampliada/reduzida para a janela)
             uint32_t meios = xdraw::EscalaMeios();
-            bool render = render::Init(g_window, 1280 * meios / 2, 720 * meios / 2);
+            bool render = render::Init(g_window, 1280 * meios / 4, 720 * meios / 4);   // meios = quartos (4 = 1x)
             bool draw = render && !getenv("FCRECOMP_NODRAW") && xdraw::Init();
             g_drawReady = draw;
             g_renderReady = render;
@@ -1877,7 +1984,8 @@ static BOOL WINAPI ConsoleCtrl(DWORD)
 {
     diag::WriteReport("saida");
     RedeEncerrar();
-    if (g_drawReady) { g_drawReady = false; Sleep(100); xdraw::Shutdown(); }
+    PararProcessador();
+    if (g_drawReady) { g_drawReady = false; xdraw::Shutdown(); }
     SairDoProcesso(0);
 }
 
@@ -2147,6 +2255,9 @@ float AspectoTela()
 
 int ModoFps()
 {
+#ifndef PREDATOR_EDITOR
+    if (g_acelerando.load(std::memory_order_relaxed)) return 2;
+#endif
     static const int teste = [] {
         if (const char* e = getenv("FCRECOMP_FPS")) { int n = atoi(e); return n == 30 ? 0 : n == 60 ? 1 : 2; }
         if (const char* e = getenv("FCRECOMP_FPS60")) return atoi(e) != 0 ? 1 : 0;

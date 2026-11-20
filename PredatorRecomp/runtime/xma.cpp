@@ -141,7 +141,7 @@ namespace
         // FCRECOMP_XMACONSUMO: quanto da saida o jogo leu (amostras) e quando, por som
         uint32_t consKey = 0, consSig = 0, consRead = 0, consRate = 0, consCh = 1;
         uint64_t consBytes = 0;
-        double consFirst = 0, consLast = 0;
+        double consFirst = 0, consLast = 0, consIni = 0;
         uint32_t bufFrames = 0;   // depuracao: quadros decodificados do buffer de entrada atual (FCRECOMP_XMACONTA)
         std::vector<uint32_t> bufStarts;   // depuracao: onde cada um comecou (pacote * bits + bit)
         // subquadros do laco: o nosso decodificador entrega cada quadro um quadro depois (o 1o so "aquece"), entao o
@@ -308,7 +308,9 @@ namespace
             Log("[xmaconsumo] ctx %u som %08X %u Hz: %.2f s de audio lidos pelo jogo em %.2f s reais -> %.2fx (%.0f-%.0f ms)",
                 id, s.consSig, s.consRate, audio, real, real > 0 ? audio / real : 0, s.consFirst, s.consLast);
         }
-        s.consBytes = 0; s.consRead = 0; s.consFirst = s.consLast = 0;
+        else if (s.consSig)   // o som comecou mas o jogo nao leu nada dele (parado antes de tocar)
+            Log("[xmaconsumo] ctx %u som %08X: NADA lido pelo jogo (%.0f ms depois do inicio)", id, s.consSig, perf::Now() - s.consIni);
+        s.consBytes = 0; s.consRead = 0; s.consFirst = s.consLast = 0; s.consSig = 0;
     }
 
     // Decodifica quadros enquanto houver entrada e espaco na saida
@@ -436,7 +438,7 @@ namespace
             if (g_consumo && c.readOffset() <= 32 && s.consKey != bufKey)
             {
                 ConsumoFim(id, s);
-                s.consKey = bufKey; s.consSig = Assinatura(buf); s.consRead = c.outRead();
+                s.consKey = bufKey; s.consSig = Assinatura(buf); s.consRead = c.outRead(); s.consIni = perf::Now();
             }
             if (static const bool temMudo = getenv("FCRECOMP_XMAMUDO") != nullptr; temMudo && s.mudoKey != bufKey)
             {
