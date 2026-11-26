@@ -499,6 +499,7 @@ namespace
         }
         case WM_ACTIVATE: if (LOWORD(wp) == WA_INACTIVE) ParouDeEsperar(j, -1); break;   // trocou de janela: cancela
         case WM_LBUTTONDOWN: SetFocus(j); return 0;   // clique fora das caixas: tira a selecao (azul) da caixa com foco
+        case WM_CTLCOLORBTN: return (LRESULT)tema::PincelFundo();   // fundo dos botoes desenhados aqui (era branco ao voltar de fora da tela)
         case WM_ERASEBKGND: return 1;   // o WM_PAINT pinta tudo (sem piscar)
         case WM_PAINT:
         {

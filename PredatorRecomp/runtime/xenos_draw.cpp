@@ -15,6 +15,8 @@ extern int g_tileState;              // gpu.cpp: faixa do predicated tiling (1 =
 extern uint32_t g_tileFullWidth;     // gpu.cpp: largura da tela inteira durante as faixas
 #include <vector>
 bool FotoReinicioPixels(std::vector<uint8_t>& bgra, uint32_t& w, uint32_t& h);   // gpu.cpp: tela de carregamento (troca de programa)
+void TrocaTerminou();   // gpu.cpp: a tela de carregamento da troca de programa saiu (anota o tempo da troca)
+void TrocaCompletar();  // gpu.cpp: a barra da troca vai a 100%
 static const bool g_statsOn = std::getenv("FCRECOMP_STATS") != nullptr;   // estatisticas so quando pedidas (custam tempo)
 #include "xenos_draw.h"
 #include "xenos_translate.h"
@@ -23,6 +25,8 @@ static const bool g_statsOn = std::getenv("FCRECOMP_STATS") != nullptr;   // est
 #include "render.h"
 #include "guest.h"
 #include "iso.h"
+#include "gpu/XenosHlsl.h"
+#include "gpu/XenosMicrocode.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <atomic>
@@ -43,6 +47,7 @@ extern std::filesystem::path g_gameDir;   // fs.cpp: pasta do jogo
 
 
 int64_t RoteiroTiqueAtual();   // input.cpp
+int64_t OclusaoLogTique();     // input.cpp: tique do roteiro (FCRECOMP_OCLUSAOLOG=t...) ou quadro (=q...)
 bool AoVivoLigado(const char* chave);   // input.cpp: teste ligado no ao_vivo.txt (CHAVE=1)
 void RelogioPausar(bool parar);          // input.cpp: para/solta o relogio do jogo (item 33)
 std::string AoVivoValor(const char* chave);   // input.cpp
@@ -130,6 +135,7 @@ namespace xdraw
         bool g_fullResolveThisFrame = false;  // o quadro atual leu um resolve de tela inteira
         bool g_usedPersistThisFrame = false;
         uint32_t g_drawsThisFrame = 0;
+        uint32_t g_proximoEnvio = 0;   // desenho do quadro em que vai o proximo envio parcial (0 = o primeiro, veja Draw)
         uint32_t g_aguaQuadro = 0;   // desenhos da superficie do mar neste quadro (FCRECOMP_AGUALOG)
         uint32_t g_fundoMarQuadro = 0;
         uint32_t g_vsDesdeResolve = 0, g_reflexoDesenhos = 0, g_reflexoPedras = 0;   // desenhos no reflexo 512 (e da pedra B53D)
@@ -146,6 +152,9 @@ namespace xdraw
         D3D12_RESOURCE_STATES g_aaSceneState = D3D12_RESOURCE_STATE_RENDER_TARGET;
         int g_aaLevel = -1;
         // oclusao de ambiente (opcao "ao"): copia da cena escurecida nos cantos e o termo de AO (R8)
+        // SMAA da cena (render.cpp SMAA_HLSL): bordas (RG8), pesos (RGBA8) e a cena misturada (RGBA16F)
+        ComPtr<ID3D12Resource> g_smaaBordas, g_smaaPesos, g_smaaCena;
+        D3D12_RESOURCE_STATES g_smaaBordasState{}, g_smaaPesosState{}, g_smaaCenaState{};
         ComPtr<ID3D12Resource> g_aoScene, g_aoTex;
         D3D12_RESOURCE_STATES g_aoSceneState = D3D12_RESOURCE_STATE_RENDER_TARGET, g_aoTexState = D3D12_RESOURCE_STATE_RENDER_TARGET;
         // profundidade da cena 3D: a superficie de profundidade larga (>= 1280) com mais desenhos no quadro
@@ -404,6 +413,8 @@ namespace xdraw
         // lampadas vem antes da limpeza do meio do quadro (precisam do cenario: senao a luz atravessa o piso) e a do mar
         // vem depois (precisa da profundidade limpa: senao o ceu aparece no mar). Com uma profundidade so, um dos dois
         // sempre saia errado.
+        ComPtr<ID3D12RootSignature> g_depthCopyRoot;   // copias de profundidade (veja DEPTH_COPY_HLSL)
+        ComPtr<ID3D12PipelineState> g_depthFotoPso;    // foto da profundidade (DEPTH_FOTO_HLSL)
         struct FotoProf
         {
             ComPtr<ID3D12Resource> res;
@@ -419,8 +430,12 @@ namespace xdraw
         uint64_t g_fotoQuadro = ~0ull;
         std::unordered_map<uint32_t, std::pair<uint64_t, int>> g_fotoDoBloco;   // bloco da faixa 1 -> (quadro, foto)
 
+        uint64_t g_fotosTiradas = 0;   // contagem para o [etapas]
+        // marcas do perfilador da GPU dentro da foto (gpuprof vem depois no arquivo): rotulo = inicio, nullptr = fim
+        void (*g_fotoMarca)(ID3D12GraphicsCommandList*, const char*) = nullptr;
         bool TirarFoto(ID3D12GraphicsCommandList* list, Surface& src, int i)
         {
+            g_fotosTiradas++;
             auto& f = g_fotos[i];
             const D3D12_RESOURCE_DESC d = src.res->GetDesc();
             if (!g_fotoDsvHeap)
@@ -446,6 +461,48 @@ namespace xdraw
                 dd.ViewDimension = d.SampleDesc.Count > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D;
                 g_dev->CreateDepthStencilView(f.res.Get(), &dd, f.view);
             }
+            // Copia so do pedaco usado (largura x altura da superficie, em pixels da placa) com um desenho que grava a
+            // profundidade (25/11). O CopyResource levava a superficie inteira (CANVAS x CANVAS, ~2048x2048): selva da
+            // 02_native ~3,7 ms de placa parada por quadro. O stencil nao vai junto (as caixas das consultas so testam a
+            // profundidade). MSAA continua com o CopyResource. FCRECOMP_FOTOCOPIA=1 volta ao antigo.
+            static const bool copiaInteira = getenv("FCRECOMP_FOTOCOPIA") != nullptr;
+            if (!copiaInteira && g_depthFotoPso && d.SampleDesc.Count == 1)
+            {
+                // so as linhas da tela (as caixas das consultas sao cortadas no viewport, 720 linhas na 1x): a superficie
+                // tem 2048 linhas e a copia delas todas levava ~2 ms de placa por quadro. FCRECOMP_FOTOINTEIRA=1 copia todas.
+                static const bool alturaFoto = getenv("FCRECOMP_FOTOINTEIRA") == nullptr;
+                const LONG W = (LONG)std::min<uint64_t>(d.Width, Pm(src.width, src.meios)), H = (LONG)std::min<uint64_t>({ (uint64_t)d.Height, (uint64_t)Pm(src.height, src.meios), alturaFoto ? (uint64_t)Pm(736, src.meios) : ~0ull });
+                if (g_fotoMarca) g_fotoMarca(list, "(foto: profundidade -> leitura)");
+                Transition(list, src.res.Get(), src.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                Transition(list, f.res.Get(), f.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                if (g_fotoMarca) { g_fotoMarca(list, nullptr); g_fotoMarca(list, "(foto: copia)"); }
+                auto srv = render::AllocSrv(1);
+                D3D12_SHADER_RESOURCE_VIEW_DESC v{};
+                v.Format = DS_SRV_FORMAT;
+                v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                v.Texture2D.MipLevels = 1;
+                g_dev->CreateShaderResourceView(src.res.Get(), &v, srv.cpu);
+                list->OMSetRenderTargets(0, nullptr, FALSE, &f.view);
+                D3D12_VIEWPORT vp{ 0, 0, (float)d.Width, (float)d.Height, 0, 1 };
+                D3D12_RECT sc{ 0, 0, W, H };
+                list->RSSetViewports(1, &vp);
+                list->RSSetScissorRects(1, &sc);
+                list->SetGraphicsRootSignature(g_depthCopyRoot.Get());
+                ID3D12DescriptorHeap* heaps[] = { render::SrvHeap(), render::SamplerHeap() };
+                list->SetDescriptorHeaps(2, heaps);
+                list->SetGraphicsRootDescriptorTable(0, srv.gpu);
+                const int32_t off[2] = { 0, 0 };
+                list->SetGraphicsRoot32BitConstants(1, 2, off, 0);
+                list->SetPipelineState(g_depthFotoPso.Get());
+                list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                ForgetBoundState();   // o proximo desenho do jogo reaplica tudo
+                list->DrawInstanced(3, 1, 0, 0);
+                if (g_fotoMarca) { g_fotoMarca(list, nullptr); g_fotoMarca(list, "(foto: leitura -> profundidade)"); }
+                Transition(list, src.res.Get(), src.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                if (g_fotoMarca) g_fotoMarca(list, nullptr);
+                return true;
+            }
             Transition(list, src.res.Get(), src.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
             Transition(list, f.res.Get(), f.state, D3D12_RESOURCE_STATE_COPY_DEST);
             list->CopyResource(f.res.Get(), src.res.Get());
@@ -467,7 +524,8 @@ namespace xdraw
         // na hora pela propria thread da GPU (ou espera terminar, se uma thread de fundo ja o pegou).
         namespace assinc
         {
-            struct Tarefa { std::function<void()> f; std::atomic<bool> pega{ false }, feita{ false }; };
+            // fundo: pipeline da receita criado em segundo plano depois de abrir o jogo (AquecerNoFundo); nao conta na fila
+            struct Tarefa { std::function<void()> f; std::atomic<bool> pega{ false }, feita{ false }; bool fundo = false; std::atomic<bool> promovida{ false }; };
             std::vector<std::shared_ptr<Tarefa>> g_faltando;    // desenho atual: compilacoes que nao ficaram prontas
             std::vector<std::shared_ptr<Tarefa>> g_esperadas;   // quadro atual: as dos desenhos grandes pulados (item 34)
             bool g_incompleto = false;
@@ -483,6 +541,9 @@ namespace xdraw
             uint32_t g_urgentesFeitos = 0;
             // medicao (bug 29): trabalhos na fila/rodando e o tempo ate a fila esvaziar
             int g_pendentes = 0;         // na fila + rodando (protegido por g_mx)
+            // medicao: tempo de compilacao de shaders (dxc) e de criacao de pipelines (driver) desde o ultimo lote
+            std::atomic<uint64_t> g_usShader{ 0 }, g_usPso{ 0 };
+            std::atomic<uint32_t> g_nShader{ 0 }, g_nPso{ 0 };
             double g_inicioLote = 0, g_msLote = 0;
             uint32_t g_nLote = 0;
 
@@ -496,6 +557,7 @@ namespace xdraw
             }
             void Rodar(const std::shared_ptr<Tarefa>& t)
             {
+                if (t->fundo) { t->f(); t->f = nullptr; t->feita = true; return; }
                 double t0 = perf::Now();
                 t->f(); t->f = nullptr;
                 t->feita = true;
@@ -504,8 +566,9 @@ namespace xdraw
                 g_msLote += ms; g_nLote++;
                 if (--g_pendentes == 0 && g_nLote)
                 {
-                    Log("[draw] fila de compilacao vazia: %u shaders/pipelines em %.1f s (%.0f ms de compilacao somados, media %.0f ms, %d threads)",
-                        g_nLote, (perf::Now() - g_inicioLote) / 1000.0, g_msLote, g_msLote / g_nLote, (int)g_threads.size());
+                    Log("[draw] fila de compilacao vazia: %u shaders/pipelines em %.1f s (%.0f ms de compilacao somados, media %.0f ms, %d threads; shaders %u em %.0f ms, pipelines %u em %.0f ms)",
+                        g_nLote, (perf::Now() - g_inicioLote) / 1000.0, g_msLote, g_msLote / g_nLote, (int)g_threads.size(),
+                        g_nShader.exchange(0), g_usShader.exchange(0) / 1000.0, g_nPso.exchange(0), g_usPso.exchange(0) / 1000.0);
                     g_nLote = 0; g_msLote = 0;
                 }
             }
@@ -618,8 +681,51 @@ namespace xdraw
                     Log("[draw] imagem parada enquanto compila: %d shaders/pipelines na fila, esperou %.1f s (jogo e relogio parados)",
                         antes, (perf::Now() - t0) / 1000.0);
             }
+            // Aquecimento em segundo plano: os pipelines da receita sao criados por threads de prioridade baixa enquanto o
+            // jogo ja roda (menus, carregamento). Ordem da receita (a ordem em que foram usados na coleta). Um desenho
+            // que precisa de um que ainda nao saiu passa ele para a fila normal (Promover); numa passada de tela, faz na hora.
+            std::vector<std::shared_ptr<Tarefa>> g_fundoFila;
+            std::atomic<size_t> g_fundoProx{ 0 }, g_fundoFeitas{ 0 };
+            std::atomic<bool> g_pararFundo{ false };
+            std::vector<std::thread> g_fundo;
+            double g_fundoInicio = 0;
+            void PararFundo()
+            {
+                g_pararFundo = true;
+                for (auto& th : g_fundo) th.join();
+                g_fundo.clear();
+                g_fundoFila.clear();
+                g_pararFundo = false;
+            }
+            void Fundo(std::vector<std::shared_ptr<Tarefa>> tarefas)
+            {
+                PararFundo();
+                if (tarefas.empty()) return;
+                g_fundoFila = std::move(tarefas);
+                g_fundoProx = 0; g_fundoFeitas = 0;
+                g_fundoInicio = perf::Now();
+                const int n = std::clamp((int)std::thread::hardware_concurrency() - 2, 1, 6);
+                for (int i = 0; i < n; i++)
+                    g_fundo.emplace_back([n] {
+                        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+                        for (size_t i; !g_pararFundo && (i = g_fundoProx++) < g_fundoFila.size();)
+                        {
+                            auto& t = g_fundoFila[i];
+                            if (!t->pega.exchange(true)) Rodar(t);
+                            if (++g_fundoFeitas == g_fundoFila.size())
+                                Log("[draw] aquecimento em segundo plano: %zu pipelines em %.1f s (%d threads)", g_fundoFila.size(),
+                                    (perf::Now() - g_fundoInicio) / 1000.0, n);
+                        }
+                    });
+            }
+            void Promover(const std::shared_ptr<Tarefa>& t)
+            {
+                if (!t || !t->fundo || t->pega || t->promovida.exchange(true)) return;
+                Enviar([t] { if (!t->pega.exchange(true)) { t->f(); t->f = nullptr; t->feita = true; } });
+            }
             void Parar()
             {
+                PararFundo();
                 { std::lock_guard lock(g_mx); g_parar = true; g_fila.clear(); g_pendentes = 0; }
                 g_cv.notify_all();
                 for (auto& th : g_threads) th.join();
@@ -635,6 +741,7 @@ namespace xdraw
             std::vector<uint8_t> dxil; std::vector<uint32_t> fetchSlots; uint32_t textureMask = 0, cubeMask = 0; bool ok = false;
             mutable uint32_t usoFase = 0;   // coleta da receita: ultima fase (RecFaseGeracao) em que foi anotado
             std::shared_ptr<ShaderJob> job; std::string warnings;   // compilacao em segundo plano em andamento
+            VsGenerico gen;   // vertex shader generico (molde do shaders.dat): como montar a tabela vfp[]
         };
         std::unordered_map<uint64_t, CompiledShader> g_shaderCache;
 
@@ -643,11 +750,15 @@ namespace xdraw
             return hash ^ (pixel ? 0x5050505050505050ull : 0) ^ (alphaTest ? 0xA1A1A1A100000000ull : 0);
         }
 
+        bool VsAtributoLigado();
+
         // Traducao para HLSL (sempre numa thread so: o tradutor usa g_translateHash nas opcoes de depuracao)
-        std::string TranslateFor(const ShaderRef& s, bool pixel, bool alphaTest, CompiledShader& c, std::string& warnings)
+        std::string TranslateFor(const ShaderRef& s, bool pixel, bool alphaTest, CompiledShader& c, std::string& warnings, bool generico = false)
         {
             g_translateHash = s.hash;
-            std::string hlsl = TranslateXenosShader(*s.code, pixel, &warnings, &c.fetchSlots, &c.textureMask, &c.cubeMask);
+            c.gen.atributo = generico && VsAtributoLigado();
+            std::string hlsl = TranslateXenosShader(*s.code, pixel, &warnings, &c.fetchSlots, &c.textureMask, &c.cubeMask,
+                                                    generico && !pixel ? &c.gen : nullptr);
             if (alphaTest) hlsl = "#define XE_ALPHA_TEST\n" + hlsl;
             return hlsl;
         }
@@ -655,7 +766,8 @@ namespace xdraw
         void FinishShader(const ShaderRef& s, bool pixel, CompiledShader& c, const std::string& warnings, const std::string& errors);
 
         // alphaTest: variante do pixel shader com o alpha test (a outra fica sem "discard" e mantem o early-Z)
-        const CompiledShader& GetShader(const ShaderRef& s, bool pixel, bool alphaTest = false)
+        // generico: s e o molde do shaders.dat e s.hash a chave generica (VsResolver)
+        const CompiledShader& GetShader(const ShaderRef& s, bool pixel, bool alphaTest = false, bool generico = false)
         {
             auto& c = g_shaderCache[ShaderKey(s.hash, pixel, alphaTest)];
             if (!c.dxil.empty() || c.ok || !s.code) return c;
@@ -670,7 +782,8 @@ namespace xdraw
                 return c;
             }
             std::string warnings, errors;
-            std::string hlsl = TranslateFor(s, pixel, alphaTest, c, warnings);
+            std::string hlsl = TranslateFor(s, pixel, alphaTest, c, warnings, generico);
+            if (generico && !c.gen.ok) { c.ok = true; return c; }   // nao deu para ser generico: quem chama usa o normal
             if (!assinc::Ligado(warm::g_loading))
             {
                 c.dxil = render::CompileShader(hlsl, pixel ? L"ps_6_0" : L"vs_6_0", &errors);
@@ -682,7 +795,9 @@ namespace xdraw
             c.job->hlsl = std::move(hlsl);
             c.job->pixel = pixel;
             c.job->tarefa = assinc::Enviar([j = c.job] {
+                double t0 = perf::Now();
                 j->dxil = render::CompileShader(j->hlsl, j->pixel ? L"ps_6_0" : L"vs_6_0", &j->errors);
+                assinc::g_usShader += (uint64_t)((perf::Now() - t0) * 1000); assinc::g_nShader++;
                 j->done = true;
             });
             if (assinc::Esperar(c.job->done, c.job->tarefa)) concluir();
@@ -706,15 +821,16 @@ namespace xdraw
                 diag::Note(diag::Shader, key + warnings);
             }
             c.ok = true;   // nao tenta de novo
-            if (!c.dxil.empty()) warm::SaveShader(s.hash, pixel, *s.code);
+            if (!c.dxil.empty() && !c.gen.ok) warm::SaveShader(s.hash, pixel, *s.code);   // o generico (molde) nao vai
         }
 
         // Progresso do aquecimento para a tela de preparacao (gpu.cpp): shaders compilados e pipelines criados
         std::atomic<uint32_t> g_warmShadersDone{ 0 }, g_warmShadersTotal{ 0 }, g_warmPsoDone{ 0 }, g_warmPsoTotal{ 0 };
+        std::atomic<int> g_warmEtapa{ 0 };   // WarmUpEtapa (ETAPA_*)
 
         // Compila de uma vez, em paralelo, os shaders que ainda nao estao prontos (usado pelo aquecimento).
         // A traducao e o registro do resultado ficam nesta thread; so a compilacao (a parte demorada) e dividida.
-        struct ShaderRequest { ShaderRef ref; bool pixel, alphaTest; };
+        struct ShaderRequest { ShaderRef ref; bool pixel, alphaTest; bool generico = false; };
         void CompileShadersInParallel(const std::vector<ShaderRequest>& requests)
         {
             struct Job { ShaderRequest req; CompiledShader* c; std::string hlsl, warnings, errors; };
@@ -726,7 +842,8 @@ namespace xdraw
                 auto& c = g_shaderCache[k];
                 if (!r.ref.code || !c.dxil.empty() || c.ok || c.job || !queued.insert(k).second) continue;
                 Job j{ r, &c };
-                j.hlsl = TranslateFor(r.ref, r.pixel, r.alphaTest, c, j.warnings);
+                j.hlsl = TranslateFor(r.ref, r.pixel, r.alphaTest, c, j.warnings, r.generico);
+                if (r.generico && !c.gen.ok) { c.ok = true; continue; }
                 jobs.push_back(std::move(j));
             }
             if (jobs.empty()) return;
@@ -789,7 +906,6 @@ float4 vs(uint id : SV_VertexID) : SV_Position
 }
 float ps(float4 pos : SV_Position) : SV_Target { return depthTex.Load(int3(int2(pos.xy) + offset, 0)); }
 )";
-        ComPtr<ID3D12RootSignature> g_depthCopyRoot;
         ComPtr<ID3D12PipelineState> g_depthCopyPso;
         ComPtr<ID3D12PipelineState> g_colorCopyPso;   // resolve de superficie RGBA8 para textura RGBA16F (um desenho)
         // MSAA: profundidade com varias amostras -> profundidade com 1 (a amostra 0; a media nao serve para profundidade)
@@ -799,6 +915,12 @@ cbuffer Off : register(b0) { int2 offset; };
 float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy) + offset, 0); }
 )";
         ComPtr<ID3D12PipelineState> g_depthResolvePso;
+        // foto da profundidade (TirarFoto) so no pedaco usado da superficie, com um desenho (sem MSAA)
+        const char* DEPTH_FOTO_HLSL = R"(
+Texture2D<float> depthTex : register(t0);
+cbuffer Off : register(b0) { int2 offset; };
+float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int3(int2(pos.xy) + offset, 0)); }
+)";
 
         // Superficie para ler (MSAA): com 1 amostra devolve ela mesma; com mais, atualiza e devolve a copia resolvida
         // (cor: media das amostras, ResolveSubresourceRegion so no retangulo r; profundidade: amostra 0 com um desenho).
@@ -947,36 +1069,16 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
         // pipelines sendo criados em segundo plano (veja namespace assinc) e os que falharam (nao tenta de novo)
         struct PsoJob { D3D12_GRAPHICS_PIPELINE_STATE_DESC d{}; std::vector<uint8_t> vs, ps; ComPtr<ID3D12PipelineState> pso; HRESULT hr = S_OK; double ms = 0; std::atomic<bool> done{ false }; std::shared_ptr<assinc::Tarefa> tarefa; };
         std::unordered_map<PsoKey, std::shared_ptr<PsoJob>, PsoKeyHash> g_psoPendente;
+        std::vector<std::shared_ptr<PsoJob>> g_fundoJobs;   // aquecimento em segundo plano (vivos ate a thread terminar)
         std::unordered_set<PsoKey, PsoKeyHash> g_psoFalhou;
 
-        // novo = o pipeline acabou de ficar pronto (para anotar no aquecimento)
-        ID3D12PipelineState* GetPso(const PsoKey& key, const CompiledShader& vs, const CompiledShader& ps, bool* novo = nullptr)
+        // descricao do pipeline (estado da chave + shaders)
+        // il: input layout do vertex shader por atributos (ResolverVs; nulo nos outros)
+        void MontarPso(const PsoKey& key, const CompiledShader& vs, const CompiledShader& ps, D3D12_GRAPHICS_PIPELINE_STATE_DESC& d,
+                       const std::vector<D3D12_INPUT_ELEMENT_DESC>* il = nullptr)
         {
-            if (novo) *novo = false;
-            if (auto it = g_psoCache.find(key); it != g_psoCache.end() && it->second) return it->second.Get();
-            if (g_psoFalhou.count(key)) return nullptr;
-            auto concluir = [&](PsoJob& j) -> ID3D12PipelineState* {
-                perf::g_psoMs += j.ms;
-                perf::g_psoNew++;
-                if (FAILED(j.hr) || !j.pso)
-                {
-                    Log("[draw] falha ao criar PSO (%08X) vs=%016llX ps=%016llX", (unsigned)j.hr, (unsigned long long)key.vs, (unsigned long long)key.ps);
-                    g_psoFalhou.insert(key);
-                    return nullptr;
-                }
-                if (novo) *novo = true;
-                return (g_psoCache[key] = j.pso).Get();
-            };
-            if (auto it = g_psoPendente.find(key); it != g_psoPendente.end())
-            {
-                if (!assinc::Esperar(it->second->done, it->second->tarefa)) return nullptr;
-                auto j = it->second;
-                g_psoPendente.erase(it);
-                return concluir(*j);
-            }
-
-            D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
             d.pRootSignature = g_root.Get();
+            if (il && !il->empty()) d.InputLayout = { il->data(), (UINT)il->size() };
             d.VS = { vs.dxil.data(), vs.dxil.size() };
             d.PS = { ps.dxil.data(), ps.dxil.size() };
             if (key.rect) d.GS = { g_rectGs.data(), g_rectGs.size() };
@@ -1026,6 +1128,39 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
             d.RTVFormats[0] = (DXGI_FORMAT)key.rtFormat;
             d.SampleDesc.Count = std::max(1u, key.amostras);
 
+        }
+
+        // novo = o pipeline acabou de ficar pronto (para anotar no aquecimento)
+        ID3D12PipelineState* GetPso(const PsoKey& key, const CompiledShader& vs, const CompiledShader& ps, bool* novo = nullptr,
+                                    const std::vector<D3D12_INPUT_ELEMENT_DESC>* il = nullptr)
+        {
+            if (novo) *novo = false;
+            if (auto it = g_psoCache.find(key); it != g_psoCache.end() && it->second) return it->second.Get();
+            if (g_psoFalhou.count(key)) return nullptr;
+            auto concluir = [&](PsoJob& j) -> ID3D12PipelineState* {
+                perf::g_psoMs += j.ms;
+                perf::g_psoNew++;
+                if (getenv("FCRECOMP_PSOTEMPO")) Log("[psotempo] %s %.0f ms", il ? "atrib" : "normal", j.ms);
+                if (FAILED(j.hr) || !j.pso)
+                {
+                    Log("[draw] falha ao criar PSO (%08X) vs=%016llX ps=%016llX", (unsigned)j.hr, (unsigned long long)key.vs, (unsigned long long)key.ps);
+                    g_psoFalhou.insert(key);
+                    return nullptr;
+                }
+                if (novo) *novo = true;
+                return (g_psoCache[key] = j.pso).Get();
+            };
+            if (auto it = g_psoPendente.find(key); it != g_psoPendente.end())
+            {
+                if (!it->second->done) assinc::Promover(it->second->tarefa);
+                if (!assinc::Esperar(it->second->done, it->second->tarefa)) return nullptr;
+                auto j = it->second;
+                g_psoPendente.erase(it);
+                return concluir(*j);
+            }
+
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
+            MontarPso(key, vs, ps, d, il);
             auto j = std::make_shared<PsoJob>();
             j->d = d;
             if (!assinc::Ligado(warm::g_loading))
@@ -1043,6 +1178,7 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
                 double tPso = perf::Now();
                 j->hr = g_dev->CreateGraphicsPipelineState(&j->d, IID_PPV_ARGS(&j->pso));
                 j->ms = perf::Now() - tPso;
+                assinc::g_usPso += (uint64_t)(j->ms * 1000); assinc::g_nPso++;
                 j->done = true;
             });
             if (!assinc::Esperar(j->done, j->tarefa)) { g_psoPendente[key] = j; return nullptr; }
@@ -2276,6 +2412,38 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
             if (g_statsOn) g_stats["bytes de vertices/indices copiados"] += bytes;
             return (uint32_t)up.offset;
         }
+
+        // Como CopyForGpu, mas ja com cada dword na ordem do PC (endian da fetch constant, como GpuSwap no shader): o
+        // input assembler da placa le vertices e indices direto daqui (VS por atributos). Retorna o endereco na placa.
+        std::unordered_map<uint64_t, D3D12_GPU_VIRTUAL_ADDRESS> g_trocadosThisFrame;
+        D3D12_GPU_VIRTUAL_ADDRESS CopyForGpuTrocado(uint32_t addr, uint32_t bytes, uint32_t endian)
+        {
+            perf::Scope ps(perf::Copy);
+            addr &= 0x1FFFFFFC;
+            bytes = (std::min<uint32_t>(std::max(bytes, 16u), 32u << 20) + 15) & ~15u;
+            if ((uint64_t)addr + bytes > 0x20000000) bytes = (0x20000000 - addr) & ~15u;
+            const uint64_t key = ((uint64_t)addr << 32) ^ ((uint64_t)bytes << 2) ^ (endian & 3);
+            if (auto it = g_trocadosThisFrame.find(key); it != g_trocadosThisFrame.end()) return it->second;
+            auto up = render::UploadAlloc(bytes, 16);
+            const uint8_t* src = Phys(addr);
+            uint8_t* dst = (uint8_t*)up.cpu;
+            const __m128i sw1 = _mm_set_epi8(14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1);   // 8 em 16
+            const __m128i sw2 = _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);   // 8 em 32
+            const __m128i sw3 = _mm_set_epi8(13, 12, 15, 14, 9, 8, 11, 10, 5, 4, 7, 6, 1, 0, 3, 2);   // 16 em 32
+            switch (endian & 3)
+            {
+            case 0: memcpy(dst, src, bytes); break;
+            default:
+            {
+                const __m128i sw = (endian & 3) == 1 ? sw1 : (endian & 3) == 2 ? sw2 : sw3;
+                for (uint32_t i = 0; i < bytes; i += 16)
+                    _mm_storeu_si128((__m128i*)(dst + i), _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(src + i)), sw));
+            }
+            }
+            g_trocadosThisFrame[key] = up.gpu;
+            if (g_statsOn) g_stats["bytes de vertices/indices invertidos"] += bytes;
+            return up.gpu;
+        }
     }
 
     namespace
@@ -2361,6 +2529,14 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
             if (begin) g_labels.push_back(label);
             list->EndQuery(g_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, idx);
         }
+
+        // etapa fora dos desenhos (resolve, limpeza, foto da profundidade): mede do construtor ao fim do escopo
+        struct Etapa
+        {
+            ID3D12GraphicsCommandList* list = nullptr;
+            Etapa(ID3D12GraphicsCommandList* l, const char* label) { if (g_active && g_heap && l) { list = l; Mark(l, label, true); } }
+            ~Etapa() { if (list) Mark(list, std::string(), false); }
+        };
 
         void BeforePresent(ID3D12GraphicsCommandList* list)
         {
@@ -2453,6 +2629,16 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
     }
     std::string WarmUpStatus() { std::lock_guard lock(g_warmStatusMutex); return g_warmStatus; }
 
+    int WarmUpEtapa(uint32_t& feitos, uint32_t& total)
+    {
+        const int e = g_warmEtapa.load();
+        feitos = total = 0;
+        if (e == ETAPA_SHADERS || e == ETAPA_SHADERS_JOGO) { feitos = g_warmShadersDone; total = g_warmShadersTotal; }
+        else if (e == ETAPA_PIPELINES) { feitos = g_warmPsoDone; total = g_warmPsoTotal; }
+        if (feitos > total) feitos = total;
+        return e;
+    }
+
     // 0 a 1. Um shader compilado conta como 3 pipelines (com o cache de shaders vazio e a parte demorada).
     float WarmUpProgress()
     {
@@ -2504,6 +2690,344 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
         return true;
     }
 
+    // ------------------------------------------------------------ vertex shader generico
+    // O D3D do jogo, ao usar um vertex shader, preenche as leituras de vertice do microcode conforme a declaracao de
+    // vertices (registrador de destino, formato, stride, offset, swizzle; comparando a receita com o shaders.dat, nenhuma
+    // outra palavra muda). Cada combinacao virava um shader diferente, conhecido so na hora do desenho: traduzir e
+    // compilar no meio do jogo (as travadas). Agora o shader e traduzido a partir do molde do shaders.dat com as
+    // leituras vindo da tabela vfp[] (XenosHlsl.cpp, genericFetch): um shader por molde, compilado no primeiro inicio
+    // (PrepararShadersDoJogo), e a cada combinacao nova so se monta a tabela. Quando nao da (molde nao achado,
+    // enderecamento relativo, registrador fora dos do molde) fica como antes.
+    // DESLIGADO por padrao (FCRECOMP_VSGENERICO=1 liga). Medido em 24/11/2026 (gravacao 2026-11-20_11-06, sem cache e
+    // sem receita): a traducao sai do meio do jogo, mas o driver demora ~2,5x mais para montar cada pipeline com o
+    // shader generico (maior): imagem parada 14,7 s contra 4,8 s, e o primeiro inicio 215 s contra 47 s. O que trava
+    // e o pipeline, nao o shader.
+    namespace
+    {
+        // Vertex shader por molde com as leituras pelo input layout do pipeline (a placa converte os formatos, como no
+        // D3D/Vulkan normal): os 1369 moldes do shaders.dat sao compilados no preparo do 1o inicio e os VS que o jogo
+        // preenche nao precisam mais de compilacao no meio do jogo. Medido sem receita e com o driver frio: compilacao
+        // no jogo 53 s -> 22 s, imagem parada 4,7 s -> 1,8 s; pipelines custam o mesmo (~75 ms). Implica o generico.
+        // FCRECOMP_SEMVSATRIB=1 volta ao VS traduzido por variante.
+        bool VsAtributoLigado() { static const bool on = getenv("FCRECOMP_SEMVSATRIB") == nullptr; return on; }
+        bool VsGenericoLigado() { static const bool on = getenv("FCRECOMP_VSGENERICO") != nullptr || VsAtributoLigado(); return on; }
+        constexpr uint64_t VS_GENERICO = 0x47454E4552494331ull;
+        std::once_flag g_moldesVsUma;
+        std::unordered_map<uint64_t, std::vector<uint32_t>> g_moldesVs;   // hash mascarado -> molde do shaders.dat
+
+        void LerMoldesVs()
+        {
+            std::call_once(g_moldesVsUma, [] {
+                double t0 = perf::Now();
+                LerShadersDoJogo([](bool pixel, uint64_t, std::vector<uint32_t>& code) {
+                    if (!pixel) g_moldesVs.emplace(predator::gpu::VertexFetchMaskedHash(code), std::move(code));
+                });
+                Log("[vsgen] %zu moldes de vertex shader lidos do shaders.dat em %.0f ms", g_moldesVs.size(), perf::Now() - t0);
+            });
+        }
+
+        struct VsVariante
+        {
+            bool tentou = false;
+            uint64_t id = 0;                                // chave do generico (hash mascarado ^ VS_GENERICO)
+            const std::vector<uint32_t>* molde = nullptr;   // nulo: sem generico, usa o shader normal
+            std::vector<uint32_t> tab;                      // 8 dwords por leitura (vfp[2k], vfp[2k+1])
+            std::vector<uint32_t> slots;                    // fetch constants lidas (para copiar os buffers)
+            uint32_t usoFase = 0;                           // coleta da receita (como CompiledShader::usoFase)
+            // por atributos (VsAtributoLigado): buffers do input assembler (fetch constant, stride em dwords), entradas do
+            // input layout e a chave do pipeline (molde + layout)
+            bool atrib = false;
+            uint64_t psoId = 0;
+            struct Ia { uint32_t constIndex, stride; };
+            std::vector<Ia> ia;
+            std::vector<D3D12_INPUT_ELEMENT_DESC> elems;
+        };
+        std::unordered_map<uint64_t, VsVariante> g_vsVar;   // hash do shader preenchido pelo jogo -> variante
+        uint32_t g_vsGenOk = 0, g_vsGenNao = 0;
+
+        // componentes de um formato de vertice para VFetchG (xenos_common.hlsl.h, DecodeComp): mesmos formatos e
+        // resultados do VFetch (formato desconhecido: (0, 0, 0, 1))
+        void DescreverFormato(uint32_t formato, bool comSinal, bool inteiro, uint32_t* c)
+        {
+            enum { UNORM, SNORM, UINT, SINT, HALF, FLOAT };
+            const uint32_t norm = inteiro ? (comSinal ? SINT : UINT) : (comSinal ? SNORM : UNORM);
+            const uint32_t intz = comSinal ? SINT : UINT;
+            auto put = [&](int i, uint32_t off, uint32_t bits, uint32_t tipo) { c[i] = off | bits << 8 | tipo << 16; };
+            c[0] = c[1] = c[2] = c[3] = 0;
+            switch (formato)
+            {
+            case 6:  for (int i = 0; i < 4; i++) put(i, i * 8, 8, norm); break;                       // 8_8_8_8
+            case 7:  put(0, 0, 10, norm); put(1, 10, 10, norm); put(2, 20, 10, norm); put(3, 30, 2, norm); break;   // 2_10_10_10
+            case 16: put(0, 0, 11, norm); put(1, 11, 11, norm); put(2, 22, 10, norm); break;           // 10_11_11
+            case 17: put(0, 0, 10, norm); put(1, 10, 11, norm); put(2, 21, 11, norm); break;           // 11_11_10
+            case 25: put(0, 0, 16, norm); put(1, 16, 16, norm); break;                                 // 16_16
+            case 26: for (int i = 0; i < 4; i++) put(i, i * 16, 16, norm); break;                      // 16_16_16_16
+            case 31: put(0, 0, 16, HALF); put(1, 16, 16, HALF); break;                                 // 16_16_FLOAT
+            case 32: for (int i = 0; i < 4; i++) put(i, i * 16, 16, HALF); break;                      // 16_16_16_16_FLOAT
+            case 33: put(0, 0, 32, intz); break;                                                       // 32
+            case 34: put(0, 0, 32, intz); put(1, 32, 32, intz); break;                                 // 32_32
+            case 35: for (int i = 0; i < 4; i++) put(i, i * 32, 32, intz); break;                      // 32_32_32_32
+            case 36: put(0, 0, 32, FLOAT); break;                                                      // 32_FLOAT
+            case 37: put(0, 0, 32, FLOAT); put(1, 32, 32, FLOAT); break;                               // 32_32_FLOAT
+            case 57: for (int i = 0; i < 3; i++) put(i, i * 32, 32, FLOAT); break;                     // 32_32_32_FLOAT
+            case 38: for (int i = 0; i < 4; i++) put(i, i * 32, 32, FLOAT); break;                     // 32_32_32_32_FLOAT
+            }
+        }
+
+        // tabela vfp[] a partir do shader que o jogo preencheu (formato em XenosHlsl.cpp, EmitGenericVertexFetch). Leitura
+        // "resumida" (mini fetch) usa slot, stride e o registrador de indice da ultima completa, como o hardware.
+        bool MontarTabela(const std::vector<uint32_t>& code, const VsGenerico& g, VsVariante& v)
+        {
+            using namespace predator::gpu;
+            v.tab.assign(g.addrs.size() * 8, 0);
+            v.slots.clear();
+            bool temCompleta = false;
+            FetchInstruction ult{};
+            for (size_t k = 0; k < g.addrs.size(); k++)
+            {
+                if (g.addrs[k] + 3 > code.size()) return false;
+                const FetchInstruction f = DecodeFetch(code.data() + g.addrs[k]);
+                if (f.opcode != FetchOpcode::Vertex || f.srcRelative || f.dstRelative) return false;
+                if (!f.miniFetch) { ult = f; temCompleta = true; }
+                else if (!temCompleta) return false;
+                const auto si = std::find(g.src.begin(), g.src.end(), ult.srcRegister);
+                const auto di = std::find(g.dst.begin(), g.dst.end(), f.dstRegister);
+                if (si == g.src.end() || di == g.dst.end() || ult.constIndex > 95) return false;
+                uint32_t* e = &v.tab[k * 8];
+                e[0] = ult.constIndex | (f.format & 63u) << 8 | (f.isSigned ? 1u << 16 : 0u) | (f.isInteger ? 1u << 17 : 0u) |
+                       (ult.roundIndex ? 1u << 18 : 0u) | (ult.srcComponent & 3u) << 20 | uint32_t(si - g.src.begin()) << 24;
+                e[1] = f.offset;
+                e[2] = (ult.stride & 255u) | (uint32_t(f.expAdjust) & 63u) << 8 | uint32_t(di - g.dst.begin()) << 16;
+                e[3] = f.dstSwizzle & 0xFFFu;
+                DescreverFormato(f.format, f.isSigned, f.isInteger, e + 4);
+                if (std::find(v.slots.begin(), v.slots.end(), ult.constIndex) == v.slots.end()) v.slots.push_back(ult.constIndex);
+            }
+            return true;
+        }
+
+        // formato de vertice do Xenos -> formato do input layout. escala: volta o valor normalizado ao inteiro nos formatos
+        // "inteiro" (o shader arredonda depois). Fora da lista (10_11_11, 32 inteiro, 2_10_10_10 com sinal...): nao da.
+        // Diferenca conhecida: inteiro com sinal no menor valor (-128/-32768) sai -127/-32767 (o SNORM limita a -1).
+        bool FormatoAtributo(uint32_t formato, bool comSinal, bool inteiro, DXGI_FORMAT& fmt, float& escala, bool& arredonda)
+        {
+            escala = 1.0f; arredonda = false;
+            auto norm = [&](DXGI_FORMAT un, DXGI_FORMAT sn, float maxU, float maxS) {
+                fmt = comSinal ? sn : un;
+                if (inteiro) { escala = comSinal ? maxS : maxU; arredonda = true; }
+                return true;
+            };
+            switch (formato)
+            {
+            case 6:  return norm(DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_SNORM, 255.0f, 127.0f);
+            case 25: return norm(DXGI_FORMAT_R16G16_UNORM, DXGI_FORMAT_R16G16_SNORM, 65535.0f, 32767.0f);
+            case 26: return norm(DXGI_FORMAT_R16G16B16A16_UNORM, DXGI_FORMAT_R16G16B16A16_SNORM, 65535.0f, 32767.0f);
+            case 7:  if (comSinal || inteiro) return false; fmt = DXGI_FORMAT_R10G10B10A2_UNORM; return true;
+            case 31: fmt = DXGI_FORMAT_R16G16_FLOAT; return true;
+            case 32: fmt = DXGI_FORMAT_R16G16B16A16_FLOAT; return true;
+            case 36: fmt = DXGI_FORMAT_R32_FLOAT; return true;
+            case 37: fmt = DXGI_FORMAT_R32G32_FLOAT; return true;
+            case 57: fmt = DXGI_FORMAT_R32G32B32_FLOAT; return true;
+            case 38: fmt = DXGI_FORMAT_R32G32B32A32_FLOAT; return true;
+            default: return false;
+            }
+        }
+
+        // Tabela vfp[] e input layout do modo por atributos: uma entrada por registrador de destino do molde (g.dst),
+        // preenchida pela leitura que a variante manda para ele. O swizzle tem que ser o que a placa ja da: componentes
+        // na ordem (ou BGRA nos de 8 bits), e os que faltam no formato com 0 (y, z) e 1 (w), como no D3D. Entrada sem
+        // leitura: buffer de zeros, e o registrador nao e gravado. So da se toda leitura usa o indice do vertice (r0.x)
+        // e se so a ultima grava r0.
+        std::string g_atrMotivo;   // diagnostico: por que a variante nao foi por atributos
+        bool falha0(const char* m) { g_atrMotivo = m; return false; }
+        bool MontarAtributos(const std::vector<uint32_t>& code, const VsGenerico& g, uint64_t idMolde, VsVariante& v)
+        {
+            using namespace predator::gpu;
+            const size_t n = g.dst.size();
+            if (n > 16) return falha0("registradores demais");
+            // mais leituras que registradores no molde: duas entradas por registrador (xenos_translate.cpp)
+            const bool duas = g.addrs.size() > n;
+            const size_t E = duas ? 13 : 8, entradas = duas ? 2 : 1;
+            v.tab.assign(n * E * 4, 0);
+            v.slots.clear(); v.ia.clear(); v.elems.clear();
+            struct Leitura { DXGI_FORMAT fmt; float escala, ex; bool arredonda; uint32_t sw, slot, offset, nc; };
+            std::vector<std::vector<Leitura>> porReg(n);
+            bool temCompleta = false, r0Gravado = false;
+            FetchInstruction ult{};
+            char b[160];
+            auto falha = [&](const char* m) { g_atrMotivo = m; return false; };
+            for (size_t k = 0; k < g.addrs.size(); k++)
+            {
+                if (g.addrs[k] + 3 > code.size()) return falha("fora do codigo");
+                const FetchInstruction f = DecodeFetch(code.data() + g.addrs[k]);
+                if (f.opcode != FetchOpcode::Vertex || f.srcRelative || f.dstRelative) return falha("leitura relativa");
+                // as resumidas (mini fetch) reaproveitam o indice da ultima completa: so uma completa depois de uma
+                // leitura que gravou r0 leria outro indice
+                if (!f.miniFetch) { if (r0Gravado) return falha("r0 gravado antes de outra leitura completa"); ult = f; temCompleta = true; }
+                else if (!temCompleta) return falha("resumida sem completa");
+                if (ult.srcRegister != 0 || ult.srcComponent != 0 || ult.constIndex > 95) return falha("indice nao e r0.x");
+                if (f.dstRegister == 0 && (f.dstSwizzle & 0xFFFu) != 0xFFFu) r0Gravado = true;
+                const uint32_t sw = f.dstSwizzle & 0xFFFu;
+                if (sw == 0xFFFu) continue;   // nao grava nada
+                const auto di = std::find(g.dst.begin(), g.dst.end(), f.dstRegister);
+                if (di == g.dst.end()) return falha("destino fora do molde");
+                auto& lista = porReg[size_t(di - g.dst.begin())];
+                if (lista.size() >= entradas)
+                {
+                    snprintf(b, sizeof(b), "leituras demais no registrador r%u (%zu leituras, %zu registradores no molde)", f.dstRegister, g.addrs.size(), n);
+                    g_atrMotivo = b; return false;
+                }
+                Leitura l{};
+                if (!FormatoAtributo(f.format, f.isSigned, f.isInteger, l.fmt, l.escala, l.arredonda))
+                {
+                    snprintf(b, sizeof(b), "formato %u sinal %u inteiro %u", f.format, (unsigned)f.isSigned, (unsigned)f.isInteger);
+                    g_atrMotivo = b; return false;
+                }
+                uint32_t slot = 0;
+                while (slot < v.ia.size() && v.ia[slot].constIndex != ult.constIndex) slot++;
+                if (slot == v.ia.size()) v.ia.push_back({ ult.constIndex, ult.stride });
+                else if (v.ia[slot].stride != ult.stride) return falha("stride diferente no mesmo buffer");
+                l.sw = sw; l.slot = slot; l.offset = f.offset * 4;
+                l.ex = std::ldexp(1.0f, f.expAdjust);
+                l.nc = f.format == 36 ? 1 : (f.format == 25 || f.format == 31 || f.format == 37) ? 2 : f.format == 57 ? 3 : 4;
+                lista.push_back(l);
+            }
+            // registradores (ou 2as entradas) sem leitura nesta variante: buffer de zeros (ultimo slot, stride 0)
+            const uint32_t zeros = (uint32_t)v.ia.size();
+            bool usaZeros = false;
+            v.elems.resize(n * entradas);
+            for (size_t i = 0; i < n; i++)
+            {
+                const auto& lista = porReg[i];
+                float* e = (float*)&v.tab[i * E * 4];
+                uint32_t& flags = ((uint32_t*)e)[0];
+                if (!lista.empty()) flags = 1u;
+                int fonte[4] = { -1, -1, -1, -1 };   // por componente: a ultima leitura que grava (ordem do shader)
+                for (size_t j = 0; j < entradas; j++)
+                {
+                    const UINT sem = (UINT)(j * n + i);
+                    if (j >= lista.size())
+                    {
+                        v.elems[sem] = { "ATTR", sem, DXGI_FORMAT_R32G32B32A32_FLOAT, zeros, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 };
+                        usaZeros = true;
+                        continue;
+                    }
+                    const Leitura& l = lista[j];
+                    v.elems[sem] = { "ATTR", sem, l.fmt, l.slot, l.offset, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 };
+                    if (l.arredonda) flags |= j ? 4u : 2u;
+                    // como o VFetch: componentes que faltam no formato valem (0, 0, 0, 1) e o ajuste de expoente vale
+                    // para todos; a escala do inteiro so nos que existem
+                    for (uint32_t cpt = 0; cpt < 4; cpt++)
+                    {
+                        e[(1 + 5 * j) * 4 + cpt] = cpt < l.nc ? l.escala : 1.0f;
+                        if (((l.sw >> (3 * cpt)) & 7) != 7) fonte[cpt] = (int)j;
+                    }
+                }
+                const size_t consts = duas ? 11 : 6, fica = duas ? 12 : 7;
+                for (uint32_t cpt = 0; cpt < 4; cpt++)
+                {
+                    if (fonte[cpt] < 0) { e[fica * 4 + cpt] = 1.0f; continue; }   // nao grava: fica como estava
+                    const Leitura& l = lista[fonte[cpt]];
+                    const uint32_t q = (l.sw >> (3 * cpt)) & 7;
+                    if (q <= 3) e[(2 + 5 * fonte[cpt] + cpt) * 4 + q] = l.ex;   // linha cpt da matriz da entrada
+                    else if (q == 5) e[consts * 4 + cpt] = 1.0f;                 // constante 1 (4 = 0)
+                }
+            }
+            if (usaZeros) v.ia.push_back({ ~0u, 0 });
+            if (v.ia.size() > 32) return falha("buffers demais");
+            uint64_t h = idMolde ^ 0x415452494255544Full;
+            for (const auto& e : v.elems)
+                for (uint64_t x : { (uint64_t)e.Format, (uint64_t)e.InputSlot, (uint64_t)e.AlignedByteOffset })
+                    h = (h ^ x) * 1099511628211ull;
+            v.psoId = h;
+            g_atrMotivo.clear();
+            return true;
+        }
+
+        // molde do shaders.dat de um vertex shader preenchido pelo jogo (nulo se nao achar ou se o generico estiver desligado)
+        const std::vector<uint32_t>* MoldeDoVs(const std::vector<uint32_t>& code)
+        {
+            if (!VsGenericoLigado()) return nullptr;
+            LerMoldesVs();
+            auto it = g_moldesVs.find(predator::gpu::VertexFetchMaskedHash(code));
+            return it == g_moldesVs.end() ? nullptr : &it->second;
+        }
+
+        // vertex shader do desenho: o generico do molde (e *var com a tabela) ou o traduzido do jeito normal (*var nulo).
+        // permiteAtrib = falso: o desenho precisa do shader que le os indices (quads e leques viram listas no shader)
+        const CompiledShader& ResolverVs(const ShaderRef& s, VsVariante** var, bool permiteAtrib = true)
+        {
+            *var = nullptr;
+            if (!VsGenericoLigado() || !s.code) return GetShader(s, false);
+            auto& v = g_vsVar[s.hash];
+            if (!v.tentou)
+            {
+                v.tentou = true;
+                LerMoldesVs();
+                auto it = g_moldesVs.find(predator::gpu::VertexFetchMaskedHash(*s.code));
+                if (it != g_moldesVs.end())
+                {
+                    v.id = it->first ^ VS_GENERICO;
+                    const auto& g = GetShader(ShaderRef{ v.id, &it->second }, false, false, true);
+                    v.atrib = VsAtributoLigado();
+                    v.psoId = v.id;
+                    g_atrMotivo = g.gen.ok ? "" : "molde nao vai por atributos (leituras fora do comeco, relativas ou demais)";
+                    if (g.gen.ok && (v.atrib ? MontarAtributos(*s.code, g.gen, v.id, v) : MontarTabela(*s.code, g.gen, v))) v.molde = &it->second;
+                }
+                if (v.molde) g_vsGenOk++; else g_vsGenNao++;
+                static int linhasAtr = 0;
+                if (v.atrib && !g_atrMotivo.empty() && linhasAtr++ < 40) Log("[vsatr] VS %016llX: %s", (unsigned long long)s.hash, g_atrMotivo.c_str());
+                warm::SaveShader(s.hash, false, *s.code);   // o preenchido continua no warmcache (pipelines.txt e receita)
+                static int linhas = 0;
+                if (!v.molde && linhas++ < 30)
+                    Log("[vsgen] VS %016llX sem generico (%s); genericos %u, normais %u", (unsigned long long)s.hash,
+                        it == g_moldesVs.end() ? "molde nao achado" : "leituras fora do molde", g_vsGenOk, g_vsGenNao);
+                // depuracao (FCRECOMP_ACHARVS=1): de onde vem um VS sem molde no shaders.dat? Procura 3 trechos dele
+                // (ordem do Xbox) na memoria do jogo: imagem do exe (0x82000000-0x84000000) e memoria fisica
+                if (it == g_moldesVs.end() && getenv("FCRECOMP_ACHARVS") && s.code->size() >= 12)
+                {
+                    const auto& c = *s.code;
+                    for (size_t k : { size_t(0), c.size() / 2 - 3, c.size() - 6 })
+                    {
+                        uint32_t pad[6];
+                        for (int i = 0; i < 6; i++) pad[i] = _byteswap_ulong(c[k + i]);
+                        std::string achados;
+                        int nAch = 0;
+                        for (auto [ini, fim] : { std::pair<uint64_t, uint64_t>{ 0x82000000ull, 0x84000000ull }, { 0xA0000000ull, 0xC0000000ull } })
+                            for (uint64_t a = ini; a < fim && nAch < 8;)
+                            {
+                                MEMORY_BASIC_INFORMATION mi{};
+                                if (!VirtualQuery(g_base + a, &mi, sizeof(mi))) break;
+                                const uint64_t fimReg = std::min<uint64_t>(fim, (uint64_t)((uint8_t*)mi.BaseAddress - g_base) + mi.RegionSize);
+                                if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+                                    for (uint64_t p = a & ~3ull; p + 24 <= fimReg && nAch < 8; p += 4)
+                                        if (memcmp(g_base + p, pad, 24) == 0)
+                                        {
+                                            char t[24]; snprintf(t, sizeof(t), " %08llX", (unsigned long long)p);
+                                            achados += t; nAch++;
+                                        }
+                                a = fimReg;
+                            }
+                        Log("[acharvs] VS %016llX (%zu dwords) trecho %zu: %s", (unsigned long long)s.hash, c.size(), k,
+                            achados.empty() ? "nao achado" : achados.c_str());
+                    }
+                }
+            }
+            if (!v.molde || (v.atrib && !permiteAtrib)) return GetShader(s, false);
+            *var = &v;
+            return GetShader(ShaderRef{ v.id, v.molde }, false, false, true);
+        }
+    }
+
+    std::atomic<bool> g_pararPreparo{ false };
+    // compilacao do preparo em segundo plano (PrepararShadersDoJogo); ponteiro para nao ter destrutor na saida
+    std::thread* g_preparoThread = nullptr;
+    void PararPreparo()
+    {
+        g_pararPreparo = true;
+        if (g_preparoThread && g_preparoThread->joinable()) g_preparoThread->join();
+        g_pararPreparo = false;
+    }
+
     void PrepararShadersDoJogo()
     {
         if (getenv("FCRECOMP_SEMPREPARO") || getenv("FCRECOMP_NOSHADERCACHE")) return;
@@ -2529,7 +3053,9 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
         }
 
         double t0 = perf::Now();
-        SetWarmStatus(TR("preparando os shaders do jogo (so na primeira vez)", "preparing the game's shaders (first time only)"));
+        if (getenv("FCRECOMP_PREPARARANTES")) SetWarmStatus(TR("preparando os shaders do jogo (so na primeira vez)", "preparing the game's shaders (first time only)"));
+        struct Etapa { bool antes = getenv("FCRECOMP_PREPARARANTES") != nullptr; Etapa() { if (antes) g_warmEtapa = ETAPA_SHADERS_JOGO; }
+                       ~Etapa() { if (antes) g_warmEtapa = ETAPA_NADA; } } etapa;
         // 1) microcode de cada pixel shader (hash igual ao do gpu.cpp: FNV-1a dos bytes de cada palavra)
         std::vector<std::pair<uint64_t, std::vector<uint32_t>>> itens;
         if (!LerShadersDoJogo([&](bool pixel, uint64_t h, std::vector<uint32_t>& code) { if (pixel) itens.emplace_back(h, std::move(code)); }))
@@ -2537,41 +3063,67 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
 
         // 2) traducao (numa thread so) e 3) compilacao em paralelo (render::CompileShader grava no shadercache)
         std::vector<std::string> hlsls;
+        std::vector<bool> deVertice;
         for (auto& [h, code] : itens)
             for (bool alpha : { false, true })
             {
                 CompiledShader c; std::string avisos;
                 hlsls.push_back(TranslateFor(ShaderRef{ h, &code }, true, alpha, c, avisos));
+                deVertice.push_back(false);
             }
-        const double msTraducao = perf::Now() - t0;
-        g_warmShadersDone = 0;
-        g_warmShadersTotal = (uint32_t)hlsls.size();
-        const unsigned cores = std::max(2u, std::thread::hardware_concurrency());
-        const unsigned workers = std::max(1u, cores - 1);   // um nucleo livre para a janela
-        std::atomic<size_t> prox{ 0 };
-        std::atomic<uint32_t> falhas{ 0 };
-        auto work = [&] {
-            for (size_t i; (i = prox++) < hlsls.size();)
-            {
-                std::string erros;
-                if (render::CompileShader(hlsls[i], L"ps_6_0", &erros).empty()) falhas++;
-                g_warmShadersDone++;
-            }
-        };
-        std::vector<std::thread> pool;
-        for (unsigned k = 1; k < workers; k++) pool.emplace_back(work);
-        work();
-        for (auto& th : pool) th.join();
-        g_warmShadersDone = 0;
-        g_warmShadersTotal = 0;
-
-        if (!falhas)
+        // vertex shaders genericos (ResolverVs): um por molde do shaders.dat
+        size_t nVs = 0;
+        if (VsGenericoLigado())
         {
-            CreateDirectoryA("shadercache", nullptr);
-            if (FILE* f = fopen(MARCA, "w")) { fprintf(f, "%s\n", marca); fclose(f); }
+            LerMoldesVs();
+            for (auto& [mh, code] : g_moldesVs)
+            {
+                CompiledShader c; std::string avisos;
+                std::string hlsl = TranslateFor(ShaderRef{ mh ^ VS_GENERICO, &code }, false, false, c, avisos, true);
+                if (!c.gen.ok) continue;
+                hlsls.push_back(std::move(hlsl));
+                deVertice.push_back(true);
+                nVs++;
+            }
         }
-        Log("[preparo] %zu pixel shaders do shaders.dat (%zu variantes) prontos no shadercache em %.1f s (traducao %.1f s, %u threads, %u falharam)",
-            itens.size(), hlsls.size(), (perf::Now() - t0) / 1000.0, msTraducao / 1000.0, workers, falhas.load());
+        const double msTraducao = perf::Now() - t0;
+        // Compilacao (a parte demorada: ~80 s com o shadercache vazio). Padrao: em segundo plano, com o jogo ja aberto
+        // (WarmUp chama isto depois de preparar o que a receita usa); threads de prioridade baixa. Um shader pedido
+        // pelo jogo antes de sair daqui e compilado na hora, como sem o preparo; o shadercache em disco aguenta duas
+        // threads com o mesmo shader. FCRECOMP_PREPARARANTES=1: tudo antes de abrir, com a tela de preparacao (antigo).
+        static const bool antes = getenv("FCRECOMP_PREPARARANTES") != nullptr;
+        auto compilar = [hlsls = std::move(hlsls), deVertice = std::move(deVertice), nItens = itens.size(), nVs, t0, msTraducao,
+                         marcaTxt = std::string(marca), MARCA](bool fundo) {
+            const unsigned cores = std::max(2u, std::thread::hardware_concurrency());
+            const unsigned workers = fundo ? std::max(1u, std::min(6u, cores - 2)) : std::max(1u, cores - 1);
+            std::atomic<size_t> prox{ 0 };
+            std::atomic<uint32_t> falhas{ 0 };
+            auto work = [&] {
+                if (fundo) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+                for (size_t i; !g_pararPreparo && (i = prox++) < hlsls.size();)
+                {
+                    std::string erros;
+                    if (render::CompileShader(hlsls[i], deVertice[i] ? L"vs_6_0" : L"ps_6_0", &erros).empty()) falhas++;
+                    if (!fundo) g_warmShadersDone++;
+                }
+            };
+            if (!fundo) { g_warmShadersDone = 0; g_warmShadersTotal = (uint32_t)hlsls.size(); }
+            std::vector<std::thread> pool;
+            for (unsigned k = 1; k < workers; k++) pool.emplace_back(work);
+            work();
+            for (auto& th : pool) th.join();
+            if (!fundo) { g_warmShadersDone = 0; g_warmShadersTotal = 0; }
+            if (g_pararPreparo) return;   // fechou o jogo antes: o que ficou pronto esta no shadercache, o resto na proxima
+            if (!falhas)
+            {
+                CreateDirectoryA("shadercache", nullptr);
+                if (FILE* f = fopen(MARCA, "w")) { fprintf(f, "%s\n", marcaTxt.c_str()); fclose(f); }
+            }
+            Log("[preparo] %zu pixel shaders (%zu variantes) e %zu vertex shaders genericos do shaders.dat prontos no shadercache em %.1f s%s (traducao %.1f s, %u threads, %u falharam)",
+                nItens, hlsls.size() - nVs, nVs, (perf::Now() - t0) / 1000.0, fundo ? " em segundo plano" : "", msTraducao / 1000.0, workers, falhas.load());
+        };
+        if (antes) compilar(false);
+        else g_preparoThread = new std::thread([c = std::move(compilar)]() mutable { c(true); });
     }
 
     // Item 38: receita dos shaders (receita_shaders.txt ao lado do exe, gerada por tools\gerar_receita.py a partir do
@@ -2818,12 +3370,17 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
 
     void WarmUp()
     {
-        PrepararShadersDoJogo();
+        // o preparo (todos os shaders do disco) compila em segundo plano depois do que a receita usa; com
+        // FCRECOMP_PREPARARANTES, antes de tudo (como era)
+        static const bool prepararAntes = getenv("FCRECOMP_PREPARARANTES") != nullptr;
+        if (prepararAntes) PrepararShadersDoJogo();
         AplicarReceita();
+        struct PreparoNoFim { ~PreparoNoFim() { if (!prepararAntes) PrepararShadersDoJogo(); } } preparoNoFim;
         if (!warm::Enabled()) return;
         SetWarmStatus(TR("preparando a placa de video", "preparing the graphics card"));
         double t0 = perf::Now();
         warm::g_loading = true;
+        g_warmEtapa = ETAPA_SUPERFICIES;
         std::set<std::string> seen;   // linhas repetidas (varias execucoes anotando ao mesmo tempo)
         uint32_t surfaces = 0, pipelines = 0, failed = 0;
         if (FILE* f = fopen("warmcache/superficies.txt", "r"))
@@ -2867,41 +3424,111 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
                 {
                     unsigned long long vsh, psh; unsigned alpha;
                     if (sscanf(line.c_str(), "%llX %llX %u", &vsh, &psh, &alpha) < 3) continue;
-                    requests.push_back({ ShaderRef{ vsh, load(vsh, false) }, false, false });
+                    const std::vector<uint32_t>* vcode = load(vsh, false);
+                    // vertex shader generico (ResolverVs): compila o do molde em vez do preenchido
+                    if (const std::vector<uint32_t>* molde = vcode ? MoldeDoVs(*vcode) : nullptr)
+                        requests.push_back({ ShaderRef{ predator::gpu::VertexFetchMaskedHash(*molde) ^ VS_GENERICO, molde }, false, false, true });
+                    else
+                        requests.push_back({ ShaderRef{ vsh, vcode }, false, false });
                     requests.push_back({ ShaderRef{ psh, load(psh, true) }, true, alpha != 0 });
                 }
                 SetWarmStatus(TR("preparando a placa de video (shaders)", "preparing the graphics card (shaders)"));
+                g_warmEtapa = ETAPA_SHADERS;
                 CompileShadersInParallel(requests);
             }
 
-            // 2) pipelines
-            uint32_t done = 0, total = (uint32_t)lines.size();
-            g_warmPsoTotal = total;
-            double lastPump = perf::Now();
+            // 2) pipelines: monta as descricoes aqui e cria em paralelo (CreateGraphicsPipelineState pode ser chamado de
+            // varias threads). Um por vez, com o cache do driver vazio, os 3531 da receita levavam ~116 s no 1o inicio.
+            struct PsoItem { PsoKey key; D3D12_GRAPHICS_PIPELINE_STATE_DESC d{}; ComPtr<ID3D12PipelineState> pso; HRESULT hr = S_OK; };
+            std::vector<PsoItem> psoItens;
+            std::unordered_set<PsoKey, PsoKeyHash> psoVistos;
+            g_warmPsoTotal = (uint32_t)lines.size();
+            g_warmPsoDone = 0;
+            g_warmEtapa = ETAPA_PIPELINES;
             for (const auto& lineText : lines)
             {
                 const char* line = lineText.c_str();
-                done++;
-                g_warmPsoDone = done;
-                if (perf::Now() - lastPump > 30)
-                {
-                    lastPump = perf::Now();
-                    SetWarmStatus(TR("preparando a placa de video ", "preparing the graphics card ") + std::to_string(done) + "/" + std::to_string(total));
-                }
                 unsigned long long vsh, psh; unsigned alpha, topo, blend, depth, mask, rect, hasDepth, rtFormat = COLOR_FORMAT, bs = 0, bo = 0;
                 unsigned cull = 0, tela = 0;
                 if (sscanf(line, "%llX %llX %u %u %X %X %X %u %u %u %X %X %X %u", &vsh, &psh, &alpha, &topo, &blend, &depth, &mask, &rect, &hasDepth, &rtFormat, &bs, &bo, &cull, &tela) < 9) continue;
                 ShaderRef vr{ vsh, load(vsh, false) }, pr{ psh, load(psh, true) };
                 if (!vr.code || !pr.code) { failed++; continue; }
-                const auto& vs = GetShader(vr, false);
+                VsVariante* vsVar = nullptr;
+                const auto& vs = ResolverVs(vr, &vsVar);
                 const auto& ps = GetShader(pr, true, alpha != 0);
                 if (vs.dxil.empty() || ps.dxil.empty()) { failed++; continue; }
-                PsoKey key{ vsh, psh ^ (alpha ? 0xA1A1A1A100000000ull : 0), topo, blend, depth, mask, rect, hasDepth, rtFormat, bs, bo, cull };
+                PsoKey key{ vsVar ? vsVar->psoId : vsh, psh ^ (alpha ? 0xA1A1A1A100000000ull : 0), topo, blend, depth, mask, rect, hasDepth, rtFormat, bs, bo, cull };
                 key.amostras = tela ? g_msaa : 1;   // 14o campo: desenho numa superficie da tela (MSAA)
-                if (GetPso(key, vs, ps)) pipelines++; else failed++;
+                if (g_psoCache.count(key) || !psoVistos.insert(key).second) { pipelines++; continue; }
+                PsoItem it{ key };
+                MontarPso(key, vs, ps, it.d, vsVar && vsVar->atrib ? &vsVar->elems : nullptr);
+                psoItens.push_back(std::move(it));
+            }
+            g_warmPsoTotal = (uint32_t)psoItens.size();
+            // Padrao: todos antes de abrir (no jogo nada mais e criado para o que a receita cobre; em segundo plano a
+            // espera do 1o inicio cai ~30 s, mas as threads disputam o processador com o jogo nos primeiros minutos).
+            // FCRECOMP_AQUECERFUNDO=1: em segundo plano, com o jogo ja aberto (os pipelines vao para g_psoPendente e
+            // GetPso pega quando ficarem prontos).
+            static const bool antes = getenv("FCRECOMP_AQUECERFUNDO") == nullptr;
+            if (!antes)
+            {
+                std::vector<std::shared_ptr<assinc::Tarefa>> tarefas;
+                tarefas.reserve(psoItens.size());
+                for (auto& it : psoItens)
+                {
+                    // os shaders ficam no g_shaderCache (nao muda ate F5, que para o fundo antes de limpar)
+                    auto j = std::make_shared<PsoJob>();
+                    j->d = it.d;
+                    j->tarefa = std::make_shared<assinc::Tarefa>();
+                    j->tarefa->fundo = true;
+                    PsoJob* jp = j.get();
+                    j->tarefa->f = [jp] {
+                        double tPso = perf::Now();
+                        jp->hr = g_dev->CreateGraphicsPipelineState(&jp->d, IID_PPV_ARGS(&jp->pso));
+                        jp->ms = perf::Now() - tPso;
+                        jp->done = true;
+                    };
+                    g_psoPendente[it.key] = j;
+                    tarefas.push_back(j->tarefa);
+                    pipelines++;
+                }
+                g_fundoJobs.clear();
+                for (auto& [k, j] : g_psoPendente) g_fundoJobs.push_back(j);   // mantem os jobs vivos ate o fim
+                assinc::Fundo(std::move(tarefas));
+                psoItens.clear();
+            }
+            {
+                const unsigned cores = std::max(2u, std::thread::hardware_concurrency());
+                const unsigned workers = std::max(1u, std::min<unsigned>((unsigned)psoItens.size(), cores - 1));
+                std::atomic<size_t> prox{ 0 };
+                auto work = [&](bool principal) {
+                    double lastPump = perf::Now();
+                    for (size_t i; (i = prox++) < psoItens.size();)
+                    {
+                        auto& it = psoItens[i];
+                        it.hr = g_dev->CreateGraphicsPipelineState(&it.d, IID_PPV_ARGS(&it.pso));
+                        const uint32_t feitos = ++g_warmPsoDone;
+                        if (principal && perf::Now() - lastPump > 30)
+                        {
+                            lastPump = perf::Now();
+                            SetWarmStatus(TR("preparando a placa de video ", "preparing the graphics card ") + std::to_string(feitos) + "/" +
+                                          std::to_string(psoItens.size()));
+                        }
+                    }
+                };
+                std::vector<std::thread> pool;
+                for (unsigned k = 1; k < workers; k++) pool.emplace_back(work, false);
+                work(true);
+                for (auto& th : pool) th.join();
+            }
+            for (auto& it : psoItens)
+            {
+                if (SUCCEEDED(it.hr) && it.pso) { g_psoCache[it.key] = it.pso; pipelines++; }
+                else { g_psoFalhou.insert(it.key); failed++; }
             }
         }
         warm::g_loading = false;
+        g_warmEtapa = ETAPA_FIM;
         IniciarColetaReceita();
         SetWarmStatus("");
         if (surfaces || pipelines)
@@ -3017,7 +3644,7 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
         p[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; p[2].Descriptor = { 1, 0 }; p[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         p[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; p[3].DescriptorTable = { 1, &srvRange }; p[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         p[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; p[4].DescriptorTable = { 1, &sampRange }; p[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   // vertex shaders tambem leem texturas
-        D3D12_ROOT_SIGNATURE_DESC rs{ 5, p, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE };
+        D3D12_ROOT_SIGNATURE_DESC rs{ 5, p, 0, nullptr, VsAtributoLigado() ? D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT : D3D12_ROOT_SIGNATURE_FLAG_NONE };
         ComPtr<ID3DBlob> blob, err;
         if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err)))
         {
@@ -3080,6 +3707,10 @@ float ps(float4 pos : SV_Position) : SV_Depth { return depthTex.Load(int2(pos.xy
             d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
             if (rps.empty() || FAILED(g_dev->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&g_depthResolvePso))))
                 Log("[draw] falha ao criar pipeline da profundidade resolvida (MSAA)");
+            auto fps = render::CompileShader(DEPTH_FOTO_HLSL, L"ps_6_0");
+            d.PS = { fps.data(), fps.size() };
+            if (fps.empty() || FAILED(g_dev->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&g_depthFotoPso))))
+                Log("[draw] falha ao criar pipeline da foto da profundidade");
         }
         // pipeline da mistura da mascara do escuro (duas imagens e a fracao)
         {
@@ -3134,9 +3765,11 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
     void Shutdown()
     {
         Log("[draw] liberando recursos da GPU...");
+        PararPreparo();
         render::WaitIdle();
         assinc::Parar();
         g_psoPendente.clear();
+        g_fundoJobs.clear();
         g_root.Reset();
         g_textures.clear();
         g_resolved.clear();
@@ -3175,12 +3808,13 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         }
     }
 
-    // FCRECOMP_OCLUSAOLOG=t4370-4445: registros das consultas so nesses tiques do roteiro
+    // FCRECOMP_OCLUSAOLOG=t4370-4445: registros das consultas so nesses tiques do roteiro (q700-760: nesses quadros,
+    // os mesmos das fotos da rajada; para cutscenes, sem roteiro)
     bool OclusaoLogAgora()
     {
         static const char* q = getenv("FCRECOMP_OCLUSAOLOG");
-        if (!q || q[0] != 't') return false;
-        int64_t ini = atoll(q + 1), fim = strchr(q, '-') ? atoll(strchr(q, '-') + 1) : ini, tq = RoteiroTiqueAtual();
+        if (!q || (q[0] != 't' && q[0] != 'q')) return false;
+        int64_t ini = atoll(q + 1), fim = strchr(q, '-') ? atoll(strchr(q, '-') + 1) : ini, tq = OclusaoLogTique();
         return tq >= ini && tq <= fim;
     }
 
@@ -3201,7 +3835,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                 GuardarContagem((uint32_t)tag, (uint32_t)std::min<uint64_t>(samples, 0x7FFFFFFF), (uint32_t)(tag >> 32));
                 static const char* qlogEnv = getenv("FCRECOMP_OCLUSAOLOG");   // depuracao: cada contagem
                 static int logged = 0;
-                if (qlogEnv && (qlogEnv[0] == 't' ? OclusaoLogAgora() : true) && logged++ < 3000)
+                if (qlogEnv && (qlogEnv[0] == 't' || qlogEnv[0] == 'q' ? OclusaoLogAgora() : true) && logged++ < 3000)
                     Log("[oclusao] bloco %08X: %llu amostras visiveis", (uint32_t)tag, (unsigned long long)samples);
             };
         }
@@ -3336,7 +3970,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             auto env = [](const char* n, float padrao) { const char* v = getenv(n); return v ? (float)atof(v) : padrao; };
             static const float perto = env("FCRECOMP_AO_PERTO", 0.002f), fov = env("FCRECOMP_AO_FOV", 50.0f), raio = env("FCRECOMP_AO_RAIO", 1.2f),
                                forcaTeste = env("FCRECOMP_AO_FORCA", 0.0f), ver = env("FCRECOMP_AO_VER", 0.0f);
-            const float forca = forcaTeste > 0 ? forcaTeste : nivel == 1 ? 1.2f : nivel == 2 ? 2.0f : 3.0f;
+            const float forca = forcaTeste > 0 ? forcaTeste : nivel == 1 ? 1.8f : nivel == 2 ? 2.8f : 3.8f;   // 26/11: era 1,2 / 2 / 3 (fraco)
             // pixels da profundidade por pixel da cena (as duas no mesmo tamanho do jogo, cada uma na sua escala)
             const float escCena = (float)sd.Width / std::max(1u, larguraJogo), escProf = (float)Pm(prof.width, prof.meios) / std::max(1u, prof.width);
             const float k[13] = { (float)sd.Width, (float)sd.Height, perto, raio, forca, tanf(fov * 0.5f * 3.14159265f / 180.0f),
@@ -3351,8 +3985,54 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             return ok ? g_aoScene.Get() : src;
         }
 
+        // SMAA (opcao "Antisserrilhado SMAA", 1-4): a janela F2 troca durante o jogo, entao o nivel e lido a cada quadro
+        ID3D12Resource* SmaaCena(ID3D12GraphicsCommandList* list, ID3D12Resource* src)
+        {
+            const int nivel = std::clamp(OpcoesAtuais().smaa, 0, 4);
+            if (!nivel) return src;
+            D3D12_RESOURCE_DESC sd = src->GetDesc();
+            if (sd.Format != COLOR_FORMAT) return src;
+            auto criar = [&](ComPtr<ID3D12Resource>& r, D3D12_RESOURCE_STATES& estado, DXGI_FORMAT f) {
+                if (r && r->GetDesc().Width == sd.Width && r->GetDesc().Height == sd.Height) return true;
+                ReleaseLater(std::move(r));
+                D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
+                D3D12_RESOURCE_DESC td = sd;
+                td.Format = f;
+                td.MipLevels = 1;
+                td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+                if (FAILED(g_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&r))))
+                    return false;
+                estado = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                return true;
+            };
+            if (!criar(g_smaaBordas, g_smaaBordasState, DXGI_FORMAT_R8G8_UNORM) || !criar(g_smaaPesos, g_smaaPesosState, DXGI_FORMAT_R8G8B8A8_UNORM) ||
+                !criar(g_smaaCena, g_smaaCenaState, COLOR_FORMAT))
+                return src;
+            static int avisado = 0;
+            if (avisado != nivel) { avisado = nivel; Log("[draw] SMAA nivel %d na cena 3D (%llux%u)", nivel, (unsigned long long)sd.Width, sd.Height); }
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+            rtv.ptr += (SIZE_T)MAX_SURFACES * g_rtvSize;   // ultimo slot: alvo temporario (a lista copia o descritor a cada passe)
+            const UINT w = (UINT)sd.Width, h = sd.Height;
+            Transition(list, g_smaaBordas.Get(), g_smaaBordasState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            g_dev->CreateRenderTargetView(g_smaaBordas.Get(), nullptr, rtv);
+            bool ok = render::SmaaPasso(list, 1, src, nullptr, rtv, w, h, nivel);
+            Transition(list, g_smaaBordas.Get(), g_smaaBordasState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            Transition(list, g_smaaPesos.Get(), g_smaaPesosState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            g_dev->CreateRenderTargetView(g_smaaPesos.Get(), nullptr, rtv);
+            ok = ok && render::SmaaPasso(list, 2, g_smaaBordas.Get(), nullptr, rtv, w, h, nivel);
+            Transition(list, g_smaaPesos.Get(), g_smaaPesosState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            Transition(list, g_smaaCena.Get(), g_smaaCenaState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            g_dev->CreateRenderTargetView(g_smaaCena.Get(), nullptr, rtv);
+            ok = ok && render::SmaaPasso(list, 3, src, g_smaaPesos.Get(), rtv, w, h, nivel);
+            Transition(list, g_smaaCena.Get(), g_smaaCenaState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            ForgetBoundState();   // o desenho do jogo reaplica tudo
+            if (diag::Capturing(diag::CurrentFrame())) HistoryText("SMAA DA CENA");
+            return ok ? g_smaaCena.Get() : src;
+        }
+
         ID3D12Resource* AntialiasedScene(ID3D12GraphicsCommandList* list, ID3D12Resource* src)
         {
+            src = SmaaCena(list, src);   // SMAA primeiro; o antisserrilhado de baixo (se ligado tambem) vem depois
             if (g_aaLevel < 0)
                 g_aaLevel = std::clamp(OpcoesAtuais().antisserrilhado, 0, 3);
             if (!g_aaLevel) return src;
@@ -3382,9 +4062,72 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         }
     }
 
+    // Tabela de texturas/samplers do desenho anterior (veja "reusar" em Draw). Muda a cada resolve: um resolve pode
+    // trocar a imagem de um endereco que o jogo le como textura.
+    struct TabelaTexturas
+    {
+        uint32_t chave[3 + 32 * 6];   // mascaras + as 6 palavras de cada slot usado
+        uint32_t tam = 0;             // palavras validas em chave (0 = nada guardado)
+        uint64_t serial = ~0ull, resolves = ~0ull;
+        render::Descriptors srv{};
+        D3D12_GPU_DESCRIPTOR_HANDLE samplers{};
+    };
+    TabelaTexturas g_tabAnterior;
+    // Tabelas ja montadas neste quadro (desde o ultimo resolve), para qualquer desenho com as mesmas constantes de
+    // leitura, nao so o seguinte (26/11: na selva do roteiro 2026-11-25_20-39 eram ~1900 montagens por quadro e os
+    // desenhos alternam entre poucos conjuntos de texturas). FCRECOMP_TABSOANTERIOR=1 volta a reusar so a do anterior.
+    struct TabQuadro { uint32_t ini, tam; render::Descriptors srv; D3D12_GPU_DESCRIPTOR_HANDLE samplers; };
+    std::vector<uint32_t> g_tqChaves;                       // chaves guardadas, uma depois da outra
+    std::vector<TabQuadro> g_tq;
+    std::unordered_map<uint64_t, uint32_t> g_tqPorHash;     // hash da chave -> indice em g_tq
+    uint64_t g_tqSerial = ~0ull, g_tqResolves = ~0ull;
+    uint64_t HashChave(const uint32_t* c, uint32_t n)
+    {
+        uint64_t h = 0x9E3779B97F4A7C15ull ^ n;
+        for (uint32_t i = 0; i < n; i++) { h ^= c[i]; h *= 0xFF51AFD7ED558CCDull; h ^= h >> 29; }
+        return h;
+    }
+    uint64_t g_resolvesFeitos = 0;
+    uint64_t g_tabReusos = 0, g_tabMontagens = 0;   // contagem para o [etapas]
+
+    // FCRECOMP_DESENHOPERF=1: tempo de CPU de cada etapa da traducao de um desenho (thread da GPU), somado e escrito no
+    // log a cada 120 quadros (linha "[etapas]"). Para achar o que pesa nos ~20 ms por quadro de "desenho" do [perf].
+    namespace etapas
+    {
+        const bool g_on = getenv("FCRECOMP_DESENHOPERF") != nullptr;
+        constexpr int N = 11;
+        const char* const g_nomes[N] = { "shader", "pipeline", "superficies", "modelo-desc", "texturas", "samplers",
+                                         "constantes", "dados+vertices", "estado", "historico", "desenhar" };
+        double g_ms[N] = {};
+        uint64_t g_desenhos = 0, g_quadro = 0, g_quadros = 0;
+        void Inicio()
+        {
+            if (g_quadro == g_frameNumber) { g_desenhos++; return; }
+            g_quadro = g_frameNumber;
+            if (++g_quadros >= 120)
+            {
+                std::string t;
+                double soma = 0;
+                for (int i = 0; i < N; i++)
+                {
+                    char s[48]; snprintf(s, sizeof(s), " %s %.2f", g_nomes[i], g_ms[i] / g_quadros); t += s; soma += g_ms[i];
+                }
+                Log("[etapas] por quadro (ms): total %.2f em %.0f desenhos (tabela de texturas reusada %.0f, montada %.0f; fotos da profundidade %.1f) |%s", soma / g_quadros,
+                    (double)g_desenhos / g_quadros, (double)g_tabReusos / g_quadros, (double)g_tabMontagens / g_quadros, (double)g_fotosTiradas / g_quadros, t.c_str());
+                g_tabReusos = g_tabMontagens = g_fotosTiradas = 0;
+                for (auto& m : g_ms) m = 0;
+                g_quadros = 0; g_desenhos = 0;
+            }
+            g_desenhos++;
+        }
+    }
+#define ETAPA(i) do { if (etapas::g_on) { const double agoraEt = perf::Now(); etapas::g_ms[i] += agoraEt - tEtapa; tEtapa = agoraEt; } } while (0)
+
     void Draw(const DrawInfo& info)
     {
         if (!g_root || !info.vs.code || !info.ps.code || info.count == 0) return;
+        double tEtapa = etapas::g_on ? perf::Now() : 0;
+        if (etapas::g_on) etapas::Inicio();
         {
             static const char* texDump = getenv("FCRECOMP_TEXDUMP");
             g_texDumpDraw = texDump && strncmp(texDump, "ps=", 3) == 0 && strtoull(texDump + 3, nullptr, 16) == info.ps.hash;
@@ -3437,16 +4180,22 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         assinc::g_faltando.clear();
         struct FimUrgente { ~FimUrgente() { assinc::g_urgente = false; } } fimUrgente;
         double tShader = perf::Now();
-        const auto& vs = GetShader(info.vs, false);
+        VsVariante* vsVar = nullptr;
+        // quads (13) e leques (5) viram listas no shader que le os indices: nao usam o VS por atributos
+        const auto& vs = ResolverVs(info.vs, &vsVar, info.primType != 5 && info.primType != 13);
+        const uint64_t vsId = vsVar ? vsVar->psoId : info.vs.hash;   // generico: um pipeline para todas as variantes
+        const bool atrib = vsVar && vsVar->atrib;
         const bool alphaTest = (Reg(0x2202) & 8) != 0;   // RB_COLORCONTROL: alpha test ligado
         const auto& ps = GetShader(info.ps, true, alphaTest);
         // coleta da receita: anota os shaders que a fase atual usa (uma vez por shader e fase)
         if (const uint32_t ger = RecFaseGeracao())
         {
-            if (vs.usoFase != ger) { vs.usoFase = ger; ColetarUso(info.vs.hash, false); }
+            uint32_t& usoVs = vsVar ? vsVar->usoFase : vs.usoFase;
+            if (usoVs != ger) { usoVs = ger; ColetarUso(info.vs.hash, false); }
             if (ps.usoFase != ger) { ps.usoFase = ger; ColetarUso(info.ps.hash, true); }
         }
         perf::g_ms[perf::Shader] += perf::Now() - tShader;
+        ETAPA(0);
         static const bool puladosLog = getenv("FCRECOMP_PULADOSLOG") != nullptr;   // depuracao (item 34): desenhos pulados
         auto logPulado = [&](const char* porque) {
             if (!puladosLog) return;
@@ -3498,7 +4247,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             if (g_statsOn) g_stats[k]++;
         }
 
-        PsoKey key{ info.vs.hash, info.ps.hash ^ (alphaTest ? 0xA1A1A1A100000000ull : 0), (uint32_t)type, Reg(0x2201) | 0, depthControl & 0x77, colorMask, rect ? 1u : 0u, hasDepth ? 1u : 0u,
+        PsoKey key{ vsId, info.ps.hash ^ (alphaTest ? 0xA1A1A1A100000000ull : 0), (uint32_t)type, Reg(0x2201) | 0, depthControl & 0x77, colorMask, rect ? 1u : 0u, hasDepth ? 1u : 0u,
             (uint32_t)SurfaceFormat(ColorKey()) };
         key.amostras = SurfaceAmostras(ColorKey());   // MSAA: o pipeline segue as amostras da superficie de destino
         // PA_SU_SC_MODE_CNTL bit 11/12: deslocamento de poligono na frente/atras (0x2380/81 frente, 0x2382/83 atras).
@@ -3517,7 +4266,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             if (m & 3) key.cull = m;
         }
         bool newPso = false;
-        ID3D12PipelineState* pso = GetPso(key, vs, ps, &newPso);
+        ID3D12PipelineState* pso = GetPso(key, vs, ps, &newPso, atrib ? &vsVar->elems : nullptr);
         if (!pso) { logPulado("pipeline"); if (grande) assinc::FaltouGrande(); if (!semUrgente34 && g_queryBlock) g_queryPulado = true; return; }
         if (newPso)
         {
@@ -3530,6 +4279,13 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             if (anotadas.insert(l).second) warm::AppendLine("pipelines.txt", l);
         }
 
+        ETAPA(1);
+        // envio parcial a placa a cada N desenhos (render::EnviarParcial). FCRECOMP_ENVIOPARCIAL=N muda (0 = so no Present)
+        if (static const uint32_t envioCada = [] { const char* e = getenv("FCRECOMP_ENVIOPARCIAL"); return e ? (uint32_t)atoi(e) : 400u; }();
+            envioCada && g_drawsThisFrame >= (g_proximoEnvio ? g_proximoEnvio : envioCada))
+        {
+            if (render::EnviarParcial()) { ForgetBoundState(); g_proximoEnvio = g_drawsThisFrame + envioCada; }
+        }
         auto* list = render::FrameList();
         g_drewThisFrame = true;
         g_drawsSinceResolve++;
@@ -3544,7 +4300,8 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         // FCRECOMP_NOSKIPINVISIBLE=1 desenha mesmo assim.
         static const bool keepInvisible = getenv("FCRECOMP_NOSKIPINVISIBLE") != nullptr;
         // dentro de uma consulta de oclusao a caixa de teste precisa ser desenhada (a GPU conta os pixels dela)
-        if (g_queryBlock && g_queryIndex < 0) g_queryIndex = render::OcclusionBegin(((uint64_t)g_querySerial << 32) | g_queryBlock);
+        const bool consultaAbertaAgora = g_queryBlock && g_queryIndex < 0;   // a foto da profundidade (abaixo) nao pode contar nela
+        if (consultaAbertaAgora) g_queryIndex = render::OcclusionBegin(((uint64_t)g_querySerial << 32) | g_queryBlock);
         if (!keepInvisible && g_queryIndex < 0 && colorMask == 0 && (depthControl & 6) != 6 && !(depthControl & 1))
         {
             if (diag::Capturing(diag::CurrentFrame()))
@@ -3567,6 +4324,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         const bool caixaFaixa2 = g_tileState == 2 && g_queryIndex >= 0;
         if (color.pendingClear && !caixaFaixa2)
         {
+            gpuprof::Etapa ge(list, "(limpeza da cor)");
             uint32_t c = color.clearValue;
             float v[4] = { ((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f, (c >> 24) / 255.0f };
             ClearRect(color);
@@ -3591,6 +4349,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             }
             if (depth->pendingClear && !caixaFaixa2)
             {
+                gpuprof::Etapa ge(list, "(limpeza da profundidade)");
                 // profundidade 24 bits << 8 | stencil
                 ClearRect(*depth);
                 list->ClearDepthStencilView(depth->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
@@ -3606,7 +4365,18 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                 if (g_profSuja || g_fotoAtual < 0 || g_fotoQuadro != g_frameNumber || g_fotoChave != DepthKey())
                 {
                     const int i = (g_fotoAtual + 1) % FOTOS;
-                    if (TirarFoto(list, *depth, i)) { g_fotoAtual = i; g_fotoQuadro = g_frameNumber; g_fotoChave = DepthKey(); g_profSuja = false; }
+                    g_fotoMarca = gpuprof::g_active ? [](ID3D12GraphicsCommandList* l, const char* s) { gpuprof::Mark(l, s ? s : "", s != nullptr); } : nullptr;
+                    // A foto e um desenho de tela inteira que sempre passa no teste de profundidade: com a consulta da
+                    // caixa aberta, os pixels dela entravam na contagem e a caixa da faixa 1 dava "visivel" (roteiro
+                    // 2026-11-26_09-30, tique 1100: brilho das lampadas das casas por cima dos telhados). A consulta
+                    // aberta neste desenho e fechada antes da foto e aberta de novo depois (a vazia vem antes na lista e a
+                    // de verdade, com a mesma etiqueta, fica por cima). FCRECOMP_FOTONACONSULTA=1 volta ao antigo.
+                    static const bool fotoNaConsulta = getenv("FCRECOMP_FOTONACONSULTA") != nullptr;
+                    const bool reabrir = !fotoNaConsulta && consultaAbertaAgora && g_queryIndex >= 0;
+                    if (reabrir) render::OcclusionEnd(g_queryIndex);
+                    const bool tirou = TirarFoto(list, *depth, i);
+                    if (reabrir) g_queryIndex = render::OcclusionBegin(((uint64_t)g_querySerial << 32) | g_queryBlock);
+                    if (tirou) { g_fotoAtual = i; g_fotoQuadro = g_frameNumber; g_fotoChave = DepthKey(); g_profSuja = false; }
                     else g_fotoAtual = -1;
                 }
                 if (g_fotoAtual >= 0) g_fotoDoBloco[g_queryBlock] = { g_frameNumber, g_fotoAtual };
@@ -3614,11 +4384,53 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             else if (g_queryIndex < 0 && (depthControl & 5)) g_profSuja = true;   // grava profundidade ou stencil
         }
 
+        ETAPA(2);
         // texturas e samplers (32 slots, fetch constants em 0x4800 + 6*n) - antes das constantes, pois podem gravar comandos
-        auto srv = render::AllocSrv(65);
         uint32_t usedMask = vs.textureMask | ps.textureMask, cubeMask = vs.cubeMask | ps.cubeMask;   // slots lidos pelos dois shaders
+        // Reuso da tabela: com as mesmas constantes de leitura (texturas, filtros) que o desenho anterior, no mesmo quadro e
+        // sem resolve no meio, a tabela de texturas e a de samplers sao as mesmas: pula a montagem (cerca de 1/3 do tempo
+        // de CPU de cada desenho; na selva da 02_native ~2900 desenhos por quadro). Nao reusa tabela com imagem da tela
+        // (scaledMask: o antisserrilhado da cena e decidido nessa montagem) nem com depuracoes que registram por slot.
+        // FCRECOMP_SEMREUSOTEX=1 monta sempre (como antes).
+        static const bool semReuso = getenv("FCRECOMP_SEMREUSOTEX") != nullptr || getenv("FCRECOMP_CAPTURATEX") != nullptr ||
+                                     getenv("FCRECOMP_GAMALOG") != nullptr || getenv("FCRECOMP_MIPLOG") != nullptr;
+        TabelaTexturas& tab = g_tabAnterior;
+        uint32_t chave[3 + 32 * 6];
+        uint32_t tamChave = 0;
+        chave[tamChave++] = usedMask; chave[tamChave++] = cubeMask; chave[tamChave++] = colorMask == 0;
+        for (uint32_t s = 0; s < 32; s++)
+            if (usedMask & (1u << s))
+                for (int i = 0; i < 6; i++) chave[tamChave++] = Reg(0x4800 + s * 6 + i);
+        const uint64_t serialTab = render::FrameSerial();
+        const bool podeReusar = !semReuso && AoVivoValor("TEXLOG").empty() && !diag::Capturing(diag::CurrentFrame());
+        bool reusar = podeReusar && tab.tam == tamChave && tab.serial == serialTab && tab.resolves == g_resolvesFeitos &&
+                      !memcmp(tab.chave, chave, tamChave * 4);
+        static const bool soAnterior = getenv("FCRECOMP_TABSOANTERIOR") != nullptr;
+        uint64_t hashTab = 0;
+        if (podeReusar && !soAnterior)
+        {
+            if (g_tqSerial != serialTab || g_tqResolves != g_resolvesFeitos)
+            {
+                g_tqSerial = serialTab; g_tqResolves = g_resolvesFeitos;
+                g_tqChaves.clear(); g_tq.clear(); g_tqPorHash.clear();
+            }
+            hashTab = HashChave(chave, tamChave);
+            if (!reusar)
+                if (auto it = g_tqPorHash.find(hashTab); it != g_tqPorHash.end())
+                {
+                    const TabQuadro& q = g_tq[it->second];
+                    if (q.tam == tamChave && !memcmp(g_tqChaves.data() + q.ini, chave, tamChave * 4))
+                    {
+                        memcpy(tab.chave, chave, tamChave * 4); tab.tam = tamChave; tab.serial = serialTab; tab.resolves = g_resolvesFeitos;
+                        tab.srv = q.srv; tab.samplers = q.samplers;
+                        reusar = true;
+                    }
+                }
+        }
+        auto srv = reusar ? tab.srv : render::AllocSrv(65);
         uint32_t scaledMask = 0;   // slots com imagens da EDRAM (tamanho Px do jogo; veja GetTexture)
         D3D12_SAMPLER_DESC samplers[32]{};
+        if (!reusar)
         {
             // Modelo pronto (heap so da CPU) com as 65 entradas: memoria do quadro + 32 vistas 2D vazias + 32 cubos vazios.
             // Uma copia por desenho em vez de 65 CreateShaderResourceView (eram ~100 mil chamadas por quadro na selva);
@@ -3653,8 +4465,9 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             }
             g_dev->CopyDescriptorsSimple(65, srv.cpu, t.heap->GetCPUDescriptorHandleForHeapStart(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         }
+        ETAPA(3);
 
-        for (uint32_t s = 0; s < 32; s++)
+        for (uint32_t s = 0; !reusar && s < 32; s++)
         {
             D3D12_CPU_DESCRIPTOR_HANDLE hc = srv.cpu;   // slot do cubo
             hc.ptr += (SIZE_T)(33 + s) * srv.increment;
@@ -3799,6 +4612,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                 sdesc.MaxAnisotropy = std::max(sdesc.MaxAnisotropy, 1u << ft);
             }
         }
+        ETAPA(4);
         if (static const bool mipLog = getenv("FCRECOMP_MIPLOG") != nullptr; mipLog)   // depuracao: niveis de detalhe
             for (uint32_t s = 0; s < 32; s++)
                 if (usedMask & (1u << s))
@@ -3813,7 +4627,25 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                 }
         uint32_t samplerCount = 0;   // ate o ultimo slot usado pelos shaders
         for (uint32_t s = 0; s < 32; s++) if (usedMask & (1u << s)) samplerCount = s + 1;
-        D3D12_GPU_DESCRIPTOR_HANDLE samplerTable = GetSamplerTable(samplers, samplerCount);
+        D3D12_GPU_DESCRIPTOR_HANDLE samplerTable = reusar ? tab.samplers : GetSamplerTable(samplers, samplerCount);
+        if (reusar) g_tabReusos++;
+        else
+        {
+            g_tabMontagens++;
+            // guarda para o proximo desenho (so tabelas sem imagem da tela)
+            if (!scaledMask)
+            {
+                memcpy(tab.chave, chave, tamChave * 4); tab.tam = tamChave; tab.serial = serialTab; tab.resolves = g_resolvesFeitos; tab.srv = srv; tab.samplers = samplerTable;
+                if (hashTab && g_tq.size() < 16384)
+                {
+                    g_tqPorHash[hashTab] = (uint32_t)g_tq.size();
+                    g_tq.push_back({ (uint32_t)g_tqChaves.size(), tamChave, srv, samplerTable });
+                    g_tqChaves.insert(g_tqChaves.end(), chave, chave + tamChave);
+                }
+            }
+            else tab.tam = 0;
+        }
+        ETAPA(5);
 
         // constantes: VS em 0x4000 (256 float4), PS em 0x4400; booleanos 0x4900; loops 0x4908
         // Constantes: se o jogo nao escreveu nelas desde o ultimo envio (g_constVersion) e ainda e o mesmo quadro,
@@ -3843,14 +4675,17 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         };
         D3D12_GPU_VIRTUAL_ADDRESS vsConsts = stageConsts(0x4000);
         D3D12_GPU_VIRTUAL_ADDRESS psConsts = stageConsts(0x4400);
+        ETAPA(6);
 
         // dados do desenho (layout do cbuffer Draw em xenos_common.hlsl.h)
-        auto up = render::UploadAlloc(1024);
+        auto up = render::UploadAlloc(vsVar ? 8192 : 1024);   // com o VS generico: ate vfp[128] (d[244..755])
         uint32_t* d = (uint32_t*)up.cpu;
+        if (vsVar) memcpy(d + 244, vsVar->tab.data(), vsVar->tab.size() * 4);   // vertex shader generico: as leituras
         for (uint32_t i = 0; i < 192; i++) d[i] = Reg(0x4800 + i);   // fetch constants de vertice
         // os buffers de vertices usados pelo shader sao copiados para a memoria de upload do quadro e a
         // fetch constant passa a apontar para a copia (d0: endereco | tipo; d1: endian | tamanho em dwords)
-        for (uint32_t slot : vs.fetchSlots)
+        const std::vector<uint32_t>& vsSlots = vsVar ? vsVar->slots : vs.fetchSlots;   // por atributos: vazio (vai pelo IA)
+        for (uint32_t slot : vsSlots)
         {
             uint32_t f0 = d[slot * 2], f1 = d[slot * 2 + 1];
             uint32_t addr = f0 & 0x1FFFFFFC, bytes = ((f1 >> 2) & 0xFFFFFF) * 4;
@@ -3921,7 +4756,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             static int n = 0;
             if (vbLog[0] == 'c' ? diag::Capturing(diag::CurrentFrame()) : n++ < 3)
             {
-                uint32_t slot = vs.fetchSlots.empty() ? 0 : vs.fetchSlots[0];
+                uint32_t slot = vsSlots.empty() ? 0 : vsSlots[0];
                 uint32_t f0 = Reg(0x4800 + slot * 2), f1 = Reg(0x4801 + slot * 2), a = f0 & 0x1FFFFFFC;
                 std::string vals;
                 for (int i = 0; i < 24; i++) { char b[16]; snprintf(b, sizeof(b), " %08X", __builtin_bswap32(*(uint32_t*)Phys(a + i * 4))); vals += b; }
@@ -3930,7 +4765,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         }
         d[192] = 0;
         d[193] = (info.index32 ? 1 : 0) | (info.indexEndian << 1);
-        if (info.indexBase)
+        if (info.indexBase && !atrib)
         {
             d[192] = CopyForGpu(info.indexBase, info.count * (info.index32 ? 4 : 2) + 4);
             d[193] |= 8;
@@ -3997,6 +4832,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             }
         }
 
+        ETAPA(7);
         D3D12_CPU_DESCRIPTOR_HANDLE depthView = depth ? depth->view : D3D12_CPU_DESCRIPTOR_HANDLE{};
         if (depth && caixaFaixa2)   // caixa da segunda faixa: a profundidade do ponto da caixa correspondente da faixa 1
         {
@@ -4034,7 +4870,13 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         // nao os quadrados das lampadas) conta a tela inteira como antes: o mar da 26_SHANTYNIGHT (bug_73) nao define a
         // tesoura e herda a do ultimo pedaco da grade (vazia na faixa 1); contando 0 o jogo escondia o mar. Contar a mais
         // so faz o jogo desenhar algo escondido; contar a menos apaga o mar.
-        const bool caixa3D = info.primType == 5 || info.primType == 13;
+        // So a caixa mesmo (10+ vertices). Antes valia o tipo de primitiva: o brilho do sol e os faroes do jipe (cutscene da
+        // 01_beach) testam um sprite de 4 vertices (6 na placa, com textura) do mesmo tipo e ficavam "otimistas": o farol
+        // nunca dava 0 e aparecia atraves da pedra; o sol, quando o jogo trocava os registros das consultas (quadro 711 da
+        // cena), recebia a contagem antiga do mar nesse registro (~490 mil) e a tela clareava por 2 quadros.
+        // FCRECOMP_OCLUSAOSPRITE=1 volta ao antigo (comparacao).
+        static const bool spriteOtimista = getenv("FCRECOMP_OCLUSAOSPRITE") != nullptr;
+        const bool caixa3D = (info.primType == 5 || info.primType == 13) && (spriteOtimista || info.count >= 8);
         if (tesVazia) sc = (caixaFaixa && !(g_tileState == 1 && caixa3D)) ? D3D12_RECT{ 0, 0, 0, 0 } : D3D12_RECT{ 0, 0, (LONG)CANVAS, (LONG)CANVAS };
         // Item 1 (reflexos das pedras sumindo no mar, gravacao 2026-11-19_15-51, tiques 1005-1007): os 16 pedacos da grade
         // do mar sao testados a cada 3 quadros. Virando da areia para o mar, o teste anterior (ainda na areia) dava 0 e o
@@ -4098,6 +4940,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         list->SetGraphicsRootDescriptorTable(4, samplerTable);
         if (g_bound.pso != pso) { list->SetPipelineState(pso); g_bound.pso = pso; }
         if (g_bound.topo != topo) { list->IASetPrimitiveTopology(topo); g_bound.topo = topo; }
+        ETAPA(8);
         {
             HistoryEntry entry;
             entry.isDraw = true;
@@ -4133,6 +4976,9 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                     [&] { for (uint32_t i = 0; i < 1024; i++) vc[i] = Reg(0x4400 + i); return fnv((const uint8_t*)vc, sizeof(vc)); }(),
                     Reg(0x2202), RegF(0x210E), Reg(0x2201));
                 full += wb;
+                // RB_DEPTHCONTROL (bit 1 teste, bit 2 escrita, bits 4-6 funcao) e se ha profundidade presa ao desenho
+                snprintf(wb, sizeof(wb), " zc=%08X%s", Reg(0x2200), depth ? "" : " semprof");
+                full += wb;
                 if (Reg(0x2204) & ~63u)
                 {
                     snprintf(wb, sizeof(wb), " clipcntl=%08X", Reg(0x2204));
@@ -4149,7 +4995,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                             full += wb;
                         }
                 }
-                for (uint32_t slot : vs.fetchSlots)
+                for (uint32_t slot : vsSlots)
                 {
                     uint32_t f0 = Reg(0x4800 + slot * 2), f1 = Reg(0x4801 + slot * 2);
                     uint32_t addr = f0 & 0x1FFFFFFC, bytes = std::min<uint32_t>(((f1 >> 2) & 0xFFFFFF) * 4, 32u << 20);
@@ -4165,6 +5011,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             }
             CurrentHistory().push_back(std::move(entry));
         }
+        ETAPA(9);
         std::string profLabel;
         if (gpuprof::g_active)
         {
@@ -4182,8 +5029,75 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                                (bc & 0x1FFF1FFF) != 0x00010001;   // mistura ligada (nao e "fonte x1 + destino x0")
         ID3D12GraphicsCommandList5* l5 = particula ? render::ListaVrs() : nullptr;
         if (l5) l5->RSSetShadingRate(D3D12_SHADING_RATE_2X2, nullptr);
-        list->DrawInstanced(vertexCount, 1, 0, 0);
+        auto desenhar = [&]
+        {
+            if (atrib)
+            {
+                // VS por atributos: buffers de vertices (bytes ja invertidos) com a base de vertices (VGT_INDX_OFFSET) no
+                // endereco, e os indices pela placa. O shader usa SV_VertexID + vertexOffset como r0.x.
+                D3D12_VERTEX_BUFFER_VIEW vbv[32] = {};
+                const uint32_t base = d[194];
+                for (size_t i = 0; i < vsVar->ia.size() && i < 32; i++)
+                {
+                    const uint32_t c = vsVar->ia[i].constIndex;
+                    if (c == ~0u)   // registradores sem leitura: 16 bytes de zeros, stride 0
+                    {
+                        auto z = render::UploadAlloc(16, 16);
+                        memset(z.cpu, 0, 16);
+                        vbv[i] = { z.gpu, 16, 0 };
+                        continue;
+                    }
+                    const uint32_t f0 = Reg(0x4800 + c * 2), f1 = Reg(0x4801 + c * 2);
+                    const uint32_t bytes = ((f1 >> 2) & 0xFFFFFF) * 4, passo = vsVar->ia[i].stride * 4;
+                    const uint64_t desloc = (uint64_t)base * passo;
+                    const D3D12_GPU_VIRTUAL_ADDRESS va = CopyForGpuTrocado(f0 & 0x1FFFFFFC, bytes, f1 & 3);
+                    vbv[i].BufferLocation = va + (desloc < bytes ? desloc : 0);
+                    vbv[i].SizeInBytes = desloc < bytes ? bytes - (uint32_t)desloc : 0;
+                    vbv[i].StrideInBytes = passo;
+                }
+                list->IASetVertexBuffers(0, (UINT)std::min<size_t>(vsVar->ia.size(), 32), vbv);
+                if (info.indexBase)
+                {
+                    const uint32_t tam = info.count * (info.index32 ? 4 : 2);
+                    const D3D12_GPU_VIRTUAL_ADDRESS ia = CopyForGpuTrocado(info.indexBase & ~3u, tam + 4, info.indexEndian);
+                    D3D12_INDEX_BUFFER_VIEW ibv{ ia + (info.indexBase & 2), tam, info.index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT };
+                    list->IASetIndexBuffer(&ibv);
+                    list->DrawIndexedInstanced(vertexCount, 1, 0, 0, 0);
+                }
+                else list->DrawInstanced(vertexCount, 1, 0, 0);
+            }
+            else list->DrawInstanced(vertexCount, 1, 0, 0);
+        };
+        desenhar();
+        ETAPA(10);
         if (l5) l5->RSSetShadingRate(D3D12_SHADING_RATE_1X1, nullptr);
+        // Bug 90 (02_native, cachoeira atravessando a grama): a grama perto da camera (ps 62EBA53F580D516D) e so
+        // desenhada misturada, com alpha test (>= 0,125) e SEM gravar profundidade, e vem antes dos objetos
+        // transparentes do quadro (a cachoeira, ps 1C464AAA805DD800); nada impedia a cachoeira atras da grama de ser
+        // pintada por cima dela. Depois de cada desenho dessa grama, o mesmo desenho de novo so na profundidade (sem
+        // cor, sem mistura), com o alpha test em 0,5: a parte firme das folhas passa a esconder o que vem depois atras
+        // dela; as bordas suaves continuam como estavam. FCRECOMP_GRAMAPROF=0 desliga.
+        if (static const bool gramaProf = [] { const char* e = getenv("FCRECOMP_GRAMAPROF"); return !e || atoi(e) != 0; }();
+            gramaProf && depth && info.ps.hash == 0x62EBA53F580D516Dull && alphaTest && colorMask && !(depthControl & 4) && (depthControl & 2))
+        {
+            PsoKey kp = key;
+            kp.blend = 0x00010001;           // sem mistura
+            kp.mask = 0;                     // sem cor
+            kp.depth = (depthControl | 4) & 0x77;   // grava a profundidade (mesmo teste)
+            if (ID3D12PipelineState* psoProf = GetPso(kp, vs, ps, nullptr, atrib ? &vsVar->elems : nullptr))
+            {
+                const size_t tam = vsVar ? 8192 : 1024;
+                auto up2 = render::UploadAlloc(tam);
+                memcpy(up2.cpu, up.cpu, tam);
+                const float ref = std::max(0.5f, RegF(0x210E));
+                memcpy((uint32_t*)up2.cpu + 211, &ref, 4);   // RB_ALPHA_REF
+                list->SetGraphicsRootConstantBufferView(2, up2.gpu);
+                list->SetPipelineState(psoProf);
+                desenhar();
+                list->SetPipelineState(pso);
+                list->SetGraphicsRootConstantBufferView(2, up.gpu);
+            }
+        }
         if (gpuprof::g_active) gpuprof::Mark(list, profLabel, false);
 
         static const char* drawShot = getenv("FCRECOMP_DRAWSHOT");
@@ -4198,8 +5112,12 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             // "c:i,j" = no quadro da captura (FCRECOMP_CAPTURE/F9)
             if (drawShot[0] == 'c' ? diag::Capturing(diag::CurrentFrame()) : frame == g_frameNumber)
                 for (const char* p = strchr(drawShot, ':'); p; p = strchr(p + 1, ','))
-                    // numero do desenho, ou "ps=HASH" (os primeiros desenhos com esse shader de pixel e mais de 1000 vertices)
-                    if (strncmp(p + 1, "ps=", 3) == 0 ? CurrentHistory().back().Describe().find(std::string(p + 1, 19)) != std::string::npos &&
+                    // numero do desenho, ou "ps=HASH" (os primeiros desenhos com esse shader de pixel e mais de 1000 vertices), ou
+                    // "pt=HASH" (todos os desenhos desse shader de pixel: particulas)
+                    // "tr" = todos os desenhos com mistura (transparentes: particulas, brilhos, fumaca) no quadro da captura
+                    if (strncmp(p + 1, "tr", 2) == 0 ? Reg(0x2201) != 0x00010001u :
+                        strncmp(p + 1, "pt=", 3) == 0 ? CurrentHistory().back().Describe().find("ps=" + std::string(p + 4, 16)) != std::string::npos :
+                        strncmp(p + 1, "ps=", 3) == 0 ? CurrentHistory().back().Describe().find(std::string(p + 1, 19)) != std::string::npos &&
                             CurrentHistory().back().Describe().find(" n=") != std::string::npos &&
                             atoi(CurrentHistory().back().Describe().c_str() + CurrentHistory().back().Describe().find(" n=") + 3) > 1000
                         : (uint32_t)atoi(p + 1) == idx)
@@ -4234,6 +5152,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
     void Resolve()
     {
         if (!g_root) return;
+        g_resolvesFeitos++;   // tabela de texturas do desenho anterior deixa de valer
         uint32_t copyControl = Reg(0x2318);
         uint32_t dest = Reg(0x2319) & 0x1FFFF000;
         uint32_t destPitch = Reg(0x231A);   // largura (bits 0-13) e altura (bits 16-29) do destino
@@ -4270,6 +5189,9 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             if (g_tileState == 1 && x0 == 0 && destW > x1) x1 = std::min<uint32_t>(destW, CANVAS);
         }
         uint32_t w = x1 - x0, h = y1 - y0;
+        char geRotulo[64] = "";
+        if (gpuprof::g_active) snprintf(geRotulo, sizeof(geRotulo), "(resolve %s %ux%u para %08X)", isDepth ? "prof" : "cor", w, h, dest);
+        gpuprof::Etapa ge(list, geRotulo);
         if (isDepth && w == h && w >= 256)   // mapa de sombra (veja g_profSombra)
         {
             if (g_profSombraQuadro != g_frameNumber) { g_profSombraQuadro = g_frameNumber; g_profSombra.clear(); }
@@ -4562,6 +5484,9 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         ComPtr<ID3D12Resource> g_mistura;          // resultado da mistura (alvo de desenho)
         D3D12_RESOURCE_STATES g_misturaEstado = D3D12_RESOURCE_STATE_RENDER_TARGET;
         bool g_fotoTentada = false;
+        double g_fotoQuando = 0;          // ultima vez que a tela da troca foi redesenhada (CarregarFotoInicial)
+        bool g_completando = false;       // a barra cheia esta na tela (solta depois de ~0,2 s)
+        double g_completarDesde = 0;
         bool g_videoFrame = false;                 // gpu.cpp: o quadro e de um video Bink (sem mascara)
 
         void Segurar(ID3D12Resource* img, double maxMs, const char* motivo)
@@ -4578,6 +5503,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             g_misturaDe = misturar ? g_segura : nullptr;
             g_misturaQuadro = misturar ? 1 : 0;
             Log("[mascara] soltando depois de %.0f ms (%s)", perf::Now() - g_seguraDesde, motivo);
+            if (g_segura == g_foto.Get()) TrocaTerminou();
         }
 
         // brilho medio (0-1) de uma copia RGBA16F mapeada: grade de 32x18 pontos
@@ -4608,7 +5534,12 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
                 if (g_segurando)
                 {
                     // solta quando a imagem esta clara e parou de clarear (a tela seguinte ja acendeu)
-                    if (lum >= 0.06f && g_ultimaLum >= 0 && lum <= g_ultimaLum * 1.03f) Soltar(false, "imagem clara de novo");   // corte direto: misturar sobrepunha "Carregando" e o "LOADING" do jogo
+                    if (lum >= 0.06f && g_ultimaLum >= 0 && lum <= g_ultimaLum * 1.03f)
+                    {
+                        // troca de programa: antes de soltar, a barra cheia (100%) por ~0,2 s (antes sumia pela metade)
+                        if (g_segura == g_foto.Get() && g_foto) { if (!g_completando) { g_completando = true; g_completarDesde = perf::Now(); g_fotoQuando = 0; TrocaCompletar(); } }
+                        else Soltar(false, "imagem clara de novo");
+                    }   // corte direto: misturar sobrepunha "Carregando" e o "LOADING" do jogo
                     g_ultimaLum = lum;
                 }
                 D3D12_RANGE nada{ 0, 0 };
@@ -4655,19 +5586,28 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             g_medPos = (g_medPos + 1) % 3;
         }
 
-        // troca de programa: a tela de carregamento vira a imagem segurada ate o jogo novo acender
-        void CarregarFotoInicial(ID3D12GraphicsCommandList* list)
+        // troca de programa: a tela de carregamento vira a imagem segurada ate o jogo novo acender. Chamada de novo a
+        // cada ~100 ms enquanto segura (atualizar = true): a barra continua enchendo (item 3 da lista de 26/11; antes a
+        // imagem era uma so e a barra parava ate o jogo novo acender)
+        void CarregarFotoInicial(ID3D12GraphicsCommandList* list, bool atualizar = false)
         {
             g_fotoTentada = true;
+            g_fotoQuando = perf::Now();
             std::vector<uint8_t> px;
             uint32_t w = 0, h = 0;
             if (!FotoReinicioPixels(px, w, h) || !w || !h) return;
+            if (atualizar && (!g_foto || g_foto->GetDesc().Width != w || g_foto->GetDesc().Height != h)) return;
             D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
             D3D12_RESOURCE_DESC td{};
             td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
             td.Width = w; td.Height = h; td.DepthOrArraySize = 1; td.MipLevels = 1; td.SampleDesc.Count = 1;
             td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-            if (FAILED(g_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g_foto))))
+            if (atualizar)
+            {
+                D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                Transition(list, g_foto.Get(), st, D3D12_RESOURCE_STATE_COPY_DEST);
+            }
+            else if (FAILED(g_dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g_foto))))
                 return;
             uint32_t passo = (w * 4 + 255) & ~255u;
             auto up = render::UploadAlloc((size_t)passo * h, 512);
@@ -4679,7 +5619,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
             D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_COPY_DEST;
             Transition(list, g_foto.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            Segurar(g_foto.Get(), 15000, "tela de carregamento (troca de programa)");
+            if (!atualizar) Segurar(g_foto.Get(), 15000, "tela de carregamento (troca de programa)");
         }
 
         // mistura (1 - t) * de + t * para num alvo do tamanho de "para"
@@ -4734,6 +5674,8 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
             if (g_videoFrame) { Soltar(false, "video"); g_misturaQuadro = 0; return src; }
             if (g_segurando) Medir(list, src);
             if (g_segurando && perf::Now() - g_seguraDesde > g_seguraMax) Soltar(false, "tempo maximo");
+            if (g_segurando && g_completando && perf::Now() - g_completarDesde > 200) { g_completando = false; Soltar(false, "imagem clara de novo (barra cheia)"); }
+            if (g_segurando && g_segura && g_segura == g_foto.Get() && perf::Now() - g_fotoQuando > 100) CarregarFotoInicial(list, true);
             if (g_segurando && g_segura) return g_segura;
             if (g_misturaQuadro > 0 && g_misturaDe)
             {
@@ -4760,6 +5702,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         g_uploadedThisFrame.clear();
         ProcessWritebacks();
         g_copiedThisFrame.clear();
+        g_trocadosThisFrame.clear();
         static const char* statsEnv = getenv("FCRECOMP_STATS");
         if (statsEnv && g_frameNumber == (uint64_t)atoi(statsEnv))
             for (auto& [k, v] : g_stats) Log("[stats] %5d  %s", v, k.c_str());
@@ -4931,7 +5874,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         {
             // F5/F6/F7: a lista deste quadro ja foi enviada; espera a GPU e descarta o que foi feito com o modo antigo
             render::WaitIdle();
-            if (diag::g_flushShaders) { g_shaderCache.clear(); g_psoCache.clear(); g_psoPendente.clear(); g_psoFalhou.clear(); diag::g_flushShaders = false; }
+            if (diag::g_flushShaders) { assinc::PararFundo(); g_shaderCache.clear(); g_psoCache.clear(); g_psoPendente.clear(); g_psoFalhou.clear(); diag::g_flushShaders = false; }
             if (diag::g_flushTextures) { g_textures.clear(); diag::g_flushTextures = false; }
         }
         g_prevFrontBuffer[g_frameNumber & 1] = frontBuffer & 0x1FFFF000;
@@ -4973,6 +5916,7 @@ float4 ps(V i) : SV_Target { return float4(lerp(a.Sample(s, i.uv).rgb, b.Sample(
         }
         g_aguaQuadro = 0; g_reflexoQuadro = 0; g_refracaoQuadro = 0; g_fundoMarQuadro = 0;
         g_drawsThisFrame = 0;
+        g_proximoEnvio = 0;
         g_frameNumber++;
         gpuprof::BeginFrame(g_frameNumber);
         CurrentHistory().clear();

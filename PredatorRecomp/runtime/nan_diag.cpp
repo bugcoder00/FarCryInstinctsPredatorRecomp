@@ -51,15 +51,27 @@ GUEST_FUNC(sub_82369920)
 // Depuracao das consultas de oclusao (bugs 20/21): FCRECOMP_OCLUSAOLOG=t<ini>-<fim> tambem anota cada GetData do jogo
 // (sub_82741238: r3 = consulta, r4 = saida; volta 0 = pronto, 1 = ainda nao) com o numero que o jogo recebeu.
 #ifndef PREDATOR_EDITOR
-int64_t RoteiroTiqueAtual();
+int64_t OclusaoLogTique();   // input.cpp
+bool OclusaoEsperarResposta(uint32_t reg);   // gpu.cpp
 GUEST_DECLARE_ORIGINAL(sub_82741238);
 GUEST_FUNC(sub_82741238)
 {
-    const uint32_t q = Gpr32(ctx, 3), out = Gpr32(ctx, 4);
+    const uint32_t q = Gpr32(ctx, 3), out = Gpr32(ctx, 4), flags = Gpr32(ctx, 5);
     GUEST_ORIGINAL(sub_82741238)(ctx, base);
+    // "ainda nao": espera a contagem da caixa ja enviada a placa e pergunta de novo (farol atras da pedra na 01_beach;
+    // veja OclusaoEsperarResposta em gpu.cpp)
+    if (Gpr32(ctx, 3) != 0 && R32(q + 4) == 9)
+    {
+        const uint32_t nr = R32(q + 144);
+        if (nr >= 1 && nr <= 8 && OclusaoEsperarResposta(R32(q + 20 + 4 * nr) & 0x1FFFFFFFu))
+        {
+            SetGpr(ctx, 3, q); SetGpr(ctx, 4, out); SetGpr(ctx, 5, flags);
+            GUEST_ORIGINAL(sub_82741238)(ctx, base);
+        }
+    }
     static const char* qlog = getenv("FCRECOMP_OCLUSAOLOG");
-    if (!qlog || qlog[0] != 't') return;
-    int64_t ini = atoll(qlog + 1), fim = strchr(qlog, '-') ? atoll(strchr(qlog, '-') + 1) : ini, tq = RoteiroTiqueAtual();
+    if (!qlog || (qlog[0] != 't' && qlog[0] != 'q')) return;
+    int64_t ini = atoll(qlog + 1), fim = strchr(qlog, '-') ? atoll(strchr(qlog, '-') + 1) : ini, tq = OclusaoLogTique();
     if (tq < ini || tq > fim) return;
     uint32_t n = R32(q + 144);
     Log("[getdata] tique %lld: consulta %08X (%u registros: %08X %08X) -> %s, %d amostras", (long long)tq, q, n, R32(q + 24),

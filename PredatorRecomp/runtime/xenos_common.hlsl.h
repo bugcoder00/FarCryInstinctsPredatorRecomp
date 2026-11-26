@@ -31,7 +31,21 @@ cbuffer Draw : register(b1)
     float4 ucp[6];      // PA_CL_UCP_0..5 (0x2388-0x239F: planos no espaco de recorte, aplicados a posicao que o shader escreve)
     float texScale;     // resolucao interna (escala das texturas marcadas em scaledTex)
     float hudEsc;       // ultrawide: 16/9 dividido pela proporcao da imagem (1 = sem mudanca); so em alvos de 1280 de largura
+    uint4 vfp[208];     // vertex shader generico: duas entradas por leitura de vertice (XenosHlsl.cpp, EmitGenericVertexFetch)
 };
+
+// grava o resultado de uma leitura no registrador seguindo o swizzle de destino (3 bits por componente: 0-3 = x-w,
+// 4 = 0, 5 = 1, 7 = nao grava)
+float4 FetchSwz(float4 old, float4 v, uint sw)
+{
+    float4 r = old;
+    [unroll] for (uint i = 0; i < 4; i++)
+    {
+        uint s = (sw >> (3 * i)) & 7u;
+        r[i] = s <= 3u ? v[s] : (s == 4u ? 0.0 : (s == 5u ? 1.0 : old[i]));
+    }
+    return r;
+}
 
 // Planos de corte do usuario (reflexo da agua: corta o que esta abaixo da superficie). Distancia < 0 = cortado.
 void UserClip(float4 p, out float4 c0, out float2 c1)
@@ -207,6 +221,39 @@ float4 VFetch(uint index, uint slot, uint offset, uint stride, uint format, bool
         break;
     }
     return r * exp2(float(expAdjust));
+}
+
+// Componente de uma leitura generica. d: bits 0-6 posicao do 1o bit (nos 4 dwords lidos), 8-13 quantos bits (0 = o
+// componente nao existe: vale "padrao"), 16-18 tipo (0 unorm, 1 snorm, 2 uint, 3 sint, 4 half, 5 float)
+float DecodeComp(uint4 w, uint d, float padrao)
+{
+    uint bits = (d >> 8) & 63u;
+    if (bits == 0u) return padrao;
+    uint off = d & 127u;
+    uint word = w[off >> 5];
+    uint v = bits >= 32u ? word : ((word >> (off & 31u)) & ((1u << bits) - 1u));
+    uint t = (d >> 16) & 7u;
+    if (t == 0u) return float(v) / float((1u << bits) - 1u);
+    if (t == 1u) return SNorm(v, bits);
+    if (t == 2u) return float(v);
+    if (t == 3u) return bits >= 32u ? float(int(v)) : SInt(v, bits);
+    if (t == 4u) return f16tof32(v);
+    return asfloat(v);
+}
+
+// Leitura de vertice do vertex shader generico: o formato vem descrito por componente (montado pelo runtime, xenos_draw
+// MontarTabela) em vez de um switch por formato, que copiado em cada leitura deixava o shader enorme e lento de compilar.
+// P = vfp[2k] (slot, offset, stride, ajuste de expoente), F = vfp[2k+1] (os 4 componentes)
+float4 VFetchG(uint index, uint4 P, uint4 F)
+{
+    uint slot = P.x & 127u;
+    uint2 f = (slot & 1u) ? vfetch[slot >> 1].zw : vfetch[slot >> 1].xy;
+    uint endian = f.y & 3u;
+    uint addr = (f.x & 0xFFFFFFFCu) + (index * (P.z & 255u) + P.y) * 4u;
+    uint4 w = mem.Load4(addr);
+    w = uint4(GpuSwap(w.x, endian), GpuSwap(w.y, endian), GpuSwap(w.z, endian), GpuSwap(w.w, endian));
+    float4 r = float4(DecodeComp(w, F.x, 0.0), DecodeComp(w, F.y, 0.0), DecodeComp(w, F.z, 0.0), DecodeComp(w, F.w, 1.0));
+    return r * exp2(float(int(P.z << 18) >> 26));
 }
 
 bool BoolConst(uint i) { return (bools[i >> 7][(i >> 5) & 3] >> (i & 31)) & 1; }

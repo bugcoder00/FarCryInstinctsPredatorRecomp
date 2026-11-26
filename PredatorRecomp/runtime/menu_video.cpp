@@ -637,6 +637,51 @@ GUEST_FUNC(sub_821B0DE0)
     ctx = salvo;
 }
 
+// item focado na P_Main (sub_821B7B40, [0] da tabela 0x82059FD0): busca o texto de ajuda do item na tabela de textos e
+// o entrega a [22] da pagina (sub_8216E3D8: r4 = conjunto de elementos, r5 = wstring do texto, r6 = ?), que o escreve
+// no quadro de baixo. No SAIR DO JOGO o texto era o do item original ("Trapacas de depuracao (DEBUG)"): durante o foco
+// dele a [22] recebe o texto daqui.
+namespace
+{
+bool g_focoSair = false;
+}
+
+GUEST_DECLARE_ORIGINAL(sub_821B7B40);
+GUEST_FUNC(sub_821B7B40)
+{
+    const uint32_t ev = Gpr32(ctx, 4);
+    g_focoSair = g_sair && ev && R32(ev + 4) == IdDoNome(ctx, "B_CheatsDebug");
+    GUEST_ORIGINAL(sub_821B7B40)(ctx, base);
+    g_focoSair = false;
+}
+
+GUEST_DECLARE_ORIGINAL(sub_8216E3D8);
+GUEST_FUNC(sub_8216E3D8)
+{
+    if (g_focoSair)
+    {
+        // wstring do jogo (como a de widget+60): +4 texto (ou o proprio buffer se capacidade < 8), +20 tamanho, +24 capacidade
+        static uint32_t ws = 0;
+        static std::string feito;
+        const std::string texto = TR("Fecha o jogo e volta para a área de trabalho.", "Closes the game and returns to the desktop.");
+        if (!ws && (ws = GuestAlloc(32)) != 0) { memset(G(ws), 0, 32); W32(ws + 24, 7); }
+        if (ws && feito != texto)
+        {
+            uint32_t n = 0;
+            GuestCpu salvo = ctx;
+            if (const uint32_t t = TextoNoJogo(texto, &n)) { Chamar(ctx, WSTRING_COPIA, ws, t, n); feito = texto; }
+            ctx = salvo;
+        }
+        if (ws && feito == texto)
+        {
+            SetGpr(ctx, 5, ws);
+            static bool uma = false;
+            if (!uma) { uma = true; Log("[menu] ajuda do SAIR DO JOGO no menu principal"); }
+        }
+    }
+    GUEST_ORIGINAL(sub_8216E3D8)(ctx, base);
+}
+
 GUEST_DECLARE_ORIGINAL(sub_821B1FD0);
 GUEST_FUNC(sub_821B1FD0)
 {

@@ -38,4 +38,8 @@ namespace tema
     LRESULT CorTexto(HDC dc, COLORREF cor);         // WM_CTLCOLORSTATIC: texto na cor dada sobre o fundo
     LRESULT CorTextoNoCartao(HDC dc, COLORREF cor); // o mesmo sobre o painel arredondado (CARTAO)
     LRESULT CorCampo(HDC dc);                       // WM_CTLCOLOREDIT / WM_CTLCOLORLISTBOX
+    // barra deslizante (TRACKBAR_CLASS com TBS_NOTICKS): BarraEscura ao criar; no WM_NOTIFY NM_CUSTOMDRAW dela,
+    // devolva DesenharBarra (trilho escuro, parte escolhida e botao em ambar). O fundo vem do WM_CTLCOLORSTATIC.
+    void BarraEscura(HWND barra);
+    LRESULT DesenharBarra(const NMHDR* n);
 }

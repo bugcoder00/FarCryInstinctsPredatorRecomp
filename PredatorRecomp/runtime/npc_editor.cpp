@@ -174,6 +174,38 @@ namespace
     constexpr uint32_t LUA_CARREGA = 0x823DF778, LUA_CALL = 0x823DF1C8;
     std::atomic<uint32_t> g_luaState{ 0 };
 
+    bool RegiaoLegivel(const MEMORY_BASIC_INFORMATION& mi)
+    {
+        return mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
+            (mi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY));
+    }
+
+    // onde a ultima busca achou a marca (o monte do Lua: o texto novo costuma nascer no mesmo lugar) e a regiao dela.
+    // A regiao fica guardada: o VirtualQuery nesse bloco gigante da memoria do jogo leva ~15 ms (era a travada)
+    std::atomic<uint8_t*> g_ultimaAchada{ nullptr }, g_regiaoIni{ nullptr }, g_regiaoFim{ nullptr };
+
+    // procura a marca em [rb, re); guarda em melhor o texto mais longo achado; true = achou
+    bool ProcurarNaRegiao(uint8_t* rb, uint8_t* re, const std::string& marca, std::string& melhor)
+    {
+        bool achou = false;
+        for (uint8_t* q = rb; re - rb > (ptrdiff_t)marca.size() && q < re - marca.size(); q++)
+        {
+            q = (uint8_t*)memchr(q, marca[0], re - marca.size() - q);
+            if (!q) break;
+            if (memcmp(q, marca.data(), marca.size()) == 0)
+            {
+                size_t n = 0;
+                while (q + n < re && q[n] && n < 4000) n++;
+                if (n > melhor.size()) melhor.assign((const char*)q, n);
+                achou = true;
+                g_ultimaAchada = q;
+                g_regiaoIni = rb;
+                g_regiaoFim = re;
+            }
+        }
+        return achou;
+    }
+
     std::string ProcurarResultadoJogo(const std::string& marca)
     {
         std::string melhor;
@@ -184,22 +216,37 @@ namespace
         {
             uint8_t* rb = (uint8_t*)mi.BaseAddress;
             uint8_t* re = rb + mi.RegionSize;
-            const bool legivel = mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
-                (mi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY));
-            for (uint8_t* q = rb; legivel && re - rb > (ptrdiff_t)marca.size() && q < re - marca.size(); q++)
-            {
-                q = (uint8_t*)memchr(q, marca[0], re - marca.size() - q);
-                if (!q) break;
-                if (memcmp(q, marca.data(), marca.size()) == 0)
-                {
-                    size_t n = 0;
-                    while (q + n < re && q[n] && n < 4000) n++;
-                    if (n > melhor.size()) melhor.assign((const char*)q, n);
-                }
-            }
+            if (RegiaoLegivel(mi)) ProcurarNaRegiao(rb, re, marca, melhor);
             p = re;
         }
         return melhor;
+    }
+
+    // ProcurarNaRegiao protegida (a regiao guardada pode ter deixado de existir): false = nao achou ou nao deu para ler
+    bool ProcurarNaRegiaoSeguro(uint8_t* a, uint8_t* b, const std::string* marca, std::string* melhor)
+    {
+        __try { return ProcurarNaRegiao(a, b, *marca, *melhor); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
+
+    // so para marca unica (com um numero novo a cada vez): olha 256 KB e depois 8 MB para cada lado de onde achou a ultima
+    // vez (centesimos de ms), sem VirtualQuery; so varre a memoria toda do jogo (70 a 110 ms: uma travada) se nao achar
+    std::string ProcurarResultadoRapido(const std::string& marca)
+    {
+        uint8_t* u = g_ultimaAchada.load();
+        uint8_t* rb = g_regiaoIni.load();
+        uint8_t* re = g_regiaoFim.load();
+        // 256 KB, 8 MB e por fim a regiao toda (sem VirtualQuery: o da varredura completa parece segurar as alocacoes do
+        // jogo enquanto roda, uma travada mesmo com a busca fora da thread do jogo)
+        if (u && rb && re && u >= rb && u < re)
+            for (size_t vizinho : { (size_t)256 << 10, (size_t)8 << 20, (size_t)re - (size_t)rb })
+            {
+                uint8_t* a = u - rb > (ptrdiff_t)vizinho ? u - vizinho : rb;
+                uint8_t* b = re - u > (ptrdiff_t)vizinho ? u + vizinho : re;
+                std::string melhor;
+                if (ProcurarNaRegiaoSeguro(a, b, &marca, &melhor) && !melhor.empty()) return melhor;
+            }
+        return ProcurarResultadoJogo(marca);
     }
 }
 
@@ -212,6 +259,11 @@ GUEST_FUNC(sub_823DF1C8)
 
 uint32_t LuaRodar(GuestCpu& ctx, const std::string& texto);
 
+// texto que o Lua deixou na memoria do jogo comecando com 'marca' (o mais longo; vazio = nao achado). Tambem
+// usado por cena_direta.cpp. A marca nao pode aparecer inteira no texto do script (monte-a com ..).
+std::string LuaProcurarResultado(const std::string& marca) { return ProcurarResultadoJogo(marca); }
+// igual, para marca unica: procura primeiro perto de onde achou a ultima vez (save_state.cpp, numa thread a parte)
+std::string LuaProcurarResultadoRapido(const std::string& marca) { return ProcurarResultadoRapido(marca); }
 void EditorLuaQuadro(GuestCpu& ctx)
 {
     static std::string antes;

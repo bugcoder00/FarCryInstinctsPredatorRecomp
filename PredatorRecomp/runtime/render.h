@@ -48,6 +48,7 @@ namespace render
     double LastGpuFrameMs();
     // Numero da lista de quadro atual (dados de UploadAlloc so valem enquanto ele nao muda)
     uint64_t FrameSerial();
+    bool EnviarParcial();   // envia o que ja foi gravado do quadro a placa e continua na mesma lista (false = nao deu agora)
 
     // Memoria de video em uso / limite dado pelo Windows (local) e memoria do sistema usada pela GPU, em MB
     void VideoMemory(double& usageMB, double& budgetMB, double& sysUsageMB);
@@ -79,6 +80,12 @@ namespace render
         D3D12_CPU_DESCRIPTOR_HANDLE aoRtv, saidaRtv; UINT w, h; float k[13];
     };
     bool OclusaoAmbiente(ID3D12GraphicsCommandList* list, const AoEntrada& e);
+
+    // SMAA (render.cpp, SMAA_HLSL), um passe por chamada; alvo rtv (estado RENDER_TARGET), texturas em PIXEL_SHADER_RESOURCE:
+    // 1: a = cena -> bordas (RG8); 2: a = bordas -> pesos (RGBA8); 3: a = cena, b = pesos -> saida (RGBA16F).
+    // nivel 1-4 (baixo, medio, alto, ultra). Troca assinatura, pipeline, heaps, viewport e alvo da lista.
+    bool SmaaPasso(ID3D12GraphicsCommandList* list, int passo, ID3D12Resource* a, ID3D12Resource* b, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+                   UINT w, UINT h, int nivel);
 
     // Mostra uma imagem BGRA (ex.: quadro de video) na janela
     void PresentPixels(const uint32_t* pixels, uint32_t width, uint32_t height);

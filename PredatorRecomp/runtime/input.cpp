@@ -14,6 +14,7 @@
 #include "menu_mouse.h"
 #include <windows.h>
 #include <xinput.h>
+#include <timeapi.h>
 #include <atomic>
 #include <cmath>
 #include <mutex>
@@ -32,6 +33,7 @@
 extern float g_cameraSpeedBoost;   // definido no fim do arquivo
 
 #pragma comment(lib, "xinput.lib")
+#pragma comment(lib, "winmm.lib")
 
 extern HWND GetGameWindow();
 
@@ -482,14 +484,26 @@ namespace
         if (vk == VK_RODA_CIMA) return GetTickCount64() < g_wheelUpUntil;
         if (vk == VK_RODA_BAIXO) return GetTickCount64() < g_wheelDownUntil;
         bool mouseButton = vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2;
-        if (mouseButton && (!g_captured || g_ponteiro)) return false;   // cliques com o cursor solto nao viram tiro
+        if (mouseButton && !g_captured) return false;   // cliques com o cursor solto nao viram tiro
+        // Ponteiro dos menus: o clique esquerdo (escolher, A) e o direito (voltar, B) sao dele. Antes TODOS os botoes do
+        // mouse eram ignorados nos menus: uma acao reatribuida para MOUSE_MEIO, MOUSE4 ou MOUSE5 (B no botao lateral,
+        // por exemplo) nao funcionava no menu, so na fase.
+        if (g_ponteiro && (vk == VK_LBUTTON || vk == VK_RBUTTON)) return false;
         return (GetAsyncKeyState(vk) & 0x8000) != 0;
     }
+
+    // Valor de cada eixo do analogico esquerdo quando duas teclas de andar estao apertadas (diagonal). Medido no jogo
+    // (FCRECOMP_POSLOG, roteiro andando reto e na diagonal, normal e feral): o jogo tira uma zona morta de ~1/3 de cada
+    // eixo e nao corta o comprimento do vetor. Com o canto (32767,32767) a diagonal andava 7,1 m/s contra 5,05 reto;
+    // com o circulo (23170 = 32767 / raiz de 2) andava 3,95 e o feral nem ligava (4,0 contra 7,4 reto). Com 26400,
+    // (eixo - zona morta) fica 1/raiz de 2 do reto e a diagonal anda igual: ~5,05 normal e ~7,5 feral.
+    constexpr SHORT DIAGONAL_TECLADO = 26400;
 
     void ReadKeyboard(XINPUT_GAMEPAD& g)
     {
         if (!Focused()) return;
         std::lock_guard lock(g_cfgMutex);
+        bool teclaLX = false, teclaLY = false;
         for (auto& a : g_actions)
         {
             bool down = false;
@@ -504,9 +518,18 @@ namespace
             {
                 SHORT* ax[4] = { &g.sThumbLX, &g.sThumbLY, &g.sThumbRX, &g.sThumbRY };
                 *ax[a.axis] = a.dir > 0 ? 32767 : -32767;
+                if (a.axis == 0) teclaLX = true;
+                if (a.axis == 1) teclaLY = true;
                 break;
             }
             }
+        }
+        // Duas teclas de andar juntas (W+A, W+D, S+A, S+D): veja DIAGONAL_TECLADO.
+        // So quando os dois eixos vieram de teclas (o analogico de um controle junto fica como esta).
+        if (teclaLX && teclaLY)
+        {
+            g.sThumbLX = g.sThumbLX > 0 ? DIAGONAL_TECLADO : -DIAGONAL_TECLADO;
+            g.sThumbLY = g.sThumbLY > 0 ? DIAGONAL_TECLADO : -DIAGONAL_TECLADO;
         }
     }
 
@@ -523,6 +546,11 @@ namespace
 
     // Mira direta: contagens do mouse ainda nao aplicadas a camera (consumidas uma vez por quadro em sub_8228BC78)
     std::atomic<long> g_lookDX{ 0 }, g_lookDY{ 0 };
+    // camera_tardia.cpp: contagens ja somadas aos angulos do jogador no comeco do passo (InputGiroAntecipado); a mira
+    // as soma ao giro como sempre (o adiantamento e desfeito antes de o jogo aplicar o giro)
+    std::atomic<long> g_preDX{ 0 }, g_preDY{ 0 };
+    std::atomic<int> g_invMouse{ -1 };            // mouse vertical invertido? (-1 = ainda nao sabido; atualizado na mira)
+    std::atomic<bool> g_tecladoNaMira{ true };    // o jogador 1 usa o teclado e mouse (ultima mira)
     // ultima vez que o jogo chamou o giro da camera do jogador (GUEST_SUB_MIRA). No editor de mapas, fora do "JUMP IN
     // MAP" (camera voando do editor) ninguem chama: ai o mouse volta a ser o analogico direito.
     std::atomic<ULONGLONG> g_miraTick{ 0 };
@@ -548,10 +576,34 @@ namespace
         if (HWND w = GetGameWindow()) PostMessageW(w, WM_SETCURSOR, (WPARAM)w, MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
     }
 
+    // Teste de atraso do mouse (FCRECOMP_MOUSEPULSO=inicio-fim:hz:dx, segundos desde a primeira mira na fase): uma thread manda
+    // movimentos relativos iguais pelo SendInput (como um mouse de verdade, passando pelo Raw Input) e o log mostra, a
+    // cada segundo, o tempo de cada movimento ate chegar no runtime (entrega) e ate a mira o somar ao giro da camera.
+    namespace pulso
+    {
+        std::mutex m;
+        std::vector<int64_t> enviados;                         // horario de cada SendInput ainda nao chegado
+        std::vector<std::pair<int64_t, int64_t>> chegados;     // (enviado, chegou) ainda nao somados pela mira
+        double entregaSoma = 0, entregaMax = 0, miraSoma = 0, miraMax = 0; long n = 0, contagens = 0, miras = 0;
+        std::atomic<bool> ligado{ false };
+    }
+
     void AddMouseMove(long dx, long dy)
     {
+        if (pulso::ligado.load(std::memory_order_relaxed))
+        {
+            std::lock_guard l(pulso::m);
+            if (!pulso::enviados.empty())
+            {
+                pulso::chegados.push_back({ pulso::enviados.front(), Qpc() });
+                pulso::enviados.erase(pulso::enviados.begin());
+            }
+        }
         if (std::abs(dx) + std::abs(dy) > 2) { g_usoTeclado = GetTickCount64(); MostrarSeta(true); }
         g_lookDX += dx; g_lookDY += dy;
+#ifndef PREDATOR_EDITOR
+        if (g_directLook) return;   // mira direta: a lista com horarios so serve ao mouse-como-analogico (ReadMouse)
+#endif
         std::lock_guard lock(g_mouseMutex);
         int64_t now = Qpc(), keep = (int64_t)(0.25 * QpcFreq());
         g_mouseEvents.push_back({ now, dx, dy });
@@ -966,12 +1018,70 @@ void InputMarkMenu()
     }
 }
 
+// Raw Input do mouse: contagens relativas cruas do dispositivo (sem a aceleracao/"precisao do ponteiro" do Windows),
+// somadas na hora em g_lookDX/g_lookDY. A mira (GUEST_SUB_MIRA) soma tudo ao giro da camera uma vez por passo do jogo:
+// 1 contagem = sempre o mesmo giro, sem media, curva, zona morta nem limite por quadro.
+static void TratarRawInput(LPARAM lp)
+{
+    RAWINPUT ri; UINT size = sizeof(ri);
+    if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER)) == (UINT)-1 ||
+        ri.header.dwType != RIM_TYPEMOUSE || !g_captured)
+        return;
+    if (!(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) && (ri.data.mouse.lLastX || ri.data.mouse.lLastY))
+        AddMouseMove(ri.data.mouse.lLastX, ri.data.mouse.lLastY);
+    if (ri.data.mouse.usButtonFlags & RI_MOUSE_WHEEL)
+    {
+        SHORT d = (SHORT)ri.data.mouse.usButtonData;
+        (d > 0 ? g_wheelUpUntil : g_wheelDownUntil) = GetTickCount64() + 120;   // aperto curto
+    }
+}
+
+// Thread propria do mouse cru, com uma janela so de mensagens (RIDEV_INPUTSINK): o movimento entra na hora, mesmo com a
+// thread da janela do jogo ocupada (arrastar/redimensionar a janela, troca de modo de video, mensagens mandadas por
+// outras threads). Antes o WM_INPUT ia para a janela do jogo e esperava a vez na fila dela.
+// FCRECOMP_MOUSEJANELA=1 volta ao jeito antigo (Raw Input na janela do jogo), para comparar.
+static std::atomic<bool> g_rawNaJanela{ false };
+static LRESULT CALLBACK MouseCruProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_INPUT) TratarRawInput(lp);
+    return DefWindowProcW(h, msg, wp, lp);   // DefWindowProc precisa ver o WM_INPUT
+}
+static void IniciarMouseCru(HWND janela)
+{
+    static std::atomic<bool> iniciado{ false };
+    if (!getenv("FCRECOMP_MOUSEJANELA") && !iniciado.exchange(true))
+    {
+        std::thread([] {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            SetThreadDescription(GetCurrentThread(), L"mouse cru");
+            WNDCLASSW wc{}; wc.lpfnWndProc = MouseCruProc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"PredatorMouseCru";
+            RegisterClassW(&wc);
+            HWND h = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+            RAWINPUTDEVICE rid{ 0x01, 0x02, RIDEV_INPUTSINK, h };   // mouse generico, mesmo fora de foco (g_captured filtra)
+            if (!h || !RegisterRawInputDevices(&rid, 1, sizeof(rid)))
+            {
+                Log("[input] mouse cru na thread propria falhou (%lu): Raw Input na janela do jogo", GetLastError());
+                g_rawNaJanela = true;
+                if (HWND j = GetGameWindow()) { RAWINPUTDEVICE r2{ 0x01, 0x02, 0, j }; RegisterRawInputDevices(&r2, 1, sizeof(r2)); }
+                return;
+            }
+            Log("[input] mouse: Raw Input numa thread propria (movimento cru direto do dispositivo)");
+            MSG m;
+            while (GetMessageW(&m, nullptr, 0, 0) > 0) DispatchMessageW(&m);
+        }).detach();
+        return;
+    }
+    if (iniciado && !g_rawNaJanela) return;   // a thread propria ja recebe (a janela do jogo pode ter sido recriada)
+    g_rawNaJanela = true;
+    RAWINPUTDEVICE rid{ 0x01, 0x02, 0, janela };   // mouse generico
+    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid))) Log("[input] RegisterRawInputDevices falhou (%lu)", GetLastError());
+}
+
 // Chamado pela janela do jogo (gpu.cpp) logo depois de cria-la
 void InputInit(HWND hwnd)
 {
     EnsureConfig();
-    RAWINPUTDEVICE rid{ 0x01, 0x02, 0, hwnd };   // mouse generico
-    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid))) Log("[input] RegisterRawInputDevices falhou (%lu)", GetLastError());
+    IniciarMouseCru(hwnd);
 }
 
 // Mensagens da janela do jogo. Retorna true se a mensagem foi tratada (result = valor de retorno)
@@ -982,21 +1092,8 @@ bool InputWindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& resu
     switch (msg)
     {
     case WM_INPUT:
-    {
-        RAWINPUT ri; UINT size = sizeof(ri);
-        if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
-            ri.header.dwType == RIM_TYPEMOUSE && g_captured)
-        {
-            if (!(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) && (ri.data.mouse.lLastX || ri.data.mouse.lLastY))
-                AddMouseMove(ri.data.mouse.lLastX, ri.data.mouse.lLastY);
-            if (ri.data.mouse.usButtonFlags & RI_MOUSE_WHEEL)
-            {
-                SHORT d = (SHORT)ri.data.mouse.usButtonData;
-                (d > 0 ? g_wheelUpUntil : g_wheelDownUntil) = GetTickCount64() + 120;   // aperto curto
-            }
-        }
+        if (g_rawNaJanela) TratarRawInput(lp);
         return false;   // DefWindowProc precisa ver o WM_INPUT
-    }
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE) Capture(hwnd, false);
         else if (!g_releasedByUser) Capture(hwnd, true);   // Alt+Tab de volta
@@ -1161,6 +1258,17 @@ namespace
                 XINPUT_GAMEPAD g{};
                 g.wButtons = (WORD)b; g.bLeftTrigger = (BYTE)lt; g.bRightTrigger = (BYTE)rt;
                 g.sThumbLX = (SHORT)lx; g.sThumbLY = (SHORT)ly; g.sThumbRX = (SHORT)rx; g.sThumbRY = (SHORT)ry;
+                // FCRECOMP_ROTEIRODIAGONAL=1: as diagonais do teclado gravadas (32767,32767 antes de 26/11; 23170,23170 da
+                // correcao anterior) passam pela correcao atual do ReadKeyboard (DIAGONAL_TECLADO); =n usa n em cada eixo;
+                // "@tique" no fim (26400@680) so a partir desse tique do roteiro
+                static const char* diagCfg = getenv("FCRECOMP_ROTEIRODIAGONAL");
+                static const int diag = diagCfg ? atoi(diagCfg) : 0;
+                static const long long diagDesde = diagCfg && strchr(diagCfg, '@') ? atoll(strchr(diagCfg, '@') + 1) : 0;
+                if (diag && t >= diagDesde && std::abs(lx) == std::abs(ly) && (std::abs(lx) == 32767 || std::abs(lx) == 23170))
+                {
+                    const SHORT d = (SHORT)(diag > 1 ? std::min(diag, 32767) : DIAGONAL_TECLADO);
+                    g.sThumbLX = (SHORT)(lx > 0 ? d : -d); g.sThumbLY = (SHORT)(ly > 0 ? d : -d);
+                }
                 g_repPad.push_back({ t, g });
             }
             else if (sscanf(line, "C %lld %x %x", &t, &ux, &uy) == 3)
@@ -1445,6 +1553,19 @@ namespace
         if ((ux & 0x7FFFFFFF) || (uy & 0x7FFFFFFF)) Escrever("A %lld %08X %08X\n", (long long)g_tique, ux, uy);
     }
 
+    // camera_tardia.cpp: o giro final que a repeticao vai por neste passo (sem gastar: RoteiroGiroFinal o usa depois)
+    bool RoteiroGiroPrevisto(float& x, float& y)
+    {
+        std::lock_guard lock(g_recMutex);
+        if (!Repetindo() || g_repTotal.empty()) return false;
+        // o tique avanca na 1a leitura do controle depois de uma troca de tela, que vem depois deste ponto do passo
+        const int64_t t = TiqueRoteiro() + (g_tique && g_trocas.load() != g_trocaLeitura ? 1 : 0);
+        x = y = 0;
+        if (t != g_repUltimoTotal)
+            if (auto it = g_repTotal.find(t); it != g_repTotal.end()) { x = it->second.first; y = it->second.second; }
+        return true;
+    }
+
     // posicao do ouvinte (camera) a cada 30 tiques: gravada, e na repeticao comparada com a gravada
     void RoteiroPosicao()
     {
@@ -1561,6 +1682,14 @@ int64_t RoteiroTiqueAtual()
     return g_recState == RecState::Recording ? g_tique : -1;
 }
 
+// depuracao das consultas de oclusao: FCRECOMP_OCLUSAOLOG=t<ini>-<fim> conta pelo tique do roteiro; =q<ini>-<fim> pelo
+// numero do quadro (o das fotos da rajada), para cutscenes (tools\cutscenes.ps1 -Rajadas), que nao tem roteiro
+int64_t OclusaoLogTique()
+{
+    static const char* q = getenv("FCRECOMP_OCLUSAOLOG");
+    return q && q[0] == 'q' ? (int64_t)diag::CurrentFrame() : RoteiroTiqueAtual();
+}
+
 // gravacao ou repeticao em andamento? (o jogador 2 fica desligado; content.cpp tambem pergunta)
 bool RoteiroAtivo()
 {
@@ -1578,7 +1707,9 @@ bool RoteiroAtivo()
 //   PULARVS=HASH,HASH   nao desenha esses vertex shaders
 //   FOTO=arquivo.bmp    salva a proxima imagem (caminho relativo a build_game ou completo)
 //   CAPTURA=1           captura completa do proximo quadro (como o F9: build_game\diag\quadro_N)
-// FOTO e CAPTURA valem uma vez a cada vez que o arquivo e salvo. Cada leitura aparece no registro como "[aovivo]".
+//   RAJADA=1            fotos dos proximos 60 quadros (como a tecla ': build_game\diag\rajada_N); para o que pisca
+// FOTO, CAPTURA e RAJADA valem uma vez a cada vez que o arquivo e salvo. Cada leitura aparece no registro como "[aovivo]".
+namespace xdraw { void IniciarRajada(); }   // xenos_draw.cpp
 namespace
 {
     std::mutex g_aoVivoMutex;
@@ -1618,6 +1749,7 @@ namespace
             else if (k == "PULARVS") vs = v;
             else if (k == "FOTO" && !v.empty()) { GpuPedirFoto(troca + 1, v); Log("[aovivo] foto pedida: %s", v.c_str()); }
             else if (k == "CAPTURA" && v != "0") { Log("[aovivo] captura pedida"); diag::RequestCapture(); }
+            else if (k == "RAJADA" && v != "0") { Log("[aovivo] rajada pedida"); xdraw::IniciarRajada(); }
             else { outros[k] = v; Log("[aovivo] %s=%s", k.c_str(), v.c_str()); }
         }
         {
@@ -1900,13 +2032,35 @@ bool InputUsuarioLigado(uint32_t u)
 // entrada+188 (horizontal) / +192 (vertical); o jogador soma isso ao angulo. Chamado por sub_82146038.
 // No editor de mapas (ige.xex) a mesma funcao e sub_82257300 (GUEST_SUB_MIRA); o jogador, a entrada (+908), o
 // gerente de controles (+1232, +204, +48*idx+28) e as opcoes do perfil (+1296, byte +184) estao nos mesmos lugares.
+// camera_tardia.cpp, no comeco do passo do jogo (antes de os personagens serem atualizados): o giro que a mira deste
+// passo vai pedir para o mouse (graus: gx = entrada+188, gy = entrada+192), ja tirado da fila. Na repeticao de um
+// roteiro, o giro gravado do tique. false = nada a adiantar (mouse fora da camera, editor no modo de edicao...).
+bool InputGiroAntecipado(float& gx, float& gy)
+{
+    gx = gy = 0;
+    static const bool pulsoCfg = getenv("FCRECOMP_MOUSEPULSO") != nullptr;
+    if (RoteiroGiroRepetindo() && !pulsoCfg) return RoteiroGiroPrevisto(gx, gy);
+    if (!MiraDireta() || !g_tecladoNaMira || g_invMouse.load() < 0) return false;
+    static const bool mouseTest = getenv("FCRECOMP_MOUSETESTE") != nullptr;
+    if (!(g_mouse.camera && ((g_captured && Focused()) || mouseTest || pulsoCfg))) return false;
+    const long dx = g_lookDX.exchange(0), dy = g_lookDY.exchange(0);
+    g_preDX += dx; g_preDY += dy;
+    const float k = g_mouse.lookScale * g_sens.load();
+    gx = dx * k;
+    gy = dy * k * (g_invMouse.load() == 1 ? -1.0f : 1.0f);
+    return true;
+}
+
 GUEST_DECLARE_ORIGINAL(GUEST_SUB_MIRA);
 #ifndef PREDATOR_EDITOR
 GUEST_DECLARE_ORIGINAL(sub_821D3B78);
 #endif
 #ifndef PREDATOR_EDITOR
 void CenaDiretaFase(GuestCpu& ctx);    // cena_direta.cpp: FCRECOMP_CENA dispara o gatilho da cena na fase
+void PularCenaQuadro(GuestCpu& ctx);   // pular_cena.cpp: encerra um BeginCutScene falso
+void SaveStateQuadro(GuestCpu& ctx);   // save_state.cpp: salvar/carregar o estado pedido (tecla, janela F2, ao_vivo)
 #endif
+void CameraTardiaGiro(uint32_t entrada);   // camera_tardia.cpp
 void EditorLuaQuadro(GuestCpu& ctx);   // npc_editor.cpp: ao_vivo LUA=n roda build_game\lua_teste.lua (editor e jogo)
 // declaradas aqui (e nao dentro do gancho) para manter a ligacao C++ mesmo quando GUEST_FUNC e extern "C"
 void WatchAddWriteRange(uint32_t addr, uint32_t size);
@@ -1938,6 +2092,8 @@ GUEST_FUNC(GUEST_SUB_MIRA)
     EditorLuaQuadro(ctx);
 #ifndef PREDATOR_EDITOR
     CenaDiretaFase(ctx);   // cena_direta.cpp (FCRECOMP_CENA)
+    PularCenaQuadro(ctx);  // pular_cena.cpp: encerra um BeginCutScene falso (checkpoint da 02_native)
+    SaveStateQuadro(ctx);  // save_state.cpp: save state (Game:SaveCheckpoint / LoadLastCheckpoint)
 #endif
     // voltando de um trecho sem giro do jogador (editor de mapas): o mouse acumulado nesse meio tempo ja foi usado
     // como analogico, nao vira um giro de uma vez so
@@ -1959,9 +2115,48 @@ GUEST_FUNC(GUEST_SUB_MIRA)
         static uint32_t ultimoPad = 0xFFFFFFFEu;
         if (pad != ultimoPad) { Log("[input] jogador %08X usa o controle %d (mouse %s)", jogador, (int)pad, doTeclado ? "sim" : "nao"); ultimoPad = pad; }
     }
+    // teste de atraso do mouse (FCRECOMP_MOUSEPULSO, veja pulso:: acima): na repeticao de um roteiro o giro gravado sai
+    // e entra o mouse (movimentos mandados pelo SendInput)
+    static const char* pulsoCfg = getenv("FCRECOMP_MOUSEPULSO");
+    if (pulsoCfg)
+    {
+        static bool iniciado = false;
+        float t0 = (float)atof(pulsoCfg), t1 = strchr(pulsoCfg, '-') ? (float)atof(strchr(pulsoCfg, '-') + 1) : t0 + 5;
+        const char* c1 = strchr(pulsoCfg, ':');
+        int hz = c1 ? atoi(c1 + 1) : 500;
+        const char* c2 = c1 ? strchr(c1 + 1, ':') : nullptr;
+        long dxp = c2 ? atol(c2 + 1) : 1;
+        static const int64_t primeira = Qpc();   // segundos contados desde a primeira mira (o jogador ja na fase)
+        if (!iniciado && Qpc() - primeira >= (int64_t)(t0 * QpcFreq()))
+        {
+            iniciado = true;
+            pulso::ligado = true;
+            Log("[mousepulso] %d movimentos/s de %ld contagens por %.1f s (%s)", hz, dxp, t1 - t0,
+                g_rawNaJanela ? "Raw Input na janela do jogo" : "Raw Input na thread propria");
+            std::thread([hz, dxp, dur = t1 - t0] {
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+                timeBeginPeriod(1);
+                const int64_t passo = (int64_t)(QpcFreq() / std::max(hz, 1)), fim = Qpc() + (int64_t)(dur * QpcFreq());
+                int64_t prox = Qpc();
+                while (prox < fim)
+                {
+                    while (Qpc() < prox) { if (prox - Qpc() > QpcFreq() / 500) Sleep(1); else YieldProcessor(); }
+                    INPUT in{}; in.type = INPUT_MOUSE; in.mi.dx = dxp; in.mi.dwFlags = MOUSEEVENTF_MOVE;
+                    { std::lock_guard l(pulso::m); pulso::enviados.push_back(Qpc()); }
+                    if (SendInput(1, &in, sizeof(in)) != 1) { std::lock_guard l(pulso::m); pulso::enviados.pop_back(); }
+                    prox += passo;
+                }
+                timeEndPeriod(1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                pulso::ligado = false;
+                std::lock_guard l(pulso::m);
+                Log("[mousepulso] fim: %zu movimentos mandados que nao chegaram", pulso::enviados.size());
+            }).detach();
+        }
+    }
     // roteiro gravado (so o jogador 1): o giro somado aqui e anotado; na repeticao entra o giro gravado no lugar
     const bool jogador1 = pad == 0 || pad >= 4;
-    const bool repetindo = jogador1 && RoteiroGiroRepetindo();
+    const bool repetindo = jogador1 && RoteiroGiroRepetindo() && !pulsoCfg;
     float somaX = 0, somaY = 0;
     auto add = [&](uint32_t addr, float v) {
         uint32_t u = R32(addr); float fv; memcpy(&fv, &u, 4); fv += v; memcpy(&u, &fv, 4); W32(addr, u);
@@ -2028,9 +2223,33 @@ GUEST_FUNC(GUEST_SUB_MIRA)
             add(in + 192, e.gy * quadros * (GameInvertLook(ctx, base, in) ? -1.0f : 1.0f));   // INVERT LOOK do jogo
         }
     }
+    if (jogador1) g_tecladoNaMira = doTeclado;
     if (g_directLook && doTeclado && !repetindo)
     {
-        long dx = g_lookDX.exchange(0), dy = g_lookDY.exchange(0);
+        long dx = g_lookDX.exchange(0) + g_preDX.exchange(0), dy = g_lookDY.exchange(0) + g_preDY.exchange(0);
+        if (pulso::ligado.load(std::memory_order_relaxed))
+        {
+            const int64_t agora = Qpc();
+            std::lock_guard l(pulso::m);
+            for (auto& [env, cheg] : pulso::chegados)
+            {
+                double e = (cheg - env) * 1000.0 / QpcFreq(), mm = (agora - env) * 1000.0 / QpcFreq();
+                pulso::entregaSoma += e; pulso::entregaMax = std::max(pulso::entregaMax, e);
+                pulso::miraSoma += mm; pulso::miraMax = std::max(pulso::miraMax, mm);
+                pulso::n++;
+            }
+            pulso::chegados.clear();
+            pulso::contagens += dx; pulso::miras++;
+            static int64_t ultimoLog = agora;
+            if (agora - ultimoLog > QpcFreq() && pulso::n)
+            {
+                Log("[mousepulso] %ld movimentos em %ld miras (%ld contagens = giro %.3f): entrega media %.3f ms (max %.3f), ate a mira media %.2f ms (max %.2f)",
+                    pulso::n, pulso::miras, pulso::contagens, pulso::contagens * g_mouse.lookScale * g_sens.load(),
+                    pulso::entregaSoma / pulso::n, pulso::entregaMax, pulso::miraSoma / pulso::n, pulso::miraMax);
+                pulso::entregaSoma = pulso::entregaMax = pulso::miraSoma = pulso::miraMax = 0; pulso::n = pulso::contagens = pulso::miras = 0;
+                ultimoLog = agora;
+            }
+        }
         // teste sem mouse: FCRECOMP_MOUSETESTE=inicio-fim:dx,dy (segundos desde o inicio da fase; contagens por quadro)
         if (static const char* mt = getenv("FCRECOMP_MOUSETESTE"); mt)
         {
@@ -2045,14 +2264,15 @@ GUEST_FUNC(GUEST_SUB_MIRA)
             }
         }
         static const bool mouseTest = getenv("FCRECOMP_MOUSETESTE") != nullptr;
-        bool active = g_mouse.camera && ((g_captured && Focused()) || mouseTest);
+        bool active = g_mouse.camera && ((g_captured && Focused()) || mouseTest || pulsoCfg);
+        if (active && jogador1) g_invMouse = (GameInvertLook(ctx, base, in) != g_mouse.invertY) ? 1 : 0;
         if (active && (dx || dy))
         {
             // unidade do jogo: graus por quadro antes da sensibilidade do menu (analogico no maximo ~4.8 na horizontal)
             float k = g_mouse.lookScale * g_sens.load();
             add(in + 188, dx * k);
             // positivo = olhar para baixo; inverte se o menu do jogo (INVERT STICK) ou o controles.ini (inverter_y) pedir
-            bool inv = GameInvertLook(ctx, base, in) != g_mouse.invertY;
+            bool inv = g_invMouse.load() == 1;
             static int lastInv = -1;
             if (lastInv != (int)inv) { Log("[input] mouse vertical %s (menu do jogo: INVERT STICK %s)", inv ? "invertido" : "normal", GameInvertLook(ctx, base, in) ? "YES" : "NO"); lastInv = inv; }
             add(in + 192, dy * k * (inv ? -1.0f : 1.0f));
@@ -2111,12 +2331,27 @@ GUEST_FUNC(GUEST_SUB_MIRA)
             v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]);
     }
 #endif
+    // depuracao: FCRECOMP_POSLOG=1 mostra a posicao do jogador (objeto em jogador+72: x, y, z em +4/+8/+12; achado no
+    // editor de mapas) uma vez por tique do roteiro (ou por quadro), com a hora, para medir a velocidade de andar
+    if (static const bool posLog = getenv("FCRECOMP_POSLOG") != nullptr; posLog && jogador1)
+    {
+        static int64_t ultimoT = -1;
+        const int64_t t = RoteiroTiqueAtual();
+        const uint32_t obj = R32(in - 908 + 72);
+        if (t != ultimoT && obj)
+        {
+            ultimoT = t;
+            Log("[pos] t=%lld ms=%.1f %.3f %.3f %.3f", (long long)t, perf::Now(), BitsFloat(R32(obj + 4)),
+                BitsFloat(R32(obj + 8)), BitsFloat(R32(obj + 12)));
+        }
+    }
     if (jogador1)
     {
         if (!repetindo) RoteiroAnotarGiro(somaX, somaY);
-        RoteiroGiroFinal(base, in);   // giro final do quadro: gravado / repetido exatamente
+        if (!pulsoCfg) RoteiroGiroFinal(base, in);   // giro final do quadro: gravado / repetido exatamente
         RoteiroPosicao();
     }
+    if (jogador1) CameraTardiaGiro(in);   // camera_tardia.cpp: a camera deste quadro ja recebe este giro
     static const bool lookLog = getenv("FCRECOMP_LOOKLOG") != nullptr;   // depuracao: valores do giro
     if (lookLog && (sx != 0 || sy != 0))
     {
@@ -2198,6 +2433,17 @@ std::string InputTeclasTexto(const char* acao, int max)
         r += (r.empty() ? "" : "/") + n;
     }
     return r;
+}
+
+// diag.cpp: a tecla esta em alguma acao do controles.ini? (uma acao reatribuida para F5-F11 nao liga as ferramentas de
+// diagnostico junto: antes F5 numa acao tambem trocava o modo dos shaders, F9 capturava o quadro...)
+bool InputTeclaEmAcao(int vk)
+{
+    EnsureConfig();
+    std::lock_guard lock(g_cfgMutex);
+    for (auto& a : g_actions)
+        for (int k : a.keys) if (k == vk) return true;
+    return false;
 }
 
 std::vector<int> InputTodasTeclas()

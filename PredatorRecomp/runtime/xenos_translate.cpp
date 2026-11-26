@@ -12,7 +12,7 @@
 uint64_t g_translateHash = 0;   // hash do shader sendo traduzido (depuracao)
 
 std::string TranslateXenosShader(const std::vector<uint32_t>& code, bool pixelShader, std::string* warnings,
-    std::vector<uint32_t>* fetchSlots, uint32_t* textureMask, uint32_t* cubeMask)
+    std::vector<uint32_t>* fetchSlots, uint32_t* textureMask, uint32_t* cubeMask, VsGenerico* generico)
 {
     // Sem saltos para tras, lacos ou chamadas o corpo sai em linha reta (bem mais rapido na GPU que o laco com switch).
     // Depuracao: FCRECOMP_NOLINEAR=1 usa o laco em todos; =HASH so nesse shader. F5 do diagnostico: todos.
@@ -21,8 +21,18 @@ std::string TranslateXenosShader(const std::vector<uint32_t>& code, bool pixelSh
     static const char* noLinear = getenv("FCRECOMP_NOLINEAR");
     if (noLinear) options.forceLoop = strlen(noLinear) <= 2 || strtoull(noLinear, nullptr, 16) == g_translateHash;
     if (diag::g_loopShaders) options.forceLoop = true;
+    options.genericFetch = generico && !pixelShader;
+    options.attribFetch = options.genericFetch && generico->atributo;
 
     const predator::gpu::HlslShader t = predator::gpu::TranslateToHlsl(code, options);
+    const bool atributo = options.attribFetch && t.generic;
+    if (generico)
+    {
+        generico->ok = t.generic;
+        generico->addrs = t.vfAddrs;
+        generico->src = t.vfSrc;
+        generico->dst = t.vfDst;
+    }
     if (warnings)
     {
         warnings->clear();
@@ -60,6 +70,45 @@ std::string TranslateXenosShader(const std::vector<uint32_t>& code, bool pixelSh
         s += "\tif (paramGen & 0x80000000u) { float2 sp = input.pos.xy / resScale; float4 pg = float4(frontFace ? sp.x : -sp.x, sp.y, 0, 0);\n"
              "\t\t[unroll] for (uint i = 0; i < 16; i++) if ((paramGen & 63u) == i) r[i] = pg; }\n";
         s += "\tfloat4 oC0 = 0, oC1 = 0, oC2 = 0, oC3 = 0, oDepth4 = 0, oDummy = 0;\n";
+    }
+    else if (atributo)
+    {
+        // registradores de entrada pelo input layout (xenos_draw MontarAtributos): o desenho e indexado pela placa
+        // (indices ja invertidos) e a base de vertices vai no endereco de cada buffer, entao SV_VertexID e o indice
+        // lido. Por registrador k, uma entrada (ATTRk) ou, se o molde tem mais leituras que registradores (duas
+        // leituras gravando partes do mesmo registrador, ex.: xy de um buffer e zw de outro), duas (ATTRk e ATTR(n+k)).
+        // vfp[] por registrador (B = E*k): B.x bit 0 = grava, bits 1/2 = arredonda a 1a/2a entrada (formato inteiro);
+        // depois, para cada entrada, a escala por componente (volta o normalizado ao inteiro) e a matriz do swizzle
+        // (4 linhas, com o ajuste de expoente); por fim as constantes 0/1 do swizzle e os componentes que ficam.
+        const size_t n = t.vfDst.size();
+        const bool duas = t.vfAddrs.size() > n;
+        const size_t E = duas ? 13 : 8;
+        s += "struct VIn { uint vertexId : SV_VertexID;";
+        for (size_t k = 0; k < n; k++) s += " float4 a" + std::to_string(k) + " : ATTR" + std::to_string(k) + ";";
+        if (duas)
+            for (size_t k = 0; k < n; k++) s += " float4 b" + std::to_string(k) + " : ATTR" + std::to_string(n + k) + ";";
+        s += " };\n";
+        s += "Interp vs(VIn vin)\n{\n";
+        s += "\tfloat4 r[64] = (float4[64])0;\n";
+        s += "\tr[0].x = float(vin.vertexId + vertexOffset);\n";
+        for (size_t k = 0; k < n; k++)
+        {
+            const std::string i = std::to_string(k), B = std::to_string(k * E), rr = "r[" + std::to_string(t.vfDst[k]) + "]";
+            auto q = [&](size_t o) { return "asfloat(vfp[" + std::to_string(k * E + o) + "])"; };
+            auto mat = [&](size_t o, const char* v) {
+                return std::string("float4(dot(") + q(o) + ", " + v + "), dot(" + q(o + 1) + ", " + v + "), dot(" + q(o + 2) + ", " + v +
+                       "), dot(" + q(o + 3) + ", " + v + "))";
+            };
+            s += "\tif (vfp[" + B + "].x & 1u) { float4 v = vin.a" + i + " * " + q(1) + "; if (vfp[" + B + "].x & 2u) v = round(v); ";
+            if (duas)
+            {
+                s += "float4 w = vin.b" + i + " * " + q(6) + "; if (vfp[" + B + "].x & 4u) w = round(w); ";
+                s += rr + " = " + rr + " * " + q(12) + " + " + mat(2, "v") + " + " + mat(7, "w") + " + " + q(11) + "; }\n";
+            }
+            else s += rr + " = " + rr + " * " + q(7) + " + " + mat(2, "v") + " + " + q(6) + "; }\n";
+        }
+        s += "\tfloat4 oPos = float4(0, 0, 0, 1), oDummy = 0;\n";
+        s += "\tfloat4 o[16] = (float4[16])0;\n";
     }
     else
     {
@@ -112,6 +161,13 @@ std::string TranslateXenosShader(const std::vector<uint32_t>& code, bool pixelSh
         s += "\tPSOut res;\n\tres.c0 = oC0;\n\treturn res;\n}\n";
     }
     else
+    {
+        // teste: FCRECOMP_SAL=n muda o codigo de todo vertex shader sem mudar o resultado (o cache do driver da placa
+        // nao reconhece: simula quem abre o jogo pela primeira vez)
+        if (static const char* sal = getenv("FCRECOMP_SAL"); sal)
+            s += std::string("\tif (vertexOffset == ") + std::to_string(4000000000u + (unsigned)atoi(sal)) + "u) oPos.x += 1e-30;\n";
+    }
+    if (!pixelShader)
         s += "\tInterp res;\n\tres.pos = XenosToClip(oPos);\n\tres.o = o;\n\tUserClip(oPos, res.clip0, res.clip1);\n\treturn res;\n}\n";
     return s;
 }

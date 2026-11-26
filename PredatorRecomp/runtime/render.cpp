@@ -1,5 +1,6 @@
 // Renderizador DirectX 12: dispositivo, swapchain, quadros, memoria de upload, descritores e DXC
 #include "opcoes.h"
+#include "placas_video.h"
 #include "perf.h"
 #include "render.h"
 #include "guest.h"
@@ -7,6 +8,7 @@
 #include "idioma.h"
 #include <dxcapi.h>
 std::string AoVivoValor(const char* chave);   // input.cpp: build_game\ao_vivo.txt (testes com o jogo aberto)
+std::wstring SaveStateAviso(ULONGLONG agora, float& alfa);   // save_state.cpp: texto do aviso do save state (vazio = nenhum)
 #include <mutex>
 #include <cmath>
 #include <algorithm>
@@ -114,6 +116,8 @@ namespace render
         ComPtr<ID3D12PipelineState> g_brilhoPso;
         ComPtr<ID3D12PipelineState> g_blitPso, g_aaPso[3];   // antisserrilhado niveis 1-3 (saida RGBA16F: a cena do jogo)
         ComPtr<ID3D12RootSignature> g_aoRoot;                // oclusao de ambiente: 3 texturas + 12 constantes
+        ComPtr<ID3D12RootSignature> g_smaaRoot;              // SMAA: 2 texturas + 4 constantes
+        ComPtr<ID3D12PipelineState> g_smaaPso[3];            // [0] bordas (RG8), [1] pesos (RGBA8), [2] mistura (RGBA16F)
         ComPtr<ID3D12PipelineState> g_aoPso[2];              // [0] calcula (R8), [1] desfoca e escurece a cena (RGBA16F)
         ComPtr<ID3D12RootSignature> g_fsrRoot;               // FSR: 1 textura + 8 constantes
         ComPtr<ID3D12PipelineState> g_easuPso, g_rcasPso;    // FSR: ampliar (na imagem da janela) e dar nitidez (antes, em RGB 10 bits)
@@ -377,7 +381,14 @@ float4 ps(VSOut i) : SV_Target
     Somar(soma, pesos, cn, float2(0, 2) - f, dir, eixo, lobo, corte);
     Somar(soma, pesos, co, float2(1, 2) - f, dir, eixo, lobo, corte);
     float3 mn = min(min(cf, cg), min(cj, ck)), mx = max(max(cf, cg), max(cj, ck));
-    return float4(clamp(soma / max(pesos, 1.0 / 65536.0), mn, mx) * brilho, 1);
+    float3 borda = clamp(soma / max(pesos, 1.0 / 65536.0), mn, mx);
+    // Sem borda de verdade (fogo, fumaca, folhagem: pixels que variam sem direcao) o filtro de borda preso entre o minimo
+    // e o maximo do 2x2 achata a imagem em platos do tamanho de um pixel do jogo, e a ampliacao os mostra como blocos
+    // (particulas "pixeladas", pior com a nitidez maxima, que vem antes e marca esses pixels). A mistura segue a forca da
+    // borda: bordas fortes (forca perto de 1) continuam com o filtro inteiro, o resto vai para o bilinear (liso). Medido na
+    // fogueira da 01_beach (FSR qualidade, nitidez maxima): forca x2 ainda deixava blocos; x1 ficou perto de sem FSR.
+    float3 liso = lerp(lerp(cf, cg, f.x), lerp(cj, ck, f.x), f.y);
+    return float4(lerp(liso, borda, saturate(forca)) * brilho, 1);
 }
 #else
 float4 ps(VSOut i) : SV_Target
@@ -401,6 +412,134 @@ float4 ps(VSOut i) : SV_Target
     w *= saturate((0.5 - ruido) * 4.0);
     float3 cor = (w * (b + d + f + h) + e) / (4.0 * w + 1.0);
     return float4(saturate(cor) * brilho, 1);
+}
+#endif
+)";
+
+        // SMAA (opcao "Antisserrilhado SMAA" do launcher), no mesmo lugar do antisserrilhado de baixo (a cena 3D antes do
+        // HUD). Feito aqui a partir da ideia do SMAA 1x (Jimenez et al.), em 3 passes, sem as tabelas prontas dele:
+        //  1. bordas: diferenca de luminancia com o vizinho da esquerda e o de cima acima do limiar, menos as que sao
+        //     bem mais fracas que outra borda ao lado (adaptacao ao contraste local); R = borda a esquerda, G = em cima;
+        //  2. pesos: cada borda e seguida para os dois lados ate acabar (ate PASSOS pixels); nas pontas, a borda que
+        //     cruza diz para que lado o degrau sobe ou desce. A linha que o serrilhado "queria" ser liga o meio dos
+        //     degraus (Z), ou vai do degrau ao meio da borda (L e U); a area entre a borda e essa linha, dentro de cada
+        //     pixel, e quanto ele (ou o vizinho do outro lado) mistura com o outro. Borda sem degrau nas pontas = 0
+        //     (textura reta fica nitida). R/G = borda de cima (este pixel / o de cima), B/A = a da esquerda;
+        //  3. mistura: cada pixel junta os pesos das 4 bordas dele com as cores dos vizinhos.
+        // k: limiar das bordas, passos da busca.
+        const char* SMAA_HLSL = R"(
+Texture2D t0 : register(t0);
+Texture2D t1 : register(t1);
+cbuffer K : register(b0) { float limiar; float passos; float2 livre; };
+struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+VSOut vs(uint id : SV_VertexID)
+{
+    VSOut o;
+    o.uv = float2((id << 1) & 2, id & 2);
+    o.pos = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+int2 Tam() { uint w, h; t0.GetDimensions(w, h); return int2(w, h); }
+#if PASSO == 1
+float Lu(int2 p, int2 t) { float3 c = t0.Load(int3(clamp(p, 0, t - 1), 0)).rgb; return sqrt(dot(saturate(c), float3(0.299, 0.587, 0.114))); }
+float4 ps(VSOut i) : SV_Target
+{
+    int2 t = Tam(), p = int2(i.pos.xy);
+    float L = Lu(p, t), Ll = Lu(p + int2(-1, 0), t), Lt = Lu(p + int2(0, -1), t);
+    float2 d = abs(L - float2(Ll, Lt));
+    if (p.x == 0) d.x = 0;
+    if (p.y == 0) d.y = 0;
+    float2 e = step(limiar, d);
+    if (e.x + e.y == 0) return 0;
+    float Lr = Lu(p + int2(1, 0), t), Lb = Lu(p + int2(0, 1), t);
+    float2 m = max(d, abs(L - float2(Lr, Lb)));
+    float Lll = Lu(p + int2(-2, 0), t), Ltt = Lu(p + int2(0, -2), t);
+    m = max(m, abs(float2(Ll, Lt) - float2(Lll, Ltt)));
+    e *= step(max(m.x, m.y), 2.0 * d);
+    return float4(e, 0, 0);
+}
+#elif PASSO == 2
+float2 E(int2 p, int2 t) { return (p.x < 0 || p.y < 0 || p.x >= t.x || p.y >= t.y) ? 0 : t0.Load(int3(p, 0)).rg; }
+// integral da parte positiva (x) e negativa (y) da reta que vale f0 em a e f1 em b
+float2 Lin(float f0, float f1, float a, float b)
+{
+    float w = b - a;
+    if (w <= 0) return 0;
+    if (f0 >= 0 && f1 >= 0) return float2(0.5 * (f0 + f1) * w, 0);
+    if (f0 <= 0 && f1 <= 0) return float2(0, -0.5 * (f0 + f1) * w);
+    float c = w * f0 / (f0 - f1);
+    float pos = 0.5 * (max(f0, 0) * c + max(f1, 0) * (w - c));
+    float neg = 0.5 * (max(-f0, 0) * c + max(-f1, 0) * (w - c));
+    return float2(pos, neg);
+}
+// altura da linha reconstruida em t (0 = comeco da borda, L = fim); h1/h2 = degrau em cada ponta (+-0,5 ou 0)
+float F(float x, float L, float h1, float h2)
+{
+    if (h1 * h2 < 0) return lerp(h1, h2, x / L);   // Z: liga um degrau ao outro
+    float m = 0.5 * L;
+    return x < m ? h1 * (1 - x / m) : h2 * ((x - m) / m);   // L e U: de cada degrau ate o meio
+}
+float2 Area(float s, float L, float h1, float h2)
+{
+    float a = s, b = s + 1, m = 0.5 * L;
+    if (h1 * h2 >= 0 && a < m && b > m) return Lin(F(a, L, h1, h2), 0, a, m) + Lin(0, F(b, L, h1, h2), m, b);
+    return Lin(F(a, L, h1, h2), F(b, L, h1, h2), a, b);
+}
+float Degrau(float lado, float outro) { return lado > 0.5 && outro < 0.5 ? 0.5 : outro > 0.5 && lado < 0.5 ? -0.5 : 0; }
+float4 ps(VSOut i) : SV_Target
+{
+    int2 t = Tam(), p = int2(i.pos.xy);
+    float2 e = E(p, t);
+    float4 w = 0;
+    int n = (int)passos;
+    if (e.g > 0.5)   // borda em cima: segue para a esquerda e a direita
+    {
+        int l = 0, r = 0;
+        [loop] for (; l < n; l++) if (E(p + int2(-l - 1, 0), t).g < 0.5) break;
+        [loop] for (; r < n; r++) if (E(p + int2(r + 1, 0), t).g < 0.5) break;
+        int xl = p.x - l, xr = p.x + r;
+        // degrau na ponta: borda vertical subindo (na linha de cima) = +0,5; descendo (nesta linha) = -0,5
+        float h1 = l < n ? Degrau(E(int2(xl, p.y - 1), t).r, E(int2(xl, p.y), t).r) : 0;
+        float h2 = r < n ? Degrau(E(int2(xr + 1, p.y - 1), t).r, E(int2(xr + 1, p.y), t).r) : 0;
+        if (h1 != 0 || h2 != 0)
+        {
+            float2 a = Area(l, l + r + 1, h1, h2);
+            w.r = a.y;   // linha abaixo da borda: este pixel puxa a cor do de cima
+            w.g = a.x;   // acima: o de cima puxa a cor deste
+        }
+    }
+    if (e.r > 0.5)   // borda a esquerda: segue para cima e para baixo
+    {
+        int u = 0, d = 0;
+        [loop] for (; u < n; u++) if (E(p + int2(0, -u - 1), t).r < 0.5) break;
+        [loop] for (; d < n; d++) if (E(p + int2(0, d + 1), t).r < 0.5) break;
+        int yt = p.y - u, yb = p.y + d;
+        float h1 = u < n ? Degrau(E(int2(p.x - 1, yt), t).g, E(int2(p.x, yt), t).g) : 0;
+        float h2 = d < n ? Degrau(E(int2(p.x - 1, yb + 1), t).g, E(int2(p.x, yb + 1), t).g) : 0;
+        if (h1 != 0 || h2 != 0)
+        {
+            float2 a = Area(u, u + d + 1, h1, h2);
+            w.b = a.y;
+            w.a = a.x;
+        }
+    }
+    return w;
+}
+#else
+float4 C(int2 p, int2 t) { return t0.Load(int3(clamp(p, 0, t - 1), 0)); }
+float4 W(int2 p, int2 t) { return (p.x >= t.x || p.y >= t.y) ? 0 : t1.Load(int3(p, 0)); }
+float4 ps(VSOut i) : SV_Target
+{
+    int2 t = Tam(), p = int2(i.pos.xy);
+    float4 c = C(p, t);
+    float4 w = W(p, t);
+    float cima = w.r, esq = w.b, baixo = W(p + int2(0, 1), t).g, dir = W(p + int2(1, 0), t).a;
+    float soma = cima + esq + baixo + dir;
+    if (soma <= 0) return c;
+    float k = soma > 1 ? 1 / soma : 1;
+    float3 cor = c.rgb * (1 - soma * k) + k * (cima * C(p + int2(0, -1), t).rgb + baixo * C(p + int2(0, 1), t).rgb +
+                                               esq * C(p + int2(-1, 0), t).rgb + dir * C(p + int2(1, 0), t).rgb);
+    return float4(cor, c.a);
 }
 #endif
 )";
@@ -576,10 +715,39 @@ float2 ps(VSOut i) : SV_Target
     float3 N = normalize(cross(dx, dy));
     if (N.z > 0) N = -N;   // virada para a camera
     float rpx = clamp(raio * tam.y / (2 * tanV) / z, 3 * e, 90 * e);
+    // normal larga (metade do raio): num personagem de perto cada triangulo tem a sua normal (o jogo as suaviza na
+    // luz, a profundidade nao), e o disco contava o triangulo vizinho como parede -> facetas escuras (21_dunea, bar).
+    // Medida mais longe, a normal segue a forma do corpo. Cada eixo so usa o passo largo se os 2 lados forem a mesma
+    // superficie: num plano 1/z e linear na tela, entao (z/esq + z/dir - 2) e 0; ate 15% passa (curva do braco), mais
+    // que isso e borda (cadeira na frente da parede). Perto da borda da tela o passo encolhe ate caber (fora da tela
+    // a profundidade e 0: antes isso derrubava a normal larga numa faixa embaixo da tela e as facetas voltavam ali, uma "linha" no peito dela)
+    {
+        float sw = max(st, round(rpx * 0.75));
+        float swx = min(sw, floor(min(px.x, tam.x - px.x) - 0.5)), swy = min(sw, floor(min(px.y, tam.y - px.y) - 0.5));
+        float3 wx = dx, wy = dy;
+        if (swx > st)
+        {
+            float wl = Z(px - float2(swx, 0)), wr = Z(px + float2(swx, 0));
+            if (abs(z / wr + z / wl - 2) < 0.15)
+                wx = (Pos(px + float2(swx, 0), wr) - Pos(px - float2(swx, 0), wl)) * (st / (2 * swx));
+        }
+        if (swy > st)
+        {
+            float wu = Z(px - float2(0, swy)), wd = Z(px + float2(0, swy));
+            if (abs(z / wd + z / wu - 2) < 0.15)
+                wy = (Pos(px + float2(0, swy), wd) - Pos(px - float2(0, swy), wu)) * (st / (2 * swy));
+        }
+        float3 Nw = normalize(cross(wx, wy));
+        if (Nw.z > 0) Nw = -Nw;
+        N = normalize(N + Nw * 4);
+    }
     // giro do disco em 4 posicoes que se repetem a cada 2x2 pixels do AO: a mistura dos 4 vizinhos no passo 2 junta
     // os 4 giros (4x mais pontos sem custo) e nao sobra pontilhado
     int2 g = int2(floor(i.pos.xy)) & 1;
     float giro = (g.x * 2 + g.y) * 1.5707963 + (g.x ^ g.y) * 0.39;
+    // de muito perto (closes das cenas, z < ~2,7 m) o alcance do escuro encolhe com a distancia: o braco na frente do
+    // corpo da mulher (21_dunea, bar) escurecia o peito/pescoco inteiro com o raio cheio de 1,2 m; longe nada muda
+    const float rm = min(raio, 0.4 * z + 0.1);
     float occ = 0;
     const int n = (int)amostras;
     [loop] for (int k = 0; k < n; k++)
@@ -590,12 +758,18 @@ float2 ps(VSOut i) : SV_Target
         if (any(sp < 0) || any(sp >= tam)) continue;
         float3 v = Pos(sp, Z(sp)) - P;
         float vv = dot(v, v);
-        occ += saturate(dot(v * rsqrt(vv + 1e-6), N) - 0.12) * saturate(1 - vv / (raio * raio));
+        // so conta o que esta mais de ~20 graus acima da superficie (seno 0,35), reescalado para um canto de verdade
+        // (90 graus) pesar como antes: com 0,12 (~7 graus) as dobras rasas entre os triangulos de um personagem de
+        // perto (10-25 graus; o jogo as esconde com normais suaves) escureciam cada triangulo (21_dunea, cena do bar)
+        // peso cai ao quadrado com a distancia: um braco longe do chao ainda deixava um halo escuro no chao em volta dele
+        float cai = saturate(1 - vv / (rm * rm));
+        occ += saturate((dot(v * rsqrt(vv + 1e-6), N) - 0.35) / 0.65) * cai * cai;
     }
     // forca (1,2 / 2 / 3 nos niveis) e quanto do escuro entra, nao um multiplicador do escuro: antes (1 - forca*occ*2,5)
     // um canto comum (occ ~0,3) ja ficava preto no nivel forte e objetos perto (balde, pedra) sumiam no escuro.
-    // Agora o escuro cresce ate occ/n = 0,25 e para; o nivel forte escurece no maximo 60% (leve 24%, medio 40%).
-    float bruto = saturate(occ / n * 4);
+    // Agora o escuro cresce ate occ/n = 0,17 e para; o nivel forte escurece no maximo 76% (leve 36%, medio 56%; ate
+    // 26/11 eram 24/40/60% com o teto em occ/n = 0,25: quem jogava achava o AO fraco demais nos 3 niveis).
+    float bruto = saturate(occ / n * 6);
     float ao = 1 - bruto * saturate(forca * 0.2);
     return float2(lerp(ao, 1, saturate((z - distFim * 0.6) / (distFim * 0.4))), z);
 }
@@ -605,20 +779,20 @@ float4 ps(VSOut i) : SV_Target
     float2 px = floor(i.pos.xy) + 0.5;
     float4 c = cena.SampleLevel(amostra, i.uv, 0);
     float z = Z(px);
-    // os 4 pixels do AO (meia resolucao) mais proximos, misturados como numa ampliacao suave, mas so os de
-    // distancia parecida com a deste pixel (nao vaza escuro de um objeto para o fundo)
-    // div 1: os 2x2 vizinhos com o mesmo peso (juntam os 4 giros do disco)
+    // desfoque de 6x6 pixels do AO (gaussiano, sigma 1,5) em volta deste pixel, so com os de distancia parecida com a
+    // deste (nao vaza escuro de um objeto para o fundo nem do fundo para o personagem). Antes eram so os 4 mais perto
+    // e o escuro ficava solido em cada triangulo de um personagem de perto, com degrau na borda (21_dunea, bar);
+    // agora a passagem de um triangulo para o outro e suave. Os 4 giros do disco (passo 1) se misturam por igual.
     float2 t = px / div - (div < 1.5 ? 1.0 : 0.5);
-    float2 base = floor(t), f = t - base;
+    float2 base = floor(t);
     float soma = 0, peso = 0;
-    [unroll] for (int k = 0; k < 4; k++)
+    const float tol = 0.03 * z + 0.01;
+    [unroll] for (int k = 0; k < 36; k++)
     {
-        float2 o = float2(k & 1, k >> 1);
-        float2 a = aoTex.Load(int3(int2(base + o), 0));
-        // os 4 pontos tem os 4 giros do disco (veja o passo 1): com o peso da ampliacao (0,56/0,19/0,19/0,06) um giro
-        // dominava cada pixel e sobrava um pontilhado em xadrez nas bordas dos objetos; com pesos iguais os giros se somam
-        float b = 0.25;
-        float w = b * saturate(1 - abs(a.y - z) / (0.06 * z + 0.02));
+        float2 q = base + float2(k % 6, k / 6) - 2;
+        float2 a = aoTex.Load(int3(int2(q), 0));
+        float2 d = q - t;
+        float w = exp(-dot(d, d) * (1.0 / (2 * 1.5 * 1.5))) * saturate(1 - abs(a.y - z) / tol);
         soma += a.x * w;
         peso += w;
     }
@@ -713,6 +887,34 @@ float4 ps(VSOut i) : SV_Target
                     d.RTVFormats[0] = n == 0 ? DXGI_FORMAT_R16G16_FLOAT : DXGI_FORMAT_R16G16B16A16_FLOAT;
                     if (psAo.empty() || FAILED(g_device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&g_aoPso[n]))))
                         Log("[render] oclusao de ambiente (passo %d) indisponivel", n + 1);
+                }
+            }
+            // SMAA: tabela de 2 texturas + 4 constantes (sem amostrador: os passes leem pixel a pixel)
+            {
+                D3D12_DESCRIPTOR_RANGE r2{ D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0 };
+                D3D12_ROOT_PARAMETER sp[2]{};
+                sp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                sp[0].DescriptorTable = { 1, &r2 };
+                sp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                sp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+                sp[1].Constants = { 0, 0, 4 };
+                sp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                D3D12_ROOT_SIGNATURE_DESC rs3{ 2, sp, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE };
+                ComPtr<ID3DBlob> b3, e3;
+                if (SUCCEEDED(D3D12SerializeRootSignature(&rs3, D3D_ROOT_SIGNATURE_VERSION_1, &b3, &e3)))
+                    g_device->CreateRootSignature(0, b3->GetBufferPointer(), b3->GetBufferSize(), IID_PPV_ARGS(&g_smaaRoot));
+                auto vsS = CompileShader("#define PASSO 1\n" + std::string(SMAA_HLSL), L"vs_6_0");
+                const DXGI_FORMAT fmt[3] = { DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT };
+                for (int n = 0; n < 3 && g_smaaRoot && !vsS.empty(); n++)
+                {
+                    auto psS = CompileShader("#define PASSO " + std::to_string(n + 1) + "\n" + SMAA_HLSL, L"ps_6_0");
+                    D3D12_GRAPHICS_PIPELINE_STATE_DESC d = pso;
+                    d.pRootSignature = g_smaaRoot.Get();
+                    d.VS = { vsS.data(), vsS.size() };
+                    d.PS = { psS.data(), psS.size() };
+                    d.RTVFormats[0] = fmt[n];
+                    if (psS.empty() || FAILED(g_device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&g_smaaPso[n]))))
+                        Log("[render] SMAA (passo %d) indisponivel", n + 1);
                 }
             }
             // copia com brilho: tabela da textura + 1 constante
@@ -905,7 +1107,27 @@ float4 ps(VSOut i) : SV_Target
             ComPtr<ID3D12Debug> dbg;
             if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) { dbg->EnableDebugLayer(); Log("[render] verificacao do DirectX ligada"); }
         }
-        if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g_device))))
+        // placa de video (placas_video.cpp): a escolhida no launcher, senao a de alto desempenho. Antes era a "padrao"
+        // do Windows, que em notebook com duas placas costuma ser a integrada (defeitos graficos e jogo lento).
+        {
+            const auto placas = PlacasDeVideo();
+            const int escolhida = PlacaEscolhida(placas, OpcoesAtuais().placaVideo);
+            for (size_t i = 0; i < placas.size(); i++)
+            {
+                char nome[128];
+                WideCharToMultiByte(CP_UTF8, 0, placas[i].nome.c_str(), -1, nome, sizeof(nome), nullptr, nullptr);
+                Log("[render] placa de video %zu: %s (%llu MB dedicados%s)%s", i, nome, (unsigned long long)placas[i].memoriaMB,
+                    placas[i].integrada ? ", integrada" : "", (int)i == escolhida ? " <- escolhida" : "");
+            }
+            if (escolhida >= 0)
+            {
+                ComPtr<IDXGIAdapter1> placa;
+                if (SUCCEEDED(factory->EnumAdapterByLuid(placas[escolhida].luid, IID_PPV_ARGS(&placa))) &&
+                    FAILED(D3D12CreateDevice(placa.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g_device))))
+                    Log("[render] a placa escolhida nao abriu o DirectX 12; usando a padrao do Windows");
+            }
+        }
+        if (!g_device && FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g_device))))
         {
             Log("[render] DirectX 12 indisponivel nesta placa de video");
             return false;
@@ -1102,6 +1324,34 @@ float4 ps(VSOut i) : SV_Target
         return g_list.Get();
     }
 
+    // Envio no meio do quadro (25/11): antes a lista do quadro inteiro so ia para a placa no Present; a placa ficava
+    // parada enquanto a CPU traduzia o quadro e a CPU depois esperava a placa (selva da 02_native: ~27 ms de CPU e
+    // ~26 ms de placa davam ~33 ms por quadro). xenos_draw chama isto a cada N desenhos: o que ja foi gravado e
+    // executado e a mesma lista e reaberta no mesmo alocador (os recursos do quadro so sao soltos pela cerca do Present,
+    // como antes). Nao envia com uma consulta de oclusao aberta (o inicio e o fim dela precisam estar na mesma lista).
+    bool EnviarParcial()
+    {
+        if (!g_frameOpen || !g_list || g_occOpen >= 0) return false;
+        if (HRESULT chr = g_list->Close(); FAILED(chr))
+        {
+            static int avisos = 0;
+            if (avisos++ < 5) Log("[render] lista de comandos recusada pelo DirectX no envio parcial (Close=%08X): parte do quadro descartada", (unsigned)chr);
+            diag::Note(diag::Crash, "lista de comandos recusada (quadro descartado em vez de derrubar a placa)", "FCRECOMP_D3DDEBUG=1 mostra qual chamada");
+        }
+        else
+        {
+            ID3D12CommandList* lists[] = { g_list.Get() };
+            g_queue->ExecuteCommandLists(1, lists);
+        }
+        if (FAILED(g_list->Reset(g_allocators[g_frame].Get(), nullptr)))
+        {
+            g_list.Reset();
+            g_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_allocators[g_frame].Get(), nullptr, IID_PPV_ARGS(&g_list));
+            Log("[render] lista de comandos recriada depois de um envio parcial recusado");
+        }
+        return true;
+    }
+
     Upload UploadAlloc(size_t size, size_t align)
     {
         FrameList();
@@ -1200,7 +1450,9 @@ float4 ps(VSOut i) : SV_Target
 
         // FSR da imagem final (srvEntrada = texture) para o retangulo (vx, vy, vw, vh) da imagem da janela (rtvJanela, ja
         // como alvo): RCAS da imagem do jogo para g_fsrTex (mesmo tamanho) e EASU de g_fsrTex para a janela (so uma passada no
-        // tamanho da janela). false = nao deu (vai a copia comum)
+        // tamanho da janela). false = nao deu (vai a copia comum). A nitidez fica antes da ampliacao de proposito: depois
+        // dela (ordem da AMD) a nitidez maxima reforcava o padrao que a ampliacao de 1,33x/1,67x deixa a cada 3-4 pixels e o
+        // fogo e a fumaca ficavam com uma grade (medido na fogueira da 01_beach).
         bool FsrAmpliar(ID3D12GraphicsCommandList* list, ID3D12Resource* texture, D3D12_GPU_DESCRIPTOR_HANDLE srvEntrada,
                         D3D12_CPU_DESCRIPTOR_HANDLE rtvJanela, float vx, float vy, float vw, float vh, float brilho)
         {
@@ -1458,7 +1710,7 @@ float4 ps(VSOut i) : SV_Target
         // ---- textos na tela (opcoes mostrarFps e avisoTeclas): o texto e desenhado pelo GDI numa imagem pequena so quando
         // muda (2 vezes por segundo no contador), enviado para a placa e misturado por cima da imagem final.
         struct Camada { ComPtr<ID3D12Resource> tex; UINT w = 0, h = 0; std::wstring texto; int alfa = -1, px = 0; };
-        Camada g_contador, g_aviso;
+        Camada g_contador, g_aviso, g_saveAviso;   // g_saveAviso: "Estado salvo" do save state (save_state.cpp)
 
         // prepara a imagem da camada (molde = texto mais largo possivel, para o tamanho nao mudar a cada troca do texto
         // e nao recriar a textura); alfa 0..1 (o aviso some aos poucos); fundo escuro de cantos arredondados
@@ -1590,11 +1842,18 @@ float4 ps(VSOut i) : SV_Target
             {
                 const float t = (float)(agora - inicio);
                 const float alfa = t < 300 ? t / 300 : t > 11000 ? (12000 - t) / 1000 : 1.0f;
-                static const std::wstring texto = std::wstring(TR(L"F1  Controles      •      F2  Opções de vídeo      •      F3  Soltar/prender o mouse",
-                                                                  L"F1  Controls      •      F2  Video options      •      F3  Release/capture the mouse"))
+                static const std::wstring texto = std::wstring(TR(L"F1  Controles      •      F2  Opções      •      F3  Soltar/prender o mouse",
+                                                                  L"F1  Controls      •      F2  Options      •      F3  Release/capture the mouse"))
                     + L"\n" + TR(L"(este aviso pode ser desligado no launcher, em OUTROS)", L"(this hint can be turned off in the launcher, under OTHER)");
                 if (CamadaPreparar(list, g_aviso, texto, texto, std::max(12, (int)(18 * esc + 0.5f)), alfa, RGB(250, 246, 236)))
                     CamadaDesenhar(list, rtv, g_aviso, vx + (vw - g_aviso.w) / 2, vy + 48 * esc);
+            }
+            // save state (save_state.cpp): aviso curto no alto da tela depois de salvar/carregar
+            {
+                float alfa = 1.0f;
+                const std::wstring t = SaveStateAviso(agora, alfa);
+                if (!t.empty() && CamadaPreparar(list, g_saveAviso, t, t, std::max(12, (int)(20 * esc + 0.5f)), alfa, RGB(236, 196, 92)))
+                    CamadaDesenhar(list, rtv, g_saveAviso, vx + (vw - g_saveAviso.w) / 2, vy + 120 * esc);
             }
         }
     }
@@ -1818,6 +2077,35 @@ float4 ps(VSOut i) : SV_Target
         ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get(), g_samplerHeap.Get() };
         list->SetDescriptorHeaps(2, heaps);
         list->SetGraphicsRootDescriptorTable(0, srv.gpu);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        list->DrawInstanced(3, 1, 0, 0);
+        return true;
+    }
+
+    bool SmaaPasso(ID3D12GraphicsCommandList* list, int passo, ID3D12Resource* a, ID3D12Resource* b, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+                   UINT w, UINT h, int nivel)
+    {
+        if (passo < 1 || passo > 3 || !g_smaaPso[passo - 1]) return false;
+        auto srv = AllocSrv(2);
+        g_device->CreateShaderResourceView(a, nullptr, srv.cpu);
+        D3D12_CPU_DESCRIPTOR_HANDLE h2 = srv.cpu;
+        h2.ptr += srv.increment;
+        g_device->CreateShaderResourceView(b ? b : a, nullptr, h2);
+        list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        D3D12_VIEWPORT vp{ 0, 0, (float)w, (float)h, 0, 1 };
+        D3D12_RECT sc{ 0, 0, (LONG)w, (LONG)h };
+        list->RSSetViewports(1, &vp);
+        list->RSSetScissorRects(1, &sc);
+        list->SetPipelineState(g_smaaPso[passo - 1].Get());
+        list->SetGraphicsRootSignature(g_smaaRoot.Get());
+        ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get(), g_samplerHeap.Get() };
+        list->SetDescriptorHeaps(2, heaps);
+        list->SetGraphicsRootDescriptorTable(0, srv.gpu);
+        // nivel 1-4: baixo, medio, alto, ultra (limiar da borda e pixels seguidos para cada lado)
+        static const float limiar[4] = { 0.15f, 0.1f, 0.075f, 0.05f }, passos[4] = { 8, 16, 24, 32 };
+        const int n = std::clamp(nivel, 1, 4) - 1;
+        const float k[4] = { limiar[n], passos[n], 0, 0 };
+        list->SetGraphicsRoot32BitConstants(1, 4, k, 0);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         list->DrawInstanced(3, 1, 0, 0);
         return true;

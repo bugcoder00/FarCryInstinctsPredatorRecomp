@@ -6,6 +6,7 @@
 // oclusao de ambiente, FPS e sincronia vertical sao lidos a cada quadro; distancia e detalhe de longe pelo fio de
 // graficos_extra.cpp (250 ms).
 // Roda na sua propria thread com o seu laco de mensagens, como a janela dos controles (controles_janela.cpp).
+// O botao AUDIO abre a janela de audio (dispositivos e volumes; audio_janela.cpp).
 // O botao TRAPACAS abre a janela das trapacas (as mesmas da aba TRAPACAS do launcher, trapacas.cpp): cada caixa vale
 // na hora (trapacas.cpp le as opcoes a cada quadro) e vai para o opcoes.ini.
 #include "idioma.h"
@@ -29,8 +30,12 @@ namespace
 {
     enum : int
     {
-        ID_ESCALA = 100, ID_FSR, ID_NITIDEZ, ID_AA, ID_MSAA, ID_SOMBRAS, ID_FILTRO, ID_DISTANCIA, ID_DETALHE, ID_AO, ID_FPS,
+        ID_ESCALA = 100, ID_FSR, ID_NITIDEZ, ID_AA, ID_MSAA, ID_SMAA, ID_SOMBRAS, ID_FILTRO, ID_DISTANCIA, ID_DETALHE, ID_AO, ID_FPS,
         ID_VSYNC = 120, ID_DICA = 121, ID_FECHAR = 122, ID_TRAPACAS = 123, ID_HDR = 124, ID_FALSO = 125, ID_MOSTRARFPS = 126,
+        ID_FOV = 127, ID_FOV_VALOR = 128,   // campo de visao: barra na linha depois das listas (fov.cpp le a cada quadro)
+        ID_MIRA = 129, ID_MIRA_VALOR = 130,   // tamanho da mira: barra na linha seguinte (mira.cpp le a cada atualizacao do HUD)
+        ID_AUDIO = 131,                       // botao AUDIO: abre a janela de audio (audio_janela.cpp)
+        ID_SAVESTATE = 132,                   // botao SAVE STATE: abre a janela do save state (abaixo; save_state.cpp)
     };
     constexpr int N_LISTAS = ID_FPS - ID_ESCALA + 1;
     constexpr int LARGURA = 660, Y0 = 44, PASSO = 32;
@@ -48,12 +53,12 @@ namespace
 
     HWND Criar(HWND pai, const wchar_t* classe, const wchar_t* texto, DWORD estilo, int x, int y, int w, int h, int id)
     {
-        if (id == ID_VSYNC || id == ID_HDR || id == ID_FALSO || id == ID_MOSTRARFPS || id == ID_FECHAR || id == ID_TRAPACAS) estilo |= BS_OWNERDRAW;
+        if (id == ID_VSYNC || id == ID_HDR || id == ID_FALSO || id == ID_MOSTRARFPS || id == ID_FECHAR || id == ID_TRAPACAS || id == ID_AUDIO || id == ID_SAVESTATE) estilo |= BS_OWNERDRAW;
         HWND c = CreateWindowExW(0, classe, texto, WS_CHILD | WS_VISIBLE | estilo, S(x), S(y), S(w), S(h), pai,
                                  (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
         SendMessageW(c, WM_SETFONT, (WPARAM)g_fonte, TRUE);
         if (!wcscmp(classe, WC_COMBOBOXW)) tema::ListaEscura(c);
-        if (id == ID_FECHAR || id == ID_TRAPACAS) tema::AcompanharMouse(c);
+        if (id == ID_FECHAR || id == ID_TRAPACAS || id == ID_AUDIO || id == ID_SAVESTATE) tema::AcompanharMouse(c);
         return c;
     }
 
@@ -92,6 +97,7 @@ namespace
         case ID_NITIDEZ: o.fsrNitidez = v; break;
         case ID_AA: o.antisserrilhado = v; xdraw::RecarregarSuavizacao(); break;
         case ID_MSAA: o.msaa = v; xdraw::PedirNovaEscala(); break;   // refaz as superficies da tela no fim do quadro
+        case ID_SMAA: o.smaa = v; break;   // xenos_draw le a cada quadro
         case ID_SOMBRAS: o.sombras = v; xdraw::PedirNovaEscala(); break;
         case ID_FILTRO: o.filtroTextura = v; break;
         case ID_DISTANCIA: o.distancia = v - 2; break;   // listas com os niveis menores no topo (como no launcher)
@@ -102,6 +108,21 @@ namespace
         }
         Log("[video] janela F2: opcao %d = %d", id - ID_ESCALA, v);
         Gravar();
+    }
+
+    void TextoFov(HWND j, int extra)
+    {
+        wchar_t t[32];
+        if (extra > 0) swprintf(t, 32, L"%d° (+%d)", 95 + extra, extra);
+        else swprintf(t, 32, L"95°");
+        SetDlgItemTextW(j, ID_FOV_VALOR, t);
+    }
+
+    void TextoMira(HWND j, int pct)
+    {
+        wchar_t t[32];
+        swprintf(t, 32, L"%d%%", pct);
+        SetDlgItemTextW(j, ID_MIRA_VALOR, t);
     }
 
     void Montar(HWND j)
@@ -124,6 +145,9 @@ namespace
               std::clamp(o.antisserrilhado, 0, 3));
         Lista(j, ID_MSAA, TR(L"Antisserrilhado MSAA:", L"MSAA anti-aliasing:"),
               { TR(L"Desligado", L"Off"), L"2x", L"4x", TR(L"8x (mais pesado)", L"8x (heavier)") }, std::clamp(o.msaa, 0, 3));
+        Lista(j, ID_SMAA, TR(L"Antisserrilhado SMAA:", L"SMAA anti-aliasing:"),
+              { TR(L"Desligado", L"Off"), TR(L"Baixo", L"Low"), TR(L"Médio", L"Medium"), TR(L"Alto", L"High"), TR(L"Ultra (mais pesado)", L"Ultra (heavier)") },
+              std::clamp(o.smaa, 0, 4));
         Lista(j, ID_SOMBRAS, TR(L"Sombras:", L"Shadows:"),
               { L"Normal", TR(L"Alta (bordas mais definidas)", L"High (sharper edges)"), TR(L"Muito alta (mais pesada)", L"Very high (heavier)") },
               std::clamp(o.sombras, 0, 2));
@@ -145,7 +169,31 @@ namespace
         Lista(j, ID_FPS, TR(L"Quadros por segundo:", L"Frames per second:"),
               { TR(L"30 FPS (como o jogo original)", L"30 FPS (like the original game)"), TR(L"60 FPS (mais fluido, pesa o dobro)", L"60 FPS (smoother, twice the load)"),
                 TR(L"Sem limite (experimental)", L"Unlocked (experimental)") }, std::clamp(o.fps, 0, 2));
-        const int y = Y0 + N_LISTAS * PASSO;
+        {
+            const int yf = Y0 + N_LISTAS * PASSO;
+            Criar(j, L"STATIC", TR(L"Campo de visão (FOV):", L"Field of view (FOV):"), 0, 16, yf + 4, 200, 20, -1);
+            HWND b = Criar(j, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 212, yf - 3, LARGURA - 236 - 74, 32, ID_FOV);
+            SendMessageW(b, TBM_SETRANGE, FALSE, MAKELPARAM(0, FOV_MAX));
+            SendMessageW(b, TBM_SETLINESIZE, 0, 1);
+            SendMessageW(b, TBM_SETPAGESIZE, 0, 5);
+            SendMessageW(b, TBM_SETPOS, TRUE, std::clamp(o.fov, 0, FOV_MAX));
+            tema::BarraEscura(b);
+            Criar(j, L"STATIC", L"", SS_LEFT, LARGURA - 16 - 76, yf + 4, 76, 20, ID_FOV_VALOR);
+            TextoFov(j, std::clamp(o.fov, 0, FOV_MAX));
+        }
+        {
+            const int yf = Y0 + (N_LISTAS + 1) * PASSO;
+            Criar(j, L"STATIC", TR(L"Tamanho da mira:", L"Crosshair size:"), 0, 16, yf + 4, 200, 20, -1);
+            HWND b = Criar(j, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 212, yf - 3, LARGURA - 236 - 74, 32, ID_MIRA);
+            SendMessageW(b, TBM_SETRANGE, FALSE, MAKELPARAM(MIRA_MIN, MIRA_MAX));
+            SendMessageW(b, TBM_SETLINESIZE, 0, 5);
+            SendMessageW(b, TBM_SETPAGESIZE, 0, 25);
+            SendMessageW(b, TBM_SETPOS, TRUE, std::clamp(o.mira, MIRA_MIN, MIRA_MAX));
+            tema::BarraEscura(b);
+            Criar(j, L"STATIC", L"", SS_LEFT, LARGURA - 16 - 76, yf + 4, 76, 20, ID_MIRA_VALOR);
+            TextoMira(j, std::clamp(o.mira, MIRA_MIN, MIRA_MAX));
+        }
+        const int y = Y0 + (N_LISTAS + 2) * PASSO;
         g_vsync = o.vsync;
         Criar(j, L"BUTTON", TR(L"Sincronia vertical (evita \"rasgos\" na imagem, pode baixar o FPS)", L"Vertical sync (avoids image \"tearing\", may lower the FPS)"),
               WS_TABSTOP, 16, y + 4, LARGURA - 32, 24, ID_VSYNC);
@@ -162,7 +210,11 @@ namespace
                                L" tela cheia (Alt+Enter) ficam no launcher.",
                                L"Changes apply right away and are saved in opcoes.ini. Window size, aspect ratio and full screen"
                                L" (Alt+Enter) stay in the launcher."), SS_LEFT, 16, y + 124, LARGURA - 32, 40, ID_DICA);
-        Criar(j, L"BUTTON", TR(L"TRAPAÇAS", L"CHEATS"), WS_TABSTOP, 16, y + 176, 160, 36, ID_TRAPACAS);
+        Criar(j, L"BUTTON", TR(L"TRAPAÇAS", L"CHEATS"), WS_TABSTOP, 16, y + 176, 150, 36, ID_TRAPACAS);
+        Criar(j, L"BUTTON", TR(L"ÁUDIO", L"AUDIO"), WS_TABSTOP, 16 + 150 + 10, y + 176, 150, 36, ID_AUDIO);
+#ifndef PREDATOR_EDITOR   // save state so no jogo (save_state.cpp)
+        Criar(j, L"BUTTON", L"SAVE STATE", WS_TABSTOP, 16 + 2 * (150 + 10), y + 176, 150, 36, ID_SAVESTATE);
+#endif
         Criar(j, L"BUTTON", TR(L"FECHAR", L"CLOSE"), WS_TABSTOP, LARGURA - 16 - 140, y + 176, 140, 36, ID_FECHAR);
         Habilitar(j);
     }
@@ -205,6 +257,8 @@ namespace
                 return 0;
             }
             if (id == ID_TRAPACAS && (HIWORD(wp) == BN_CLICKED || HIWORD(wp) == BN_DOUBLECLICKED)) { TrapacasAbrirJanela(); return 0; }
+            if (id == ID_AUDIO && (HIWORD(wp) == BN_CLICKED || HIWORD(wp) == BN_DOUBLECLICKED)) { AudioAbrirJanela(); return 0; }
+            if (id == ID_SAVESTATE && (HIWORD(wp) == BN_CLICKED || HIWORD(wp) == BN_DOUBLECLICKED)) { SaveStateAbrirJanela(); return 0; }
             if (id == ID_FECHAR || id == IDCANCEL || id == IDOK) { DestroyWindow(j); return 0; }
             break;
         }
@@ -224,6 +278,7 @@ namespace
             return TRUE;
         }
         case WM_LBUTTONDOWN: SetFocus(j); return 0;
+        case WM_CTLCOLORBTN: return (LRESULT)tema::PincelFundo();   // fundo dos botoes desenhados aqui (era branco ao voltar de fora da tela)
         case WM_ERASEBKGND: return 1;
         case WM_PAINT:
         {
@@ -241,6 +296,25 @@ namespace
             EndPaint(j, &ps);
             return 0;
         }
+        case WM_HSCROLL:   // barra do campo de visao: vale na hora; grava ao soltar
+            if ((HWND)lp == GetDlgItem(j, ID_FOV))
+            {
+                const int v = std::clamp((int)SendMessageW((HWND)lp, TBM_GETPOS, 0, 0), 0, FOV_MAX);
+                if (v != OpcoesAtuais().fov) { OpcoesAtuais().fov = v; TextoFov(j, v); }
+                if (LOWORD(wp) == TB_ENDTRACK) { Log("[video] janela F2: campo de visao = +%d", v); Gravar(); }
+                return 0;
+            }
+            if ((HWND)lp == GetDlgItem(j, ID_MIRA))   // tamanho da mira: vale na proxima atualizacao do HUD
+            {
+                const int v = std::clamp((int)SendMessageW((HWND)lp, TBM_GETPOS, 0, 0), MIRA_MIN, MIRA_MAX);
+                if (v != OpcoesAtuais().mira) { OpcoesAtuais().mira = v; TextoMira(j, v); }
+                if (LOWORD(wp) == TB_ENDTRACK) { Log("[video] janela F2: tamanho da mira = %d%%", v); Gravar(); }
+                return 0;
+            }
+            break;
+        case WM_NOTIFY:
+            if (auto* n = (const NMHDR*)lp; (n->idFrom == ID_FOV || n->idFrom == ID_MIRA) && n->code == NM_CUSTOMDRAW) return tema::DesenharBarra(n);
+            break;
         case WM_CLOSE: DestroyWindow(j); return 0;
         case WM_DESTROY:
             g_janela = nullptr;
@@ -253,7 +327,7 @@ namespace
 
     void Rodar()
     {
-        INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES };
+        INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };   // BAR: a barra do campo de visao
         InitCommonControlsEx(&icc);
         HDC dc = GetDC(nullptr);
         g_escala = GetDeviceCaps(dc, LOGPIXELSY) / 96.0f;
@@ -273,10 +347,10 @@ namespace
             registrada = true;
         }
         // tamanho da area de dentro: as 10 listas, a caixa da sincronia, a dica e o botao
-        RECT area{ 0, 0, S(LARGURA), S(Y0 + N_LISTAS * PASSO + 176 + 36 + 16) };
+        RECT area{ 0, 0, S(LARGURA), S(Y0 + (N_LISTAS + 2) * PASSO + 176 + 36 + 16) };   // + as linhas do campo de visao e da mira
         const DWORD estilo = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
         AdjustWindowRect(&area, estilo, FALSE);
-        HWND j = CreateWindowExW(WS_EX_TOPMOST, L"PredatorVideo", TR(L"Opções de vídeo - Far Cry Instincts Predator", L"Video options - Far Cry Instincts Predator"),
+        HWND j = CreateWindowExW(WS_EX_TOPMOST, L"PredatorVideo", TR(L"Opções - Far Cry Instincts Predator", L"Options - Far Cry Instincts Predator"),
                                  estilo, CW_USEDEFAULT, CW_USEDEFAULT, area.right - area.left, area.bottom - area.top,
                                  nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
         if (!j) { Log("[video] a janela de opcoes de video nao abriu (erro %lu)", GetLastError()); return; }
@@ -312,8 +386,8 @@ namespace
 {
     namespace trap
     {
-        enum : int { ID_CAIXA = 200, ID_DESC = 210, ID_AVISO = 220, ID_FECHAR_T = 221 };   // 200..205 caixas, 210..215 descricoes
-        constexpr int LARG = 780, Y0T = 44, PASSO_T = 66;
+        enum : int { ID_CAIXA = 200, ID_DESC = 210, ID_AVISO = 220, ID_FECHAR_T = 221, ID_PERFIL_T = 222 };   // 200..205 caixas, 210..215 descricoes
+        constexpr int LARG = 780, Y0T = 92, PASSO_T = 66;
         std::atomic<HWND> g_janelaT{ nullptr };
         bool g_marca[6] = {};
 
@@ -343,13 +417,22 @@ namespace
                 { TR(L"Adrenalina infinita (código Bloodlust)", L"Infinite adrenaline (code Bloodlust)"),
                   TR(L"A barra de adrenalina fica sempre cheia para usar os poderes ferais.", L"The adrenaline bar is always full for the feral abilities.") },
                 { TR(L"Todos os poderes ferais (código FeralAttack)", L"All feral abilities (code FeralAttack)"),
-                  TR(L"Libera os poderes ferais (visão, faro, velocidade, ataque) desde o começo.", L"Unlocks the feral abilities (vision, smell, speed, attack) from the start.") },
+                  TR(L"Libera todos os poderes ferais (visões, faro, atletismo, regeneração, ataque) desde o começo.", L"Unlocks all feral abilities (visions, smell, athletics, regeneration, attack) from the start.") },
                 { TR(L"Todas as fases (código GiveMeItAll)", L"All levels (code GiveMeItAll)"),
-                  TR(L"Libera todas as fases do modo história no perfil. Fica gravado quando o jogo salvar o perfil.", L"Unlocks every story level in the profile. It stays saved once the game saves the profile.") },
+                  TR(L"Libera todas as fases do modo história. Fica gravado no perfil: depois de ligada, não dá para desligar.", L"Unlocks every story level. It is stored in the profile: once on, it cannot be turned off.") },
                 { TR(L"Todos os mapas (código GiveMeTheMaps)", L"All maps (code GiveMeTheMaps)"),
-                  TR(L"Libera todos os mapas no perfil. Também fica gravado quando o jogo salvar o perfil.", L"Unlocks every map in the profile. It also stays saved once the game saves the profile.") },
+                  TR(L"Libera todos os mapas. Fica gravado no perfil: depois de ligada, não dá para desligar.", L"Unlocks every map. It is stored in the profile: once on, it cannot be turned off.") },
                 { TR(L"Invencível (novo, não existe no jogo original)", L"Invincible (new, not in the original game)"),
                   TR(L"A vida volta ao máximo a cada quadro, como o código ImJackCarver o tempo todo.", L"Health goes back to full every frame, like the code ImJackCarver all the time.") } };
+            // de qual perfil: as trapacas valem para todos, mas fases e mapas ficam gravados no perfil com que se joga
+            {
+                const std::string& p = OpcoesAtuais().perfil;
+                const std::wstring nome = p.empty() ? std::wstring(L"User 1") : std::wstring(p.begin(), p.end());
+                const std::wstring texto = std::wstring(TR(L"Perfil:", L"Profile:")) + L" " + nome + L"\n" +
+                    TR(L"As trapaças valem para todos os perfis. Fases e mapas ficam gravados neste perfil.",
+                       L"Cheats apply to every profile. Levels and maps are stored in this profile.");
+                CriarT(j, L"STATIC", texto.c_str(), SS_LEFT | SS_NOPREFIX, 16, 42, LARG - 32, 40, ID_PERFIL_T);
+            }
             for (int i = 0; i < 6; i++)
             {
                 g_marca[i] = *Opcao(i);
@@ -357,10 +440,10 @@ namespace
                 CriarT(j, L"STATIC", t[i].desc, SS_LEFT, 48, Y0T + i * PASSO_T + 26, LARG - 64, 38, ID_DESC + i);
             }
             const int y = Y0T + 6 * PASSO_T;
-            CriarT(j, L"STATIC", TR(L"As trapaças valem só no modo história (o jogo não deixa no multijogador). Um save feito com"
-                                    L" munição, adrenalina ou poderes ferais ligados guarda essas trapaças, como no jogo original.",
-                                    L"Cheats work only in the story mode (the game does not allow them in multiplayer). A save made with"
-                                    L" ammo, adrenaline or feral abilities on keeps those cheats, like in the original game."),
+            CriarT(j, L"STATIC", TR(L"As trapaças valem só no modo história (o jogo não deixa no multijogador). Munição, adrenalina, poderes"
+                                    L" ferais e invencível não ficam gravados no save: desligando aqui, desligam de verdade.",
+                                    L"Cheats work only in the story mode (the game does not allow them in multiplayer). Ammo, adrenaline,"
+                                    L" feral abilities and invincible are not stored in the save: turning them off here really turns them off."),
                    SS_LEFT, 16, y + 4, LARG - 32, 52, ID_AVISO);
             CriarT(j, L"BUTTON", TR(L"FECHAR", L"CLOSE"), WS_TABSTOP, LARG - 16 - 140, y + 64, 140, 36, ID_FECHAR_T);
         }
@@ -376,6 +459,15 @@ namespace
                 if (id >= ID_CAIXA && id < ID_CAIXA + 6 && (HIWORD(wp) == BN_CLICKED || HIWORD(wp) == BN_DOUBLECLICKED))
                 {
                     const int i = id - ID_CAIXA;
+                    // fases e mapas ficam gravados no perfil: ligar pede confirmacao e depois nao desliga mais
+                    if (i == 3 || i == 4)
+                    {
+                        wchar_t nome[128] = {}; GetWindowTextW((HWND)lp, nome, 128);
+                        if (g_marca[i]) { MessageBoxW(j, TR(L"Esta trapaça já fica gravada no perfil e não dá para desligar.", L"This cheat is stored in the profile and cannot be turned off."), nome, MB_ICONINFORMATION); return 0; }
+                        if (MessageBoxW(j, TR(L"Esta trapaça fica gravada no perfil quando o jogo salvar e não dá para desligar depois. Ligar mesmo assim?",
+                                           L"This cheat is stored in the profile when the game saves and cannot be turned off later. Turn it on anyway?"), nome,
+                                        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
+                    }
                     g_marca[i] = !g_marca[i];
                     *Opcao(i) = g_marca[i];
                     InvalidateRect((HWND)lp, nullptr, FALSE);
@@ -389,6 +481,8 @@ namespace
             case WM_CTLCOLORSTATIC:
             {
                 const int id = GetDlgCtrlID((HWND)lp);
+                // destaque: o aviso e as que ficam gravadas no perfil (fases, mapas)
+                if (id == ID_AVISO || id == ID_DESC + 3 || id == ID_DESC + 4) return tema::CorTexto((HDC)wp, tema::AMBAR);
                 return tema::CorTexto((HDC)wp, id >= ID_DESC && id < ID_DESC + 6 ? tema::TEXTO_FRACO : tema::TEXTO);
             }
             case WM_DRAWITEM:
@@ -399,6 +493,7 @@ namespace
                 return TRUE;
             }
             case WM_LBUTTONDOWN: SetFocus(j); return 0;
+            case WM_CTLCOLORBTN: return (LRESULT)tema::PincelFundo();   // fundo dos botoes desenhados aqui (era branco ao voltar de fora da tela)
             case WM_ERASEBKGND: return 1;
             case WM_PAINT:
             {
@@ -472,4 +567,244 @@ void TrapacasAbrirJanela()
     std::lock_guard lock(g_abrir);
     if (HWND j = trap::g_janelaT) { ShowWindow(j, SW_RESTORE); SetForegroundWindow(j); return; }
     std::thread(trap::Rodar).detach();
+}
+
+// ------------------------------------------------------------------ janela do save state (botao SAVE STATE da janela F2)
+// As mesmas opcoes da aba SAVE STATE do launcher (teclas ligadas, tecla de salvar, tecla de carregar): cada mudanca vale
+// na hora e vai para o opcoes.ini; SALVAR AGORA / CARREGAR AGORA pedem o mesmo que as teclas (save_state.cpp).
+namespace
+{
+    namespace sst
+    {
+        enum : int { ID_LIGADO = 300, ID_SALVAR_T = 301, ID_CARREGAR_T = 302, ID_SALVAR_JA = 303, ID_CARREGAR_JA = 304, ID_DICA_S = 305, ID_FECHAR_S = 306,
+                     ID_LISTA = 307, ID_APAGAR = 308, ID_TITULO_LISTA = 309, ID_RELOGIO = 310 };
+        constexpr int LARG = 640, Y_LISTA = 282, ALT_LISTA = 170, Y_BOTOES = Y_LISTA + ALT_LISTA + 12;
+        constexpr unsigned SEM_ESTADO = ~0u;   // item "nenhum estado" da lista vazia
+        std::atomic<HWND> g_janelaS{ nullptr };
+        bool g_ligado = true;
+        unsigned g_versaoVista = ~0u;
+
+        // enche a lista com os estados guardados (save_state.cpp), mantendo o escolhido
+        void EncherLista(HWND j)
+        {
+            HWND lb = GetDlgItem(j, ID_LISTA);
+            const int sel = (int)SendMessageW(lb, LB_GETCURSEL, 0, 0);
+            const unsigned idSel = sel >= 0 ? (unsigned)SendMessageW(lb, LB_GETITEMDATA, sel, 0) : SEM_ESTADO;
+            g_versaoVista = SaveStateVersao();
+            const auto lista = SaveStateLista();
+            SendMessageW(lb, LB_RESETCONTENT, 0, 0);
+            int novoSel = lista.empty() ? -1 : 0;
+            for (size_t i = 0; i < lista.size(); i++)
+            {
+                const int k = (int)SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)lista[i].second.c_str());
+                SendMessageW(lb, LB_SETITEMDATA, k, (LPARAM)lista[i].first);
+                if (lista[i].first == idSel) novoSel = k;
+            }
+            if (lista.empty())
+            {
+                const int k = (int)SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)TR(L"(nenhum estado salvo nesta fase ainda: salve com a tecla ou SALVAR AGORA)",
+                                                                                L"(no state saved in this level yet: save with the key or SAVE NOW)"));
+                SendMessageW(lb, LB_SETITEMDATA, k, (LPARAM)SEM_ESTADO);
+            }
+            SendMessageW(lb, LB_SETCURSEL, novoSel, 0);
+            EnableWindow(GetDlgItem(j, ID_CARREGAR_JA), !lista.empty());
+            EnableWindow(GetDlgItem(j, ID_APAGAR), !lista.empty());
+        }
+
+        unsigned Escolhido(HWND j)
+        {
+            HWND lb = GetDlgItem(j, ID_LISTA);
+            const int sel = (int)SendMessageW(lb, LB_GETCURSEL, 0, 0);
+            return sel >= 0 ? (unsigned)SendMessageW(lb, LB_GETITEMDATA, sel, 0) : SEM_ESTADO;
+        }
+
+        HWND CriarS(HWND pai, const wchar_t* classe, const wchar_t* texto, DWORD estilo, int x, int y, int w, int h, int id)
+        {
+            if (!wcscmp(classe, L"BUTTON")) estilo |= BS_OWNERDRAW;
+            HWND c = CreateWindowExW(0, classe, texto, WS_CHILD | WS_VISIBLE | estilo, S(x), S(y), S(w), S(h), pai,
+                                     (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(c, WM_SETFONT, (WPARAM)g_fonte, TRUE);
+            if (!wcscmp(classe, WC_COMBOBOXW)) tema::ListaEscura(c);
+            if (id == ID_FECHAR_S || id == ID_SALVAR_JA || id == ID_CARREGAR_JA || id == ID_APAGAR) tema::AcompanharMouse(c);
+            return c;
+        }
+
+        void ListaTecla(HWND j, int id, int y, const wchar_t* rotulo, int vk)
+        {
+            CriarS(j, L"STATIC", rotulo, 0, 16, y + 4, 200, 20, -1);
+            HWND cb = CriarS(j, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 220, y, 160, 240, id);
+            for (int i = 0; i < SAVESTATE_N_TECLAS; i++) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)SaveStateNomeTecla(i));
+            SendMessageW(cb, CB_SETCURSEL, std::max(0, SaveStateIndice(vk)), 0);
+        }
+
+        void Montar(HWND j)
+        {
+            const Opcoes& o = OpcoesAtuais();
+            g_ligado = o.saveState;
+            CriarS(j, L"BUTTON", TR(L"Teclas de salvar e carregar o estado ligadas", L"Save and load state keys on"), WS_TABSTOP, 16, 44, LARG - 32, 24, ID_LIGADO);
+            ListaTecla(j, ID_SALVAR_T, 80, TR(L"Salvar o estado:", L"Save state:"), o.saveStateSalvar);
+            ListaTecla(j, ID_CARREGAR_T, 116, TR(L"Carregar o estado:", L"Load state:"), o.saveStateCarregar);
+            CriarS(j, L"STATIC", TR(L"Salva o ponto exato em que você está na fase (posição, vida, munição, inimigos) e volta a ele quando quiser."
+                                    L" A tecla de carregar volta ao mais novo; na lista dá para escolher outro (até 10 por fase). Os estados ficam"
+                                    L" guardados no perfil, por fase, e continuam depois de voltar ao menu ou fechar o jogo (o seu jogo salvo não"
+                                    L" muda). Não funciona no multijogador, nem para salvar durante uma cena.",
+                                    L"Saves the exact point where you are in the level (position, health, ammo, enemies) and goes back to it whenever"
+                                    L" you want. The load key goes back to the newest; in the list you can pick another (up to 10 per level). States"
+                                    L" are kept in the profile, per level, and stay after going back to the menu or closing the game (your saved"
+                                    L" game does not change). It does not work in multiplayer, nor for saving during a cutscene."),
+                   SS_LEFT, 16, 156, LARG - 32, 96, ID_DICA_S);
+            CriarS(j, L"STATIC", TR(L"Estados salvos (o mais novo em cima; clique duplo carrega):", L"Saved states (newest on top; double-click loads):"),
+                   0, 16, Y_LISTA - 24, LARG - 32, 20, ID_TITULO_LISTA);
+            CriarS(j, L"LISTBOX", L"", LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_BORDER | WS_TABSTOP, 16, Y_LISTA, LARG - 32, ALT_LISTA, ID_LISTA);
+            CriarS(j, L"BUTTON", TR(L"SALVAR AGORA", L"SAVE NOW"), WS_TABSTOP, 16, Y_BOTOES, 140, 36, ID_SALVAR_JA);
+            CriarS(j, L"BUTTON", TR(L"CARREGAR ESCOLHIDO", L"LOAD SELECTED"), WS_TABSTOP, 166, Y_BOTOES, 200, 36, ID_CARREGAR_JA);
+            CriarS(j, L"BUTTON", TR(L"APAGAR", L"DELETE"), WS_TABSTOP, 376, Y_BOTOES, 110, 36, ID_APAGAR);
+            CriarS(j, L"BUTTON", TR(L"FECHAR", L"CLOSE"), WS_TABSTOP, LARG - 16 - 120, Y_BOTOES, 120, 36, ID_FECHAR_S);
+            EncherLista(j);
+            SetTimer(j, ID_RELOGIO, 300, nullptr);   // a lista muda pelo jogo (tecla de salvar)
+        }
+
+        // tecla escolhida numa lista; se for a mesma da outra, a outra fica com a que esta tinha (nunca as duas iguais)
+        void MudouTecla(HWND j, int id)
+        {
+            Opcoes& o = OpcoesAtuais();
+            const int vk = SAVESTATE_TECLAS[std::clamp((int)SendDlgItemMessageW(j, id, CB_GETCURSEL, 0, 0), 0, SAVESTATE_N_TECLAS - 1)];
+            int& esta = id == ID_SALVAR_T ? o.saveStateSalvar : o.saveStateCarregar;
+            int& outra = id == ID_SALVAR_T ? o.saveStateCarregar : o.saveStateSalvar;
+            if (vk == outra)
+            {
+                outra = esta;
+                SendDlgItemMessageW(j, id == ID_SALVAR_T ? ID_CARREGAR_T : ID_SALVAR_T, CB_SETCURSEL, std::max(0, SaveStateIndice(outra)), 0);
+            }
+            esta = vk;
+            Log("[video] janela do save state: salvar = %d, carregar = %d", o.saveStateSalvar, o.saveStateCarregar);
+            Gravar();
+        }
+
+        LRESULT CALLBACK Proc(HWND j, UINT msg, WPARAM wp, LPARAM lp)
+        {
+            switch (msg)
+            {
+            case WM_CREATE: Montar(j); return 0;
+            case WM_COMMAND:
+            {
+                const int id = LOWORD(wp);
+                const bool clique = HIWORD(wp) == BN_CLICKED || HIWORD(wp) == BN_DOUBLECLICKED;
+                if (id == ID_LIGADO && clique)
+                {
+                    g_ligado = !g_ligado;
+                    OpcoesAtuais().saveState = g_ligado;
+                    InvalidateRect((HWND)lp, nullptr, FALSE);
+                    Log("[video] janela do save state: teclas = %d", g_ligado ? 1 : 0);
+                    Gravar();
+                    return 0;
+                }
+                if ((id == ID_SALVAR_T || id == ID_CARREGAR_T) && HIWORD(wp) == CBN_SELCHANGE) { MudouTecla(j, id); return 0; }
+                const bool duplo = id == ID_LISTA && HIWORD(wp) == LBN_DBLCLK;
+                if (((id == ID_SALVAR_JA || id == ID_CARREGAR_JA) && clique) || duplo)
+                {
+                    // feito no proximo quadro do jogo numa fase
+                    if (id == ID_SALVAR_JA) SaveStatePedir(false);
+                    else if (const unsigned e = Escolhido(j); e != SEM_ESTADO) SaveStateCarregarId(e);
+                    else return 0;
+                    if (HWND jogo = GetGameWindow()) SetForegroundWindow(jogo);   // volta para o jogo, que mostra o aviso
+                    return 0;
+                }
+                if (id == ID_APAGAR && clique)
+                {
+                    if (const unsigned e = Escolhido(j); e != SEM_ESTADO) { SaveStateApagarId(e); EncherLista(j); }
+                    return 0;
+                }
+                if (id == ID_FECHAR_S || id == IDCANCEL || id == IDOK) { DestroyWindow(j); return 0; }
+                break;
+            }
+            case WM_TIMER:
+                if (wp == ID_RELOGIO && SaveStateVersao() != g_versaoVista) EncherLista(j);
+                return 0;
+            case WM_CTLCOLORSTATIC:
+                return tema::CorTexto((HDC)wp, GetDlgCtrlID((HWND)lp) == ID_DICA_S ? tema::TEXTO_FRACO : tema::TEXTO);
+            case WM_CTLCOLOREDIT:
+            case WM_CTLCOLORLISTBOX:
+                return tema::CorCampo((HDC)wp);
+            case WM_DRAWITEM:
+            {
+                auto* d = (const DRAWITEMSTRUCT*)lp;
+                if (d->CtlID == ID_LIGADO) tema::DesenharCaixa(d, g_ligado, g_fonte);                else tema::DesenharBotao(d, false, tema::FonteBotao());
+                return TRUE;
+            }
+            case WM_LBUTTONDOWN: SetFocus(j); return 0;
+            case WM_CTLCOLORBTN: return (LRESULT)tema::PincelFundo();
+            case WM_ERASEBKGND: return 1;
+            case WM_PAINT:
+            {
+                PAINTSTRUCT ps;
+                HDC dc = BeginPaint(j, &ps);
+                RECT r; GetClientRect(j, &r);
+                HDC mem = CreateCompatibleDC(dc);
+                HBITMAP bmp = CreateCompatibleBitmap(dc, r.right, r.bottom);
+                HGDIOBJ antes = SelectObject(mem, bmp);
+                FillRect(mem, &r, tema::PincelFundo());
+                tema::Secao(mem, S(16), S(12), r.right - S(16), L"SAVE STATE");
+                BitBlt(dc, 0, 0, r.right, r.bottom, mem, 0, 0, SRCCOPY);
+                SelectObject(mem, antes);
+                DeleteObject(bmp); DeleteDC(mem);
+                EndPaint(j, &ps);
+                return 0;
+            }
+            case WM_CLOSE: DestroyWindow(j); return 0;
+            case WM_DESTROY:
+                g_janelaS = nullptr;
+                PostQuitMessage(0);
+                return 0;
+            }
+            return DefWindowProcW(j, msg, wp, lp);
+        }
+
+        void Rodar()
+        {
+            static bool registrada = false;
+            if (!registrada)
+            {
+                WNDCLASSW wc{};
+                wc.lpfnWndProc = Proc;
+                wc.hInstance = GetModuleHandleW(nullptr);
+                wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+                wc.hbrBackground = tema::PincelFundo();
+                wc.lpszClassName = L"PredatorSaveState";
+                RegisterClassW(&wc);
+                registrada = true;
+            }
+            RECT area{ 0, 0, S(LARG), S(Y_BOTOES + 36 + 16) };
+            const DWORD estilo = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+            AdjustWindowRect(&area, estilo, FALSE);
+            HWND j = CreateWindowExW(WS_EX_TOPMOST, L"PredatorSaveState", L"Save state - Far Cry Instincts Predator",
+                                     estilo, CW_USEDEFAULT, CW_USEDEFAULT, area.right - area.left, area.bottom - area.top,
+                                     nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+            if (!j) { Log("[video] a janela do save state nao abriu (erro %lu)", GetLastError()); return; }
+            Log("[video] janela do save state aberta");
+            g_janelaS = j;
+            AplicarIcone(j);
+            tema::TituloEscuro(j);
+            RECT r; GetWindowRect(j, &r);
+            const int w = r.right - r.left, h = r.bottom - r.top;
+            SetWindowPos(j, nullptr, (GetSystemMetrics(SM_CXSCREEN) - w) / 2 + S(40), std::max(0, (GetSystemMetrics(SM_CYSCREEN) - h) / 2 + S(40)), 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER);
+            ShowWindow(j, SW_SHOW);
+            SetForegroundWindow(j);
+            MSG m;
+            while (GetMessageW(&m, nullptr, 0, 0) > 0)
+            {
+                if (IsDialogMessageW(j, &m)) continue;
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        }
+    }
+}
+
+void SaveStateAbrirJanela()
+{
+    std::lock_guard lock(g_abrir);
+    if (HWND j = sst::g_janelaS) { ShowWindow(j, SW_RESTORE); SetForegroundWindow(j); return; }
+    std::thread(sst::Rodar).detach();
 }

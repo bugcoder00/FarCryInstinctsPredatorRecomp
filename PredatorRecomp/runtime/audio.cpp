@@ -4,6 +4,8 @@
 // FCRECOMP_SEMSOM=1: nao abre o dispositivo (so mantem o relogio do audio andando, como antes).
 #include "thread.h"
 #include "perf.h"
+#include "opcoes.h"
+std::string AoVivoValor(const char* chave);   // input.cpp: ao_vivo.txt da pasta do jogo
 #include <windows.h>
 #include <xaudio2.h>
 #include <mmdeviceapi.h>
@@ -14,8 +16,10 @@
 #include <atomic>
 #include <mutex>
 #include <vector>
+#include <set>
 #include <algorithm>
 #include <cmath>
+#include <thread>
 void WatchAddWriteRange(uint32_t addr, uint32_t size);   // watch.cpp (diagnostico FCRECOMP_VOZESVIGIA)
 
 #pragma comment(lib, "xaudio2.lib")
@@ -44,6 +48,9 @@ namespace
     std::vector<float> g_ring[RING];
     uint32_t g_ringNext = 0;
     std::mutex g_submitMutex;
+    unsigned g_somVersaoUsada = 0;   // SomVersao() quando a saida foi aberta (aba AUDIO / janela de audio do F2)
+    int g_volumeUsado = 100;         // volume do jogo aplicado (opcoes volumeJogo)
+    bool CriarSaida();
 
     bool InitOutput()
     {
@@ -54,12 +61,34 @@ namespace
             Log("[audio] XAudio2 indisponivel: sem som");
             return false;
         }
-        if (FAILED(g_xaudio->CreateMasteringVoice(&g_master)))
+        if (!CriarSaida())
         {
-            Log("[audio] nenhum dispositivo de som: sem som");
             g_xaudio.Reset();
             return false;
         }
+        return true;
+    }
+
+    // a saida escolhida nas opcoes (aba AUDIO; vazio = o padrao do Windows). Se ela sumiu (fone desligado), o padrao.
+    bool CriarMaster()
+    {
+        g_somVersaoUsada = SomVersao();
+        const std::wstring id = SomEscolhido(SOM_SAIDA);
+        if (!id.empty() && SUCCEEDED(g_xaudio->CreateMasteringVoice(&g_master, XAUDIO2_DEFAULT_CHANNELS, XAUDIO2_DEFAULT_SAMPLERATE, 0, id.c_str())))
+            return true;
+        if (!id.empty()) Log("[audio] a saida de som escolhida nao abriu (desligada?): usando a padrao do Windows");
+        if (FAILED(g_xaudio->CreateMasteringVoice(&g_master)))
+        {
+            Log("[audio] nenhum dispositivo de som: sem som");
+            return false;
+        }
+        return true;
+    }
+
+    // master + voz de saida (5.1 do jogo) no dispositivo escolhido; tambem ao trocar o dispositivo com o jogo rodando
+    bool CriarSaida()
+    {
+        if (!CriarMaster()) return false;
         WAVEFORMATEXTENSIBLE wf{};
         wf.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
         wf.Format.nChannels = CHANNELS;
@@ -75,6 +104,7 @@ namespace
         if (FAILED(g_xaudio->CreateSourceVoice(&g_voice, &wf.Format)))
         {
             Log("[audio] falha ao criar a voz de saida: sem som");
+            g_master->DestroyVoice(); g_master = nullptr;
             return false;
         }
         for (auto& f : g_ring) f.resize(CHANNELS * SAMPLES);
@@ -108,16 +138,20 @@ namespace
             if (SUCCEEDED(g_voice->SetOutputMatrix(g_master, CHANNELS, saidas, m)))
                 Log("[audio] som em estereo: os 6 canais do jogo juntados na esquerda/direita da frente");
         }
+        g_voice->SetVolume(std::clamp(OpcoesAtuais().volumeJogo, 0, 100) / 100.0f);
+        g_volumeUsado = OpcoesAtuais().volumeJogo;
         g_voice->Start();
-        // nome do dispositivo de som padrao (fone/caixa Bluetooth costuma ter 150-300 ms de atraso)
+        // nome do dispositivo de som (fone/caixa Bluetooth costuma ter 150-300 ms de atraso)
         std::string nome = "?";
         {
             ComPtr<IMMDeviceEnumerator> en;
             ComPtr<IMMDevice> dev;
             ComPtr<IPropertyStore> props;
             PROPVARIANT pv; PropVariantInit(&pv);
+            const std::wstring id = SomEscolhido(SOM_SAIDA);
             if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en))) &&
-                SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, &dev)) && SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &props)) &&
+                ((!id.empty() && SUCCEEDED(en->GetDevice(id.c_str(), &dev))) || SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, &dev))) &&
+                SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &props)) &&
                 SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &pv)) && pv.vt == VT_LPWSTR)
             {
                 char b[256];
@@ -169,6 +203,29 @@ namespace
         for (;;)
         {
             uint32_t cb = g_callback;
+            // depuracao (ao_vivo.txt): MICTESTE=1/0 abre/fecha o microfone como o TESTAR da barra de nivel da janela de
+            // audio (num fone Bluetooth o "atraso da saida" do registro mostra o modo de chamada: ~36 ms em vez de ~290)
+            if (static ULONGLONG olhada = 0; GetTickCount64() - olhada >= 500)
+            {
+                olhada = GetTickCount64();
+                static std::string mic;
+                const std::string m = AoVivoValor("MICTESTE");
+                if (m != mic)
+                {
+                    mic = m;
+                    Log("[audio] MICTESTE=%s", m.c_str());
+                    std::thread([m] { if (m == "1") MicMedirIniciar(SomEscolhido(SOM_VOZ_MIC)); else MicMedirParar(); }).detach();
+                }
+            }
+            if (output && SomVersao() != g_somVersaoUsada)
+            {
+                // trocou a saida na janela de audio: refaz o master e a voz no dispositivo novo (o quadro em curso se perde)
+                std::lock_guard lock(g_submitMutex);
+                g_voice->DestroyVoice(); g_voice = nullptr;
+                g_master->DestroyVoice(); g_master = nullptr;
+                output = CriarSaida();
+                if (!output) { g_voice = nullptr; Log("[audio] a troca de saida falhou: sem som ate reabrir o jogo"); }
+            }
             if (output)
             {
                 // espera a fila esvaziar ate o alvo (dorme ~1 ms por vez)
@@ -259,9 +316,74 @@ std::atomic<bool> g_sonsCenaPedido{ false };  // BeginCutScene: guardar a lista 
 std::mutex g_sonsCenaMutex;
 std::vector<uint32_t> g_sonsCena;             // sons que existiam quando a cena comecou
 bool g_sonsCenaOk = false;
-void SonsCenaComeca() { g_sonsCenaPedido = true; }
+// Falas presas na animacao da cena (roteiro 2026-11-26_09-30, 02_native): as falas do Carver sao chaves de som da
+// animacao de um personagem (evento postado pela atualizacao das entidades, retorno 82617A78 em sub_824B8020; grupo
+// 0x03A2, itens 0-6). O pulo acaba a acao, mas a animacao pode continuar no ritmo normal (as vezes sim, as vezes nao) e
+// soltava as falas que faltavam no meio do jogo (+7, +18, +20 e +25 s depois do pulo). Agora os grupos de som (ev[0] >> 16)
+// postados por esse caminho durante a cena, e que nao apareceram fora de cena, ficam calados depois do pulo ate a proxima
+// cena (no maximo 3 min). FCRECOMP_PULARCENA_SONSANIM=0 desliga.
+#ifndef PREDATOR_EDITOR
+bool CenaDoScriptTocando();                   // pular_cena.cpp
+uint32_t AtorDaCenaNaPilha(uint32_t sp);     // pular_cena.cpp
+extern std::atomic<bool> g_acelerando;       // pular_cena.cpp
+namespace
+{
+    std::mutex g_animMutex;
+    std::set<uint32_t> g_gruposCena, g_gruposFora;   // grupos do caminho das animacoes: na cena / fora de cena
+    double g_animBloqueioIni = 0, g_animBloqueioFim = 0;   // perf::Now(); fim 0 = enquanto durar o pulo
+    constexpr uint32_t RET_SOM_ANIMACAO = 0x82617A78u;
+}
+void AnimCenaComeca() { std::lock_guard l(g_animMutex); g_gruposCena.clear(); g_animBloqueioIni = 0; }
+void AnimPuloComeca() { std::lock_guard l(g_animMutex); g_animBloqueioIni = perf::Now(); g_animBloqueioFim = 0; }
+#else
+void AnimCenaComeca() {}
+void AnimPuloComeca() {}
+#endif
+void SonsCenaComeca() { g_sonsCenaPedido = true; AnimCenaComeca(); }
 std::atomic<double> g_sonsPuloFim{ 0 };      // perf::Now() ate quando continua parando (0 = enquanto durar o pulo)
-void SonsDoPuloInicio() { g_sonsPuloFim = 0; g_sonsPulo = 1; }
+void SonsDoPuloInicio()
+{
+    g_sonsPuloFim = 0; g_sonsPulo = 1;
+    AnimPuloComeca();
+}
+#ifndef PREDATOR_EDITOR
+// true = o evento de som (r4 objeto, *r6 evento) postado do caminho das animacoes deve ficar calado
+bool SomAnimacaoCalar(uint32_t lr, uint32_t ev, uint32_t sp, uint32_t obj)
+{
+    static const bool ligado = [] { const char* e = getenv("FCRECOMP_PULARCENA_SONSANIM"); return !e || atoi(e) != 0; }();
+    static const bool porAtor = [] { const char* e = getenv("FCRECOMP_PULARCENA_SONSATOR"); return !e || atoi(e) != 0; }();
+    if (!ligado || lr != RET_SOM_ANIMACAO || !ev) return false;
+    const uint32_t grupo = R32(ev) >> 16;
+    std::lock_guard l(g_animMutex);
+    const double agora = perf::Now();
+    if (g_animBloqueioIni > 0 && g_animBloqueioFim == 0 && !g_acelerando.load() && g_sonsPulo.load() == 0)
+        g_animBloqueioFim = agora + 180000;   // pulo acabou: conta os 3 min
+    const bool bloqueando = g_animBloqueioIni > 0 && (g_animBloqueioFim == 0 || agora < g_animBloqueioFim);
+    if (bloqueando)
+    {
+        static int n = 0;
+        if (g_gruposCena.count(grupo))
+        {
+            if (n++ < 50) Log("[pularcena] fala da animacao da cena calada depois do pulo (grupo %04X, item %04X)", grupo, R32(ev) & 0xFFFF);
+            return true;
+        }
+        // animacao da cena que so comecou depois do pulo (ainda carregava quando o pulo veio): o personagem e um ator
+        // da cena (pular_cena.cpp) e o grupo nunca apareceu fora de cena (passos e sons comuns aparecem logo)
+        if (porAtor && !g_gruposFora.count(grupo))
+            if (const uint32_t ator = AtorDaCenaNaPilha(sp))
+            {
+                if (n++ < 50) Log("[pularcena] som da animacao de um ator da cena calado depois do pulo (ator %08X, objeto %08X, grupo %04X, item %04X)",
+                                  ator, obj, grupo, R32(ev) & 0xFFFF);
+                return true;
+            }
+        if (!CenaDoScriptTocando() && g_gruposFora.size() < 256) g_gruposFora.insert(grupo);
+        return false;
+    }
+    if (CenaDoScriptTocando()) { if (!g_gruposFora.count(grupo) && g_gruposCena.size() < 64) g_gruposCena.insert(grupo); }
+    else if (g_gruposFora.size() < 256) g_gruposFora.insert(grupo);
+    return false;
+}
+#endif
 void SonsDoPuloFim()   // o som volta (g_somCalado) quando a parada acaba
 {
     if (g_sonsPulo) g_sonsPuloFim = perf::Now() + 500; else g_somCalado = false;
@@ -343,6 +465,11 @@ KFUNC(XAudioSubmitRenderDriverFrame)
             fseek(wav, 40, SEEK_SET); fwrite(&wavBytes, 4, 1, wav);
             fseek(wav, 0, SEEK_END);
         }
+        if (const int vol = OpcoesAtuais().volumeJogo; vol != g_volumeUsado)   // janela de audio: vale na hora
+        {
+            g_volumeUsado = vol;
+            g_voice->SetVolume(std::clamp(vol, 0, 100) / 100.0f);
+        }
         XAUDIO2_BUFFER buf{};
         buf.AudioBytes = CHANNELS * SAMPLES * 4;
         buf.pAudioData = (const BYTE*)out.data();
@@ -393,6 +520,14 @@ GUEST_FUNC(sub_824B8020)
         uint32_t ev = Gpr32(ctx, 6) ? R32(Gpr32(ctx, 6)) : 0;
         std::string campos;
         for (uint32_t o = 0; ev && o < 96; o += 4) { char b[16]; snprintf(b, sizeof(b), " %08X", R32(ev + o)); campos += b; }
+        // texto (nome do som, se houver) em ev+8 ou no que ele aponta
+        auto Txt = [](uint32_t a) {
+            std::string t;
+            if (a < 0x40000000 || a >= 0xC0000000) return t;
+            for (int i = 0; i < 64; i++) { uint8_t c = *(uint8_t*)G(a + i); if (!c) break; if (c < 32 || c > 126) return std::string(); t += (char)c; }
+            return t;
+        };
+        if (ev) { const uint32_t p = R32(ev + 8); std::string t = Txt(p); if (t.empty() && p >= 0x40000000 && p < 0xC0000000) t = Txt(R32(p)); if (!t.empty()) campos += " '" + t + "'"; }
         Log("[somevento] t=%.0f obj %08X id %08X lr %08X ev %08X:%s | pilha:%s", perf::Now(), Gpr32(ctx, 4), Gpr32(ctx, 5),
             (uint32_t)Lr(ctx), ev, campos.c_str(), chain.c_str());
     }
@@ -403,6 +538,11 @@ GUEST_FUNC(sub_824B8020)
     // So quando sai tiro: o script de tiro (lua.dat linha 276) chama BasicWeapon.PlayTriggerSound, entao ha duas camadas
     // da maquina Lua (retorno 823E5AAC) antes da chamada vinda do C (823DF15C). Com a arma vazia o estalo e o "clique sem
     // balas" do fuzil (fuzis nao tem EmptyChamberSoundEvent) e continua tocando.
+    if (SomAnimacaoCalar((uint32_t)Lr(ctx), Gpr32(ctx, 6) ? R32(Gpr32(ctx, 6)) : 0, Gpr32(ctx, 1), Gpr32(ctx, 4)))
+    {
+        Ret(ctx, (uint64_t)(int64_t)-1);   // como o caminho "nao tocou" da funcao original
+        return;
+    }
     if (static const bool manter = getenv("FCRECOMP_CLIQUEGATILHO") != nullptr; !manter)
         if (uint32_t pev = Gpr32(ctx, 6); pev)
             if (uint32_t ev = R32(pev); ev && R32(ev) == 0x00450001u)
@@ -538,6 +678,22 @@ GUEST_FUNC(sub_824C37B8)
         for (uint32_t no = R32(root + 4); no && n < 512; no = R32(no), n++) if (uint32_t som = R32(no + 8)) g_sonsCena.push_back(som);
         g_sonsCenaOk = true;
     }
+    // O gerente reaproveita os enderecos dos sons: um som de antes da cena que acaba deixa o endereco livre, e a fala
+    // do Carver (ou outro som da cena) que nasce nele passava por "de antes" e continuava tocando depois do PULAR CENA
+    // (as vezes sim, as vezes nao). Quem sai da lista deixa de ser "de antes". FCRECOMP_SONSCENA_ENDERECO=1 volta ao antigo.
+    static const bool soEndereco = getenv("FCRECOMP_SONSCENA_ENDERECO") != nullptr;
+    auto podar = [&](std::vector<uint32_t>& v)
+    {
+        if (soEndereco || v.empty()) return;
+        uint32_t agora[512]; int k = 0;
+        for (uint32_t no = R32(root + 4); no && k < 512; no = R32(no)) if (uint32_t som = R32(no + 8)) agora[k++] = som;
+        v.erase(std::remove_if(v.begin(), v.end(), [&](uint32_t s) { return std::find(agora, agora + k, s) == agora + k; }), v.end());
+    };
+    if (root && g_sonsCenaOk && !g_sonsPulo.load())
+    {
+        std::lock_guard l(g_sonsCenaMutex);
+        podar(g_sonsCena);
+    }
     if (const int pulo = g_sonsPulo.load(); pulo && root)
     {
         static std::vector<uint32_t> antes;
@@ -553,6 +709,7 @@ GUEST_FUNC(sub_824C37B8)
         }
         else
         {
+            podar(antes);
             for (uint32_t no = R32(root + 4); no && n < 512; no = R32(no), n++)
             {
                 const uint32_t som = R32(no + 8);

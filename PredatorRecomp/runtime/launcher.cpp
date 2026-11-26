@@ -26,6 +26,7 @@
 #include <ctime>
 #include "conquistas.h"
 #include "iso.h"
+#include "placas_video.h"
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
 #include <functional>
@@ -33,7 +34,7 @@ void TecladoAbrir(std::wstring titulo, std::wstring descricao, std::wstring padr
                   std::function<void(bool ok, const std::wstring& texto)> fim);   // teclado.cpp
 
 // versao mostrada no titulo do launcher e nas instrucoes (trocar a cada pacote novo)
-#define VERSAO_RECOMP L"1.0.0"
+#define VERSAO_RECOMP L"1.0.1"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -43,6 +44,7 @@ void TecladoAbrir(std::wstring titulo, std::wstring descricao, std::wstring padr
 namespace
 {
     Opcoes g_op;
+    std::vector<PlacaVideo> g_placas;   // lista "Placa de video" (item 0 = automatica, depois estas)
     std::filesystem::path g_arquivo, g_exeDir;
 
     std::string Utf8(const std::filesystem::path& p) { auto u = p.u8string(); return std::string(u.begin(), u.end()); }
@@ -89,6 +91,7 @@ void OpcoesCarregar(const std::filesystem::path& exeDir)
         else if (k == "tela_cheia") g_op.telaCheia = n != 0;
         else if (k == "antisserrilhado") g_op.antisserrilhado = std::clamp(n, 0, 3);
         else if (k == "msaa") g_op.msaa = std::clamp(n, 0, 3);
+        else if (k == "smaa") g_op.smaa = std::clamp(n, 0, 4);
         else if (k == "escala") g_op.escala = std::clamp(n, 0, 3);
         else if (k == "fsr") g_op.fsr = std::clamp(n, 0, 4);
         else if (k == "fsr_nitidez") g_op.fsrNitidez = std::clamp(n, 0, 4);
@@ -103,12 +106,20 @@ void OpcoesCarregar(const std::filesystem::path& exeDir)
         else if (k == "detalhe") g_op.detalhe = std::clamp(n, -2, 3);
         else if (k == "ao") g_op.ao = std::clamp(n, 0, 3);
         else if (k == "formato") g_op.formato = std::clamp(n, 0, 2);
+        else if (k == "placa_video") g_op.placaVideo = DeUtf8(v).wstring();
+        else if (k == "fov") g_op.fov = std::clamp(n, 0, FOV_MAX);
+        else if (k == "mira") g_op.mira = std::clamp(n, MIRA_MIN, MIRA_MAX);
         else if (k == "fps") g_op.fps = std::clamp(n, 0, 2);
         else if (k == "fps60") g_op.fps = n != 0 ? 1 : 0;   // 0.1.1 de testes: caixa "60 FPS"
         else if (k == "mostrar_registro") g_op.mostrarRegistro = n != 0;
         else if (k == "abrir_direto") g_op.pularLauncher = n != 0;
         else if (k == "launcher_icones") g_op.launcherIcones = n != 0;
         else if (k == "ip_anfitriao") g_op.ipAnfitriao = v;
+        else if (k == "som_saida") g_op.somSaida = DeUtf8(v).wstring();
+        else if (k == "voz_fone") g_op.vozFone = DeUtf8(v).wstring();
+        else if (k == "voz_microfone") g_op.vozMicrofone = DeUtf8(v).wstring();
+        else if (k == "volume_jogo") g_op.volumeJogo = std::clamp(n, 0, 100);
+        else if (k == "volume_voz") g_op.volumeVoz = std::clamp(n, 0, VOLUME_VOZ_MAX);
         else if (k == "perfil") g_op.perfil = PerfilValido(v);
         else if (k == "trapaca_municao") g_op.trapacaMunicao = n != 0;
         else if (k == "trapaca_adrenalina") g_op.trapacaAdrenalina = n != 0;
@@ -116,6 +127,9 @@ void OpcoesCarregar(const std::filesystem::path& exeDir)
         else if (k == "trapaca_fases") g_op.trapacaFases = n != 0;
         else if (k == "trapaca_mapas") g_op.trapacaMapas = n != 0;
         else if (k == "trapaca_invencivel") g_op.trapacaInvencivel = n != 0;
+        else if (k == "savestate") g_op.saveState = n != 0;
+        else if (k == "savestate_salvar" && SaveStateIndice(n) >= 0) g_op.saveStateSalvar = n;
+        else if (k == "savestate_carregar" && SaveStateIndice(n) >= 0) g_op.saveStateCarregar = n;
         else if (k == "idioma") g_op.idioma = v == "pt" ? 0 : v == "en" ? 1 : v == "fr" ? 2 : v == "de" ? 3 : v == "es" ? 4 : v == "it" ? 5 : -1;
     }
     // idioma dos textos do programa: o escolhido no launcher; na primeira vez, o da interface do Windows.
@@ -153,6 +167,8 @@ void OpcoesSalvar()
       << "antisserrilhado = " << g_op.antisserrilhado << "\n"
       << TR("; MSAA (bordas lisas no desenho, pesa na placa): 0 desligado, 1 = 2x, 2 = 4x, 3 = 8x\n", "; MSAA (smooth edges while drawing, weighs on the graphics card): 0 off, 1 = 2x, 2 = 4x, 3 = 8x\n")
       << "msaa = " << g_op.msaa << "\n"
+      << TR("; SMAA (suaviza as bordas da cena pronta, leve): 0 desligado, 1 baixo, 2 medio, 3 alto, 4 ultra\n", "; SMAA (smooths the edges of the finished scene, light): 0 off, 1 low, 2 medium, 3 high, 4 ultra\n")
+      << "smaa = " << g_op.smaa << "\n"
       << TR("; resolucao interna (o jogo desenha em mais pixels): 0 = 1x 1280x720, 1 = 1,5x 1920x1080, 2 = 2x 2560x1440, 3 = 3x 3840x2160 (4K)\n", "; internal resolution (escala; the game draws more pixels): 0 = 1x 1280x720, 1 = 1.5x 1920x1080, 2 = 2x 2560x1440, 3 = 3x 3840x2160 (4K)\n")
       << "escala = " << g_op.escala << "\n"
       << TR("; upscale AMD FSR 1 (desenha menor e amplia para o tamanho da janela; ligado, a resolucao interna nao vale): 0 desligado, 1 qualidade, 2 equilibrado, 3 desempenho, 4 ultra qualidade\n", "; AMD FSR 1 upscaling (fsr; draws smaller and upscales to the window size; when on, the internal resolution is ignored): 0 off, 1 quality, 2 balanced, 3 performance, 4 ultra quality\n")
@@ -179,12 +195,25 @@ void OpcoesSalvar()
       << TR("; oclusao de ambiente (cantos e encontros mais escuros): 0 desligada, 1 leve, 2 media, 3 forte\n", "; ambient occlusion (ao; darker corners and contact areas): 0 off, 1 light, 2 medium, 3 strong\n")
       << "ao = " << g_op.ao << "\n"
       << TR("; quadros por segundo: 0 = 30 (como o original), 1 = 60, 2 = sem limite (experimental)\n", "; frames per second (fps): 0 = 30 (like the original), 1 = 60, 2 = unlocked (experimental); mostrar_registro = log window, abrir_direto = skip the launcher\n")
+      << TR("; placa de video (o nome dela; vazio = automatica, a mais forte); campo de visao: graus a mais (0 = o do jogo, ate 45)\n",
+            "; graphics card (placa_video; its name; empty = automatic, the strongest); field of view (fov): extra degrees (0 = the game's, up to 45)\n")
+      << "placa_video = " << Utf8(std::filesystem::path(g_op.placaVideo)) << "\n"
+      << "fov = " << g_op.fov << "\n"
+      << TR("; tamanho da mira em porcentagem (100 = o do jogo, de 25 a 150)\n", "; crosshair size (mira) in percent (100 = the game's, 25 to 150)\n")
+      << "mira = " << g_op.mira << "\n"
       << "fps = " << g_op.fps << "\n"
       << "mostrar_registro = " << g_op.mostrarRegistro << "\n"
       << "abrir_direto = " << g_op.pularLauncher << "\n"
       << "launcher_icones = " << g_op.launcherIcones << "\n"
       << TR("; SYSTEM LINK pela internet: IP (ou nome) do PC de quem criou a partida; vazio = so rede local\n", "; SYSTEM LINK over the internet (ip_anfitriao): IP (or name) of the PC that created the match; empty = local network only\n")
       << "ip_anfitriao = " << g_op.ipAnfitriao << "\n"
+      << TR("; audio: dispositivos pelo id do Windows (vazio = o padrao; voz_fone vazio = o mesmo do som do jogo); volumes em %: jogo 0 a 100, chat de voz 0 a 200\n",
+            "; audio: devices by Windows id (empty = the default; empty voz_fone = the same as the game sound); volumes in %: game (volume_jogo) 0 to 100, voice chat (volume_voz) 0 to 200\n")
+      << "som_saida = " << Utf8(std::filesystem::path(SomEscolhido(SOM_SAIDA))) << "\n"
+      << "voz_fone = " << Utf8(std::filesystem::path(SomEscolhido(SOM_VOZ_FONE))) << "\n"
+      << "voz_microfone = " << Utf8(std::filesystem::path(SomEscolhido(SOM_VOZ_MIC))) << "\n"
+      << "volume_jogo = " << g_op.volumeJogo << "\n"
+      << "volume_voz = " << g_op.volumeVoz << "\n"
       << TR("; perfil (jogos salvos em save\\perfis\\<nome>); vazio = o principal (pasta save)\n", "; profile (perfil; saved games in save\\perfis\\<name>); empty = the main one (save folder)\n")
       << "perfil = " << g_op.perfil << "\n"
       << TR("; trapacas (1 = ligada): municao infinita, adrenalina infinita, poderes ferais, todas as fases, todos os mapas, vida sempre cheia\n",
@@ -194,7 +223,12 @@ void OpcoesSalvar()
       << "trapaca_feral = " << g_op.trapacaFeral << "\n"
       << "trapaca_fases = " << g_op.trapacaFases << "\n"
       << "trapaca_mapas = " << g_op.trapacaMapas << "\n"
-      << "trapaca_invencivel = " << g_op.trapacaInvencivel << "\n";
+      << "trapaca_invencivel = " << g_op.trapacaInvencivel << "\n"
+      << TR("; save state (salvar/carregar o estado a qualquer momento): 1 = teclas ligadas; teclas pelo codigo do Windows: 116 = F5, 117 = F6, 118 = F7, 119 = F8, 120 = F9, 122 = F11\n",
+            "; save state (save/load the state at any time): 1 = keys on; keys by Windows code (savestate_salvar = save, savestate_carregar = load): 116 = F5, 117 = F6, 118 = F7, 119 = F8, 120 = F9, 122 = F11\n")
+      << "savestate = " << g_op.saveState << "\n"
+      << "savestate_salvar = " << g_op.saveStateSalvar << "\n"
+      << "savestate_carregar = " << g_op.saveStateCarregar << "\n";
 }
 
 namespace
@@ -202,16 +236,28 @@ namespace
     enum : int
     {
         ID_PASTA = 100, ID_PROCURAR = 101, ID_SITUACAO = 102, ID_ISO = 103,
+        ID_AVATAR = 104, ID_NOVO_PERFIL = 105, ID_EXCLUIR_PERFIL = 106,   // perfil: icone (clique troca), criar e excluir
         ID_JANELA = 110, ID_TELACHEIA = 111, ID_AA = 112, ID_VSYNC = 113, ID_REGISTRO = 114, ID_DIRETO = 115, ID_ESCALA = 116, ID_SOMBRAS = 117, ID_FPS = 118, ID_FORMATO = 119, ID_FILTRO_TEX = 170, ID_DISTANCIA = 171, ID_DETALHE = 172, ID_AO = 173, ID_FSR = 175, ID_FSR_NITIDEZ = 176, ID_AUTOHDR = 177, ID_HDRFALSO = 178, ID_MOSTRARFPS = 179, ID_AVISOTECLAS = 186, ID_MSAA = 187,
         ID_CONTROLES = 120, ID_INSTRUCOES = 121, ID_SAIR = 122, ID_JOGAR = 123, ID_MEUIP = 124, ID_SALVAR = 125,
         ID_DICA = 130, ID_DICA_NET = 131, ID_ANFITRIAO = 132, ID_PERFIL = 133, ID_DICA_PERFIL = 134,
         ID_REQ_MIN = 135, ID_REQ_PC = 136, ID_IDIOMA = 174,
-        ID_CAT = 140,   // 140..146: botoes do menu da esquerda (uma categoria cada)
+        ID_CAT = 140,   // 140..149: botoes do menu da esquerda (uma categoria cada)
         ID_SAVES = 150, ID_RENOMEAR = 151, ID_DUPLICAR = 152, ID_APAGAR = 153, ID_ABRIRSAVE = 154,
         ID_CONQ = 160, ID_CONQ_RESUMO = 161, ID_VISTA_SAVES = 155, ID_VISTA_CONQ = 162, ID_FILTRO_SAVES = 156,
         ID_TRAPACA = 180,        // 180..185: caixas das trapacas (municao, adrenalina, feral, fases, mapas, invencivel)
         ID_TRAPACA_DESC = 190,   // 190..195: descricao de cada uma
         ID_TRAPACA_AVISO = 196,
+        ID_TRAPACA_PERFIL = 197,   // topo da aba TRAPACAS: icone e nome do perfil (desenhado aqui)
+        ID_PLACA = 188, ID_FOV = 189, ID_FOV_VALOR = 197, ID_SMAA = 198,   // video: placa de video, campo de visao (barra), SMAA
+        ID_TESTE_MIC = 199,   // audio: TESTAR/PARAR o microfone (barra de nivel)
+        ID_MIRA = 163, ID_MIRA_VALOR = 164,   // video: tamanho da mira (barra) e o numero ao lado
+        // audio: saida do jogo, fone e microfone do chat de voz (listas), TESTAR, nivel do microfone, volumes (barras)
+        ID_SOM_SAIDA = 107, ID_SOM_FONE = 108, ID_SOM_MIC = 109, ID_TESTE_SAIDA = 138, ID_TESTE_FONE = 139, ID_NIVEL_MIC = 157,
+        ID_VOL_JOGO = 126, ID_VOL_JOGO_VALOR = 127, ID_VOL_VOZ = 128, ID_VOL_VOZ_VALOR = 129, ID_DICA_AUDIO = 137,
+        // save state: caixa (teclas ligadas), tecla de salvar, tecla de carregar, explicacao
+        ID_SST_LIGADO = 158, ID_SST_SALVAR = 159, ID_SST_CARREGAR = 165, ID_SST_DICA = 166,
+        // save state: topo com o perfil (como na aba TRAPACAS), lista dos estados no disco do perfil e APAGAR
+        ID_SST_PERFIL = 167, ID_SST_LISTA = 168, ID_SST_APAGAR = 169,
         N_IDS = 200,
     };
 
@@ -244,24 +290,38 @@ namespace
     const Categoria CATEGORIAS[] = {
         { TR2(L"PASTA DO JOGO", L"GAME FOLDER"), TR2(L"PASTA DO JOGO", L"GAME FOLDER"), PAINEL_X - 24, 0 },
         { TR2(L"VÍDEO", L"VIDEO"), TR2(L"VÍDEO", L"VIDEO"), PAINEL_X - 24, -112 },
+        { TR2(L"ÁUDIO", L"AUDIO"), TR2(L"ÁUDIO", L"AUDIO"), PAINEL_X - 24, 0 },
         { TR2(L"PERFIL", L"PROFILE"), TR2(L"PERFIL", L"PROFILE"), PAINEL_X - DIR, 0 },
+        { TR2(L"SAVE STATE", L"SAVE STATE"), TR2(L"SAVE STATE", L"SAVE STATE"), PAINEL_X - 24, 0 },
         { TR2(L"CONQUISTAS", L"ACHIEVEMENTS"), TR2(L"CONQUISTAS", L"ACHIEVEMENTS"), 0, 0 },
         { TR2(L"TRAPAÇAS", L"CHEATS"), TR2(L"TRAPAÇAS", L"CHEATS"), 0, 0 },
         { TR2(L"INTERNET", L"INTERNET"), TR2(L"INTERNET (SYSTEM LINK)", L"INTERNET (SYSTEM LINK)"), PAINEL_X - DIR, -105 },
         { TR2(L"OUTROS", L"OTHER"), TR2(L"OUTROS", L"OTHER"), PAINEL_X - 24, -464 },
         { TR2(L"REQUISITOS", L"REQUIREMENTS"), TR2(L"REQUISITOS MÍNIMOS", L"MINIMUM REQUIREMENTS"), PAINEL_X - DIR, -256 } };
     constexpr int N_CAT = (int)(sizeof(CATEGORIAS) / sizeof(CATEGORIAS[0]));
-    enum { CAT_PASTA, CAT_VIDEO, CAT_PERFIL, CAT_CONQUISTAS, CAT_TRAPACAS, CAT_INTERNET, CAT_OUTROS, CAT_REQUISITOS };   // mesma ordem de CATEGORIAS
+    enum { CAT_PASTA, CAT_VIDEO, CAT_AUDIO, CAT_PERFIL, CAT_SAVESTATE, CAT_CONQUISTAS, CAT_TRAPACAS, CAT_INTERNET, CAT_OUTROS, CAT_REQUISITOS };   // mesma ordem de CATEGORIAS
     int g_criando = -1;                              // categoria dos controles sendo criados (-1 = sempre visiveis)
     int g_categoria = CAT_VIDEO;                     // a que aparece no painel
     std::vector<std::pair<HWND, int>> g_daCategoria; // controle -> categoria
+    // aba VIDEO: tem mais opcoes do que cabem no cartao; a coluna da esquerda rola (barra desenhada aqui e roda do mouse).
+    // Os controles ficam na janela (as cores e cliques continuam iguais); rolar so muda a posicao deles e esconde os
+    // que saem da faixa ROLA_TOPO..ROLA_FIM. Coordenadas sem a escala da tela, como em Criar. A barra de rolagem do
+    // Windows 11 e fina e so aparece com o mouse em cima: esta fica sempre visivel (trilho escuro, puxador ambar).
+    struct Rolavel { HWND c; int x, y, h; };
+    std::vector<Rolavel> g_rolaveis;
+    bool g_rolando = false;                          // os controles criados agora entram na rolagem
+    int g_rolagem = 0, g_rolagemMax = 0;
+    constexpr int ROLA_TOPO = 146, ROLA_FIM = RODAPE - 8;
+    constexpr int BARRA_X = PAINEL_X + 542, BARRA_L = 12;   // trilho entre as listas (ate x 836) e a dica (x 860)
+    int g_arrasto = -1;                              // puxador sendo arrastado: distancia do clique ao topo dele (-1 = nao)
+    bool g_sobreBarra = false;
 
     std::string PerfilPrincipal();
     std::vector<std::string> PerfisExistentes();
 
     std::wstring DescreverEstePc(bool& atende);
-    bool Caixa(int id) { return id == ID_TELACHEIA || id == ID_VSYNC || id == ID_AUTOHDR || id == ID_HDRFALSO || id == ID_MOSTRARFPS || id == ID_AVISOTECLAS || id == ID_REGISTRO || id == ID_DIRETO || (id >= ID_TRAPACA && id < ID_TRAPACA + 6); }
-    bool Botao(int id) { return id == ID_PROCURAR || id == ID_ISO || (id >= ID_CONTROLES && id <= ID_SALVAR) || (id >= ID_CAT && id < ID_CAT + N_CAT) || (id >= ID_RENOMEAR && id <= ID_ABRIRSAVE) || id == ID_VISTA_SAVES || id == ID_VISTA_CONQ || id == ID_FILTRO_SAVES; }
+    bool Caixa(int id) { return id == ID_TELACHEIA || id == ID_VSYNC || id == ID_AUTOHDR || id == ID_HDRFALSO || id == ID_MOSTRARFPS || id == ID_AVISOTECLAS || id == ID_REGISTRO || id == ID_DIRETO || id == ID_SST_LIGADO || (id >= ID_TRAPACA && id < ID_TRAPACA + 6); }
+    bool Botao(int id) { return id == ID_PROCURAR || id == ID_ISO || (id >= ID_CONTROLES && id <= ID_SALVAR) || (id >= ID_CAT && id < ID_CAT + N_CAT) || (id >= ID_RENOMEAR && id <= ID_ABRIRSAVE) || id == ID_VISTA_SAVES || id == ID_VISTA_CONQ || id == ID_FILTRO_SAVES || (id >= ID_AVATAR && id <= ID_EXCLUIR_PERFIL) || id == ID_TESTE_SAIDA || id == ID_TESTE_FONE || id == ID_TESTE_MIC; }
 
     HWND Criar(HWND pai, const wchar_t* classe, const wchar_t* texto, DWORD estilo, int x, int y, int w, int h, int id, HFONT fonte = nullptr)
     {
@@ -270,10 +330,133 @@ namespace
         HWND c = CreateWindowExW(0, classe, texto, WS_CHILD | (g_criando < 0 || g_criando == g_categoria ? WS_VISIBLE : 0) | estilo,
                                  S(x), S(y), S(w), S(h), pai, (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
         if (g_criando >= 0) g_daCategoria.push_back({ c, g_criando });
+        if (g_rolando) g_rolaveis.push_back({ c, x, y, std::min(h, 30) });   // lista: h e a altura aberta; fechada tem ~26
         SendMessageW(c, WM_SETFONT, (WPARAM)(fonte ? fonte : g_fonte), TRUE);
         if (!wcscmp(classe, WC_COMBOBOXW)) ListaEscura(c);
         if (Botao(id)) AcompanharMouse(c);
         return c;
+    }
+
+    // trilho e puxador da barra de rolagem (coordenadas sem escala)
+    RECT TrilhoRolagem() { return RECT{ BARRA_X, ROLA_TOPO, BARRA_X + BARRA_L, ROLA_FIM }; }
+    RECT PuxadorRolagem()
+    {
+        const int trilho = ROLA_FIM - ROLA_TOPO;
+        const int alto = std::max(40, trilho * trilho / (trilho + g_rolagemMax));
+        const int y = ROLA_TOPO + (g_rolagemMax > 0 ? (trilho - alto) * g_rolagem / g_rolagemMax : 0);
+        return RECT{ BARRA_X, y, BARRA_X + BARRA_L, y + alto };
+    }
+    bool NaBarra(int mx, int my)
+    {
+        const RECT t = TrilhoRolagem();
+        return g_categoria == CAT_VIDEO && g_rolagemMax > 0 && mx >= t.left - 4 && mx < t.right + 4 && my >= t.top && my < t.bottom;
+    }
+
+    // poe os controles da coluna que rola na posicao de g_rolagem; so aparecem os que cabem inteiros na faixa.
+    // Tudo e movido de uma vez sem desenhar (DeferWindowPos) e depois so a faixa que rola (coluna + barra) e
+    // redesenhada com os filhos: mover um por um deixava pedacos das listas e textos nas posicoes antigas.
+    // (WM_SETREDRAW na janela toda nao: ela some para o Windows por um instante, a roda do mouse ia para a janela de
+    // tras e os botoes de baixo piscavam.)
+    void AplicarRolagem(HWND j)
+    {
+        g_rolagem = std::clamp(g_rolagem, 0, g_rolagemMax);
+        HDWP d = BeginDeferWindowPos((int)g_rolaveis.size());
+        for (const auto& r : g_rolaveis)
+        {
+            const int y = r.y - g_rolagem;
+            const bool dentro = g_categoria == CAT_VIDEO && y >= ROLA_TOPO && y + r.h <= ROLA_FIM;
+            const UINT f = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOREDRAW | (dentro ? SWP_SHOWWINDOW : SWP_HIDEWINDOW);
+            if (d) d = DeferWindowPos(d, r.c, nullptr, S(r.x), S(y), 0, 0, f);
+            else SetWindowPos(r.c, nullptr, S(r.x), S(y), 0, 0, f);
+        }
+        if (d) EndDeferWindowPos(d);
+        const int x0 = PAINEL_X - 8, x1 = BARRA_X + BARRA_L + 4;
+        RECT faixa{ S(x0), S(ROLA_TOPO - 12), S(x1), S(ROLA_FIM + 4) };
+        RedrawWindow(j, &faixa, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    }
+
+    void Rolar(HWND j, int nova)
+    {
+        nova = std::clamp(nova, 0, g_rolagemMax);
+        if (nova == g_rolagem) return;
+        g_rolagem = nova;
+        AplicarRolagem(j);
+    }
+
+    // a roda do mouse em cima de uma lista fechada (ou da barra do FOV) rola a aba em vez de trocar o valor
+    LRESULT CALLBACK RodaRola(HWND c, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+    {
+        if (msg == WM_MOUSEWHEEL && !SendMessageW(c, CB_GETDROPPEDSTATE, 0, 0)) return SendMessageW(GetParent(c), msg, wp, lp);
+        return DefSubclassProc(c, msg, wp, lp);
+    }
+
+    void TextoFov(HWND j, int extra)
+    {
+        wchar_t t[32];
+        if (extra > 0) swprintf(t, 32, L"%d° (+%d)", 95 + extra, extra);
+        else swprintf(t, 32, L"95°");
+        SetDlgItemTextW(j, ID_FOV_VALOR, t);
+    }
+
+    void TextoMira(HWND j, int pct)
+    {
+        wchar_t t[32];
+        swprintf(t, 32, L"%d%%", pct);
+        SetDlgItemTextW(j, ID_MIRA_VALOR, t);
+    }
+
+    // ---- aba AUDIO (audio_janela.cpp tem a lista de dispositivos, o bipe de teste e o medidor do microfone)
+    std::vector<DispositivoSom> g_saidasSom, g_micsSom;
+
+    void TextoVolume(HWND j, int id, int v)
+    {
+        wchar_t t[16];
+        swprintf(t, 16, L"%d%%", v);
+        SetDlgItemTextW(j, id, t);
+    }
+
+    // rotulo + lista de dispositivos (item 0 = o padrao) + botao TESTAR (idTeste > 0); coordenadas da aba (dx da categoria)
+    void MicTesteParar(HWND j)
+    {
+        KillTimer(j, ID_NIVEL_MIC);
+        MicMedirParar();
+        SetDlgItemTextW(j, ID_TESTE_MIC, TR(L"TESTAR", L"TEST"));
+        InvalidateRect(GetDlgItem(j, ID_NIVEL_MIC), nullptr, FALSE);
+    }
+
+    void ListaSom(HWND j, int id, int y, const wchar_t* rotulo, const std::vector<DispositivoSom>& ds, const std::wstring& escolhido,
+                  const std::wstring& primeiro, int idTeste)
+    {
+        Criar(j, L"STATIC", rotulo, 0, 24, y + 4, 166, 20, -1);
+        HWND cb = Criar(j, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 190, y, idTeste ? 500 : 620, 260, id);
+        SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)primeiro.c_str());
+        int sel = 0;
+        for (size_t i = 0; i < ds.size(); i++)
+        {
+            SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)ds[i].nome.c_str());
+            if (!escolhido.empty() && ds[i].id == escolhido) sel = (int)i + 1;
+        }
+        SendMessageW(cb, CB_SETCURSEL, sel, 0);
+        if (idTeste) Criar(j, L"BUTTON", TR(L"TESTAR", L"TEST"), WS_TABSTOP, 700, y - 4, 110, 34, idTeste);
+    }
+
+    std::wstring IdSom(HWND j, int id, const std::vector<DispositivoSom>& ds)
+    {
+        const int s = (int)SendDlgItemMessageW(j, id, CB_GETCURSEL, 0, 0);
+        return s >= 1 && s <= (int)ds.size() ? ds[s - 1].id : std::wstring();
+    }
+
+    void BarraVolume(HWND j, int id, int idValor, int y, const wchar_t* rotulo, int maximo, int v)
+    {
+        Criar(j, L"STATIC", rotulo, 0, 24, y + 6, 166, 20, -1);
+        HWND b = Criar(j, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 182, y, 400, 32, id);
+        SendMessageW(b, TBM_SETRANGE, FALSE, MAKELPARAM(0, maximo));
+        SendMessageW(b, TBM_SETLINESIZE, 0, 5);
+        SendMessageW(b, TBM_SETPAGESIZE, 0, 10);
+        SendMessageW(b, TBM_SETPOS, TRUE, v);
+        BarraEscura(b);
+        Criar(j, L"STATIC", L"", SS_LEFT, 590, y + 6, 70, 20, idValor);
+        TextoVolume(j, idValor, v);
     }
 
     HWND Lista(HWND j, int id, int y, const wchar_t* rotulo, std::initializer_list<const wchar_t*> itens, int sel)
@@ -528,6 +711,7 @@ namespace
         g_op.telaCheia = g_marcado[ID_TELACHEIA];
         g_op.antisserrilhado = std::max(0, (int)SendDlgItemMessageW(j, ID_AA, CB_GETCURSEL, 0, 0));
         g_op.msaa = std::max(0, (int)SendDlgItemMessageW(j, ID_MSAA, CB_GETCURSEL, 0, 0));
+        g_op.smaa = std::max(0, (int)SendDlgItemMessageW(j, ID_SMAA, CB_GETCURSEL, 0, 0));
         g_op.escala = std::max(0, (int)SendDlgItemMessageW(j, ID_ESCALA, CB_GETCURSEL, 0, 0));
         g_op.fsr = FsrDaLista(std::max(0, (int)SendDlgItemMessageW(j, ID_FSR, CB_GETCURSEL, 0, 0)));
         g_op.fsrNitidez = std::max(0, (int)SendDlgItemMessageW(j, ID_FSR_NITIDEZ, CB_GETCURSEL, 0, 0));
@@ -539,6 +723,11 @@ namespace
         g_op.detalhe = std::max(0, (int)SendDlgItemMessageW(j, ID_DETALHE, CB_GETCURSEL, 0, 0)) - 2;
         g_op.ao = std::max(0, (int)SendDlgItemMessageW(j, ID_AO, CB_GETCURSEL, 0, 0));
         g_op.formato = std::max(0, (int)SendDlgItemMessageW(j, ID_FORMATO, CB_GETCURSEL, 0, 0));
+        // placa de video: item 0 = automatica (nome vazio); os outros na ordem de g_placas
+        if (const int p = (int)SendDlgItemMessageW(j, ID_PLACA, CB_GETCURSEL, 0, 0); p >= 0)
+            g_op.placaVideo = p >= 1 && p <= (int)g_placas.size() ? g_placas[p - 1].nome : std::wstring();
+        g_op.fov = std::clamp((int)SendDlgItemMessageW(j, ID_FOV, TBM_GETPOS, 0, 0), 0, FOV_MAX);   // graus a mais
+        g_op.mira = std::clamp((int)SendDlgItemMessageW(j, ID_MIRA, TBM_GETPOS, 0, 0), MIRA_MIN, MIRA_MAX);   // tamanho da mira (%)
         g_op.vsync = g_marcado[ID_VSYNC];
         g_op.autoHdr = g_marcado[ID_AUTOHDR];
         g_op.hdrFalso = g_marcado[ID_HDRFALSO];
@@ -548,6 +737,14 @@ namespace
         g_op.pularLauncher = g_marcado[ID_DIRETO];
         bool* trapacas[] = { &g_op.trapacaMunicao, &g_op.trapacaAdrenalina, &g_op.trapacaFeral, &g_op.trapacaFases, &g_op.trapacaMapas, &g_op.trapacaInvencivel };
         for (int i = 0; i < 6; i++) *trapacas[i] = g_marcado[ID_TRAPACA + i];
+        g_op.saveState = g_marcado[ID_SST_LIGADO];
+        g_op.saveStateSalvar = SAVESTATE_TECLAS[std::clamp((int)SendDlgItemMessageW(j, ID_SST_SALVAR, CB_GETCURSEL, 0, 0), 0, SAVESTATE_N_TECLAS - 1)];
+        g_op.saveStateCarregar = SAVESTATE_TECLAS[std::clamp((int)SendDlgItemMessageW(j, ID_SST_CARREGAR, CB_GETCURSEL, 0, 0), 0, SAVESTATE_N_TECLAS - 1)];
+        g_op.somSaida = IdSom(j, ID_SOM_SAIDA, g_saidasSom);
+        g_op.vozFone = IdSom(j, ID_SOM_FONE, g_saidasSom);
+        g_op.vozMicrofone = IdSom(j, ID_SOM_MIC, g_micsSom);
+        g_op.volumeJogo = std::clamp((int)SendDlgItemMessageW(j, ID_VOL_JOGO, TBM_GETPOS, 0, 0), 0, 100);
+        g_op.volumeVoz = std::clamp((int)SendDlgItemMessageW(j, ID_VOL_VOZ, TBM_GETPOS, 0, 0), 0, VOLUME_VOZ_MAX);
         wchar_t ip[256] = {}; GetDlgItemTextW(j, ID_ANFITRIAO, ip, 256);
         g_op.ipAnfitriao.clear();
         for (wchar_t* c = ip; *c; c++) if (*c > 32 && *c < 127) g_op.ipAnfitriao += (char)*c;   // IP ou nome: so ASCII, sem espacos
@@ -695,24 +892,73 @@ namespace
         InvalidateRect(lb, nullptr, TRUE);
     }
 
+    // Cada linha e desenhada numa imagem na memoria e copiada de uma vez: desenhar direto na tela (fundo, depois
+    // miniatura e texto) fazia os saves piscarem ao clicar e ao rolar.
     void DesenharLinhaOuGrade(const DRAWITEMSTRUCT* d, int n, int porLinha, void (*linha)(HDC, RECT, int), void (*icone)(HDC, RECT, int))
     {
-        RECT r = d->rcItem;
-        FillRect(d->hDC, &r, PincelCartao());
-        if ((int)d->itemID < 0) return;
-        if (!g_op.launcherIcones)
+        const RECT ri = d->rcItem;
+        const int lw = ri.right - ri.left, lh = ri.bottom - ri.top;
+        if (lw <= 0 || lh <= 0) return;
+        HDC dc = CreateCompatibleDC(d->hDC);
+        HBITMAP bmp = CreateCompatibleBitmap(d->hDC, lw, lh);
+        HGDIOBJ velho = SelectObject(dc, bmp);
+        RECT r{ 0, 0, lw, lh };
+        FillRect(dc, &r, PincelCartao());
+        if ((int)d->itemID >= 0)
         {
-            if ((int)d->itemID < n) linha(d->hDC, r, (int)d->itemID);
-            return;
+            if (!g_op.launcherIcones)
+            {
+                if ((int)d->itemID < n) linha(dc, r, (int)d->itemID);
+            }
+            else
+            {
+                const int w = lw / porLinha;
+                for (int c = 0; c < porLinha; c++)
+                {
+                    int i = (int)d->itemID * porLinha + c;
+                    if (i >= n) break;
+                    icone(dc, RECT{ c * w, 0, (c + 1) * w, lh }, i);
+                }
+            }
         }
-        const int w = (r.right - r.left) / porLinha;
-        for (int c = 0; c < porLinha; c++)
+        BitBlt(d->hDC, ri.left, ri.top, lw, lh, dc, 0, 0, SRCCOPY);
+        SelectObject(dc, velho);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+    }
+
+    // a LISTBOX apagava o fundo inteiro antes de redesenhar as linhas (pisca ao rolar): aqui o fundo e as linhas vao
+    // para uma imagem na memoria e a tela recebe tudo pronto
+    LRESULT CALLBACK ListaSemPisca(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+    {
+        switch (msg)
         {
-            int i = (int)d->itemID * porLinha + c;
-            if (i >= n) break;
-            RECT t{ r.left + c * w, r.top, r.left + (c + 1) * w, r.bottom };
-            icone(d->hDC, t, i);
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT:
+        {
+            if (wp) break;   // ja veio com um HDC (impressao): normal
+            PAINTSTRUCT ps;
+            HDC tela = BeginPaint(h, &ps);
+            RECT rc; GetClientRect(h, &rc);
+            if (rc.right > 0 && rc.bottom > 0)
+            {
+                HDC dc = CreateCompatibleDC(tela);
+                HBITMAP bmp = CreateCompatibleBitmap(tela, rc.right, rc.bottom);
+                HGDIOBJ velho = SelectObject(dc, bmp);
+                FillRect(dc, &rc, PincelCartao());
+                DefSubclassProc(h, WM_PAINT, (WPARAM)dc, 0);   // a LISTBOX desenha as linhas (WM_DRAWITEM) neste HDC
+                BitBlt(tela, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top,
+                       dc, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+                SelectObject(dc, velho);
+                DeleteObject(bmp);
+                DeleteDC(dc);
+            }
+            EndPaint(h, &ps);
+            return 0;
         }
+        case WM_NCDESTROY: RemoveWindowSubclass(h, ListaSemPisca, 3); break;
+        }
+        return DefSubclassProc(h, msg, wp, lp);
     }
 
     // ---------------------------------------------------------------- jogos salvos do perfil
@@ -901,6 +1147,642 @@ namespace
         if (SHFileOperationW(&op) != 0 || op.fAnyOperationsAborted)
             MessageBoxW(j, TR(L"Não deu para apagar o jogo salvo.", L"Could not delete the saved game."), TR(L"Apagar", L"Delete"), MB_ICONWARNING);
         CarregarSaves(j);
+    }
+
+    // ---------------------------------------------------------------- icone do perfil, criar e excluir perfil
+    // Cada perfil tem um icone: um dos 10 desenhados aqui (GDI+) ou uma imagem do jogador. Fica na pasta do perfil:
+    // _icone.txt = numero (1-10; 0 = imagem propria) e _icone.png = a imagem propria ja recortada em 128x128.
+    // Sem _icone.txt: icone 1.
+    constexpr UINT WM_PERFIL_NOVO = WM_APP + 2;   // resposta da caixa de digitacao do nome do perfil novo (teclado.cpp)
+    constexpr int N_ICONES = 10, ID_ICONE = 1000, ID_ICONE_IMAGEM = 1100, ID_ICONE_CANCELAR = 1101;
+
+    Gdiplus::Color Cg(COLORREF c, BYTE a = 255) { return Gdiplus::Color(a, GetRValue(c), GetGValue(c), GetBValue(c)); }
+
+    // desenho de cada icone num quadrado de 100x100 (cor de destaque propria)
+    void DesenharIconePerfil(Gdiplus::Graphics& g, Gdiplus::RectF r, int n)
+    {
+        using namespace Gdiplus;
+        static const COLORREF cores[N_ICONES] = { RGB(236, 174, 52), RGB(205, 48, 34), RGB(226, 214, 186), RGB(118, 176, 72), RGB(176, 186, 198),
+                                                  RGB(242, 124, 34), RGB(192, 222, 64), RGB(74, 136, 206), RGB(166, 104, 226), RGB(250, 212, 80) };
+        n = std::clamp(n, 1, N_ICONES);
+        const Color cor = Cg(cores[n - 1]), escuro(255, 22, 19, 15);
+        GraphicsState st = g.Save();
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.TranslateTransform(r.X, r.Y);
+        g.ScaleTransform(r.Width / 100.0f, r.Height / 100.0f);
+        SolidBrush pincel(cor), pEscuro(escuro);
+        Pen caneta(cor, 6);
+        caneta.SetStartCap(LineCapRound); caneta.SetEndCap(LineCapRound); caneta.SetLineJoin(LineJoinRound);
+        switch (n)
+        {
+        case 1:   // mira
+            g.DrawEllipse(&caneta, 24.0f, 24.0f, 52.0f, 52.0f);
+            g.DrawLine(&caneta, 50.0f, 10.0f, 50.0f, 32.0f); g.DrawLine(&caneta, 50.0f, 68.0f, 50.0f, 90.0f);
+            g.DrawLine(&caneta, 10.0f, 50.0f, 32.0f, 50.0f); g.DrawLine(&caneta, 68.0f, 50.0f, 90.0f, 50.0f);
+            g.FillEllipse(&pincel, 44.0f, 44.0f, 12.0f, 12.0f);
+            break;
+        case 2:   // garras
+        {
+            Pen garra(cor, 9);
+            garra.SetStartCap(LineCapTriangle); garra.SetEndCap(LineCapTriangle);
+            for (int k = 0; k < 3; k++)
+            {
+                const float x = 36.0f + k * 15.0f;
+                g.DrawBezier(&garra, x, 14.0f, x + 6, 38.0f, x - 6, 62.0f, x - 16, 86.0f);
+            }
+            break;
+        }
+        case 3:   // caveira
+        {
+            g.FillEllipse(&pincel, 24.0f, 14.0f, 52.0f, 50.0f);
+            g.FillRectangle(&pincel, 34.0f, 52.0f, 32.0f, 26.0f);
+            g.FillEllipse(&pEscuro, 32.0f, 34.0f, 14.0f, 15.0f);
+            g.FillEllipse(&pEscuro, 54.0f, 34.0f, 14.0f, 15.0f);
+            PointF nariz[3] = { { 50, 52 }, { 45.5f, 61 }, { 54.5f, 61 } };
+            g.FillPolygon(&pEscuro, nariz, 3);
+            Pen dente(escuro, 2.5f);
+            for (float x : { 42.0f, 50.0f, 58.0f }) g.DrawLine(&dente, x, 67.0f, x, 78.0f);
+            break;
+        }
+        case 4:   // palmeira
+        {
+            Pen tronco(Color(255, 156, 104, 52), 7);
+            tronco.SetStartCap(LineCapRound); tronco.SetEndCap(LineCapRound);
+            g.DrawBezier(&tronco, 54.0f, 90.0f, 52.0f, 70.0f, 44.0f, 52.0f, 50.0f, 36.0f);
+            for (float a : { -160.0f, -120.0f, -80.0f, -40.0f, 0.0f })
+            {
+                GraphicsState f = g.Save();
+                g.TranslateTransform(50, 36);
+                g.RotateTransform(a);
+                g.FillEllipse(&pincel, 0.0f, -6.0f, 36.0f, 12.0f);
+                g.Restore(f);
+            }
+            SolidBrush coco(Color(255, 96, 64, 30));
+            g.FillEllipse(&coco, 42.0f, 38.0f, 8.0f, 8.0f); g.FillEllipse(&coco, 51.0f, 40.0f, 8.0f, 8.0f);
+            break;
+        }
+        case 5:   // faca
+        {
+            PointF lamina[5] = { { 24, 70 }, { 70, 22 }, { 84, 16 }, { 78, 30 }, { 32, 78 } };
+            g.FillPolygon(&pincel, lamina, 5);
+            Pen brilho(Color(255, 232, 238, 244), 2);
+            g.DrawLine(&brilho, 30.0f, 70.0f, 76.0f, 24.0f);
+            Pen guarda(Color(255, 70, 60, 50), 6), cabo(Color(255, 120, 78, 42), 11);
+            guarda.SetStartCap(LineCapRound); guarda.SetEndCap(LineCapRound);
+            cabo.SetStartCap(LineCapRound); cabo.SetEndCap(LineCapRound);
+            g.DrawLine(&cabo, 24.0f, 76.0f, 12.0f, 88.0f);
+            g.DrawLine(&guarda, 18.0f, 66.0f, 34.0f, 82.0f);
+            break;
+        }
+        case 6:   // chama
+        {
+            auto chama = [&](float s, const Color& c) {
+                GraphicsPath p;
+                p.AddBezier(50.0f, 90.0f, 50 - 28 * s, 86.0f, 50 - 30 * s, 56.0f, 50 - 12 * s, 40.0f);
+                p.AddBezier(50 - 12 * s, 40.0f, 50 - 4 * s, 32.0f, 46.0f, 22.0f, 50.0f, 90 - 78 * s);
+                p.AddBezier(50.0f, 90 - 78 * s, 58 + 8 * s, 30.0f, 50 + 32 * s, 48.0f, 50 + 26 * s, 68.0f);
+                p.AddBezier(50 + 26 * s, 68.0f, 50 + 22 * s, 82.0f, 58.0f, 90.0f, 50.0f, 90.0f);
+                SolidBrush b(c);
+                g.FillPath(&b, &p);
+            };
+            chama(1.0f, cor);
+            chama(0.55f, Color(255, 252, 214, 90));
+            break;
+        }
+        case 7:   // olho (visao feral)
+        {
+            GraphicsPath p;
+            p.AddBezier(10.0f, 50.0f, 30.0f, 22.0f, 70.0f, 22.0f, 90.0f, 50.0f);
+            p.AddBezier(90.0f, 50.0f, 70.0f, 78.0f, 30.0f, 78.0f, 10.0f, 50.0f);
+            g.FillPath(&pEscuro, &p);
+            Pen borda(cor, 5);
+            g.DrawPath(&borda, &p);
+            g.FillEllipse(&pincel, 35.0f, 35.0f, 30.0f, 30.0f);
+            SolidBrush pupila(Color(255, 8, 8, 6));
+            g.FillEllipse(&pupila, 46.5f, 37.0f, 7.0f, 26.0f);
+            break;
+        }
+        case 8:   // escudo
+        {
+            GraphicsPath p;
+            p.AddLine(50.0f, 10.0f, 82.0f, 22.0f);
+            p.AddBezier(82.0f, 22.0f, 84.0f, 56.0f, 72.0f, 76.0f, 50.0f, 90.0f);
+            p.AddBezier(50.0f, 90.0f, 28.0f, 76.0f, 16.0f, 56.0f, 18.0f, 22.0f);
+            p.CloseFigure();
+            g.FillPath(&pincel, &p);
+            Pen faixa(Color(255, 214, 230, 250), 6), borda(Color(255, 30, 50, 80), 3);
+            g.DrawLine(&faixa, 50.0f, 22.0f, 50.0f, 78.0f);
+            g.DrawLine(&faixa, 30.0f, 44.0f, 70.0f, 44.0f);
+            g.DrawPath(&borda, &p);
+            break;
+        }
+        case 9:   // raio
+        {
+            PointF raio[7] = { { 60, 8 }, { 24, 54 }, { 46, 54 }, { 36, 92 }, { 78, 40 }, { 55, 40 }, { 68, 8 } };
+            g.FillPolygon(&pincel, raio, 7);
+            break;
+        }
+        default:   // estrela
+        {
+            PointF e[10];
+            for (int k = 0; k < 10; k++)
+            {
+                const float a = -3.14159265f / 2 + k * 3.14159265f / 5, raio = k % 2 ? 17.0f : 40.0f;
+                e[k] = PointF(50 + raio * cosf(a), 54 + raio * sinf(a));
+            }
+            g.FillPolygon(&pincel, e, 10);
+            break;
+        }
+        }
+        g.Restore(st);
+    }
+
+    struct IconeAtual { std::string perfil; bool lido = false; int n = 1; std::unique_ptr<Gdiplus::Bitmap> imagem; };
+    IconeAtual g_icone;
+
+    int LerIconeDoPerfil(const std::string& perfil, std::unique_ptr<Gdiplus::Bitmap>* imagem)
+    {
+        const auto pasta = PastaDoPerfil(g_exeDir, perfil);
+        int n = 1;
+        std::ifstream f(pasta / "_icone.txt");
+        if (f >> n) n = std::clamp(n, 0, N_ICONES); else n = 1;
+        if (n == 0)
+        {
+            std::error_code ec;
+            if (imagem && std::filesystem::exists(pasta / "_icone.png", ec))
+            {
+                // copia na memoria: o arquivo fica livre (trocar a imagem de novo regrava ele)
+                std::ifstream png(pasta / "_icone.png", std::ios::binary);
+                std::vector<char> d((std::istreambuf_iterator<char>(png)), std::istreambuf_iterator<char>());
+                if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, d.size()))
+                {
+                    memcpy(GlobalLock(h), d.data(), d.size());
+                    GlobalUnlock(h);
+                    IStream* s = nullptr;
+                    if (SUCCEEDED(CreateStreamOnHGlobal(h, TRUE, &s)))
+                    {
+                        std::unique_ptr<Gdiplus::Bitmap> b(Gdiplus::Bitmap::FromStream(s));
+                        if (b && b->GetLastStatus() == Gdiplus::Ok)
+                        {
+                            // copia desligada do stream
+                            auto c = std::make_unique<Gdiplus::Bitmap>((INT)b->GetWidth(), (INT)b->GetHeight(), PixelFormat32bppPARGB);
+                            Gdiplus::Graphics gc(c.get());
+                            gc.DrawImage(b.get(), 0, 0, (INT)b->GetWidth(), (INT)b->GetHeight());
+                            *imagem = std::move(c);
+                        }
+                        s->Release();
+                    }
+                    else GlobalFree(h);
+                }
+            }
+            if (!imagem || !*imagem) n = imagem ? 1 : 0;
+        }
+        return n;
+    }
+
+    // o icone (ou a imagem) num quadrado arredondado; destaque = borda ambar (mouse em cima / escolhido)
+    void DesenharQuadroIcone(HDC dc, RECT r, int n, Gdiplus::Bitmap* imagem, COLORREF atras, COLORREF borda)
+    {
+        Arredondado(dc, r, 0, atras);
+        const int raio = std::max(4, (int)(r.right - r.left) / 8);
+        Arredondado(dc, r, raio, RGB(30, 26, 20), borda, S(2));
+        Gdiplus::Graphics g(dc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        const float m = (float)S(3);
+        Gdiplus::RectF dentro((float)r.left + m, (float)r.top + m, (float)(r.right - r.left) - 2 * m, (float)(r.bottom - r.top) - 2 * m);
+        if (n == 0 && imagem)
+        {
+            Gdiplus::GraphicsPath p;
+            const float rr = (float)raio - m;
+            p.AddArc(dentro.X, dentro.Y, 2 * rr, 2 * rr, 180, 90);
+            p.AddArc(dentro.GetRight() - 2 * rr, dentro.Y, 2 * rr, 2 * rr, 270, 90);
+            p.AddArc(dentro.GetRight() - 2 * rr, dentro.GetBottom() - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+            p.AddArc(dentro.X, dentro.GetBottom() - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+            p.CloseFigure();
+            g.SetClip(&p);
+            g.DrawImage(imagem, dentro);
+            g.ResetClip();
+        }
+        else
+        {
+            const float folga = dentro.Width * 0.1f;
+            DesenharIconePerfil(g, Gdiplus::RectF(dentro.X + folga, dentro.Y + folga, dentro.Width - 2 * folga, dentro.Height - 2 * folga), n);
+        }
+    }
+
+    void DesenharAvatar(HWND j, const DRAWITEMSTRUCT* d)
+    {
+        const std::string perfil = PerfilDaTela(j);
+        if (!g_icone.lido || g_icone.perfil != perfil)
+        {
+            g_icone.imagem.reset();
+            g_icone.n = LerIconeDoPerfil(perfil, &g_icone.imagem);
+            g_icone.perfil = perfil;
+            g_icone.lido = true;
+        }
+        const bool sobre = MouseSobre(d->hwndItem), foco = (d->itemState & ODS_FOCUS) != 0;
+        DesenharQuadroIcone(d->hDC, d->rcItem, g_icone.n, g_icone.imagem.get(), CARTAO, sobre || foco ? AMBAR : LINHA);
+    }
+
+    // topo da aba TRAPACAS: de qual perfil e (icone + nome). As trapacas (opcoes.ini) valem para todos os perfis, mas
+    // fases e mapas ficam gravados no perfil com que se joga, que e o escolhido na aba PERFIL.
+    void DesenharPerfilDasTrapacas(HWND j, const DRAWITEMSTRUCT* d, const wchar_t* linha2 = nullptr)
+    {
+        const std::string perfil = PerfilDaTela(j);
+        if (!g_icone.lido || g_icone.perfil != perfil)
+        {
+            g_icone.imagem.reset();
+            g_icone.n = LerIconeDoPerfil(perfil, &g_icone.imagem);
+            g_icone.perfil = perfil;
+            g_icone.lido = true;
+        }
+        HDC dc = d->hDC;
+        const RECT r = d->rcItem;
+        HBRUSH fundo = CreateSolidBrush(CARTAO);
+        FillRect(dc, &r, fundo);
+        DeleteObject(fundo);
+        const int lado = r.bottom - r.top;
+        DesenharQuadroIcone(dc, RECT{ r.left, r.top, r.left + lado, r.bottom }, g_icone.n, g_icone.imagem.get(), CARTAO, LINHA);
+        wchar_t nome[64] = {};
+        GetDlgItemTextW(j, ID_PERFIL, nome, 64);
+        if (!nome[0]) { const std::string p = PerfilPrincipal(); std::copy(p.begin(), p.end(), nome); }
+        SetBkMode(dc, TRANSPARENT);
+        HGDIOBJ antes = SelectObject(dc, g_fonteNome);
+        SetTextColor(dc, TEXTO);
+        RECT t{ r.left + lado + S(14), r.top, r.right, r.top + lado / 2 };
+        const std::wstring linha = std::wstring(TR(L"Perfil:", L"Profile:")) + L" " + nome;
+        DrawTextW(dc, linha.c_str(), -1, &t, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        SelectObject(dc, g_fonte);
+        SetTextColor(dc, TEXTO_FRACO);
+        t.top = r.top + lado / 2; t.bottom = r.bottom;
+        DrawTextW(dc, linha2 ? linha2 : TR(L"As trapaças valem para todos os perfis. Fases e mapas ficam gravados neste perfil (troque na aba PERFIL).",
+                                           L"Cheats apply to every profile. Levels and maps are stored in this profile (change it in the PROFILE tab)."),
+                  -1, &t, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        SelectObject(dc, antes);
+    }
+
+    // ---------------------------------------------------------------- aba SAVE STATE: estados salvos no disco do perfil
+    std::vector<SaveStateArquivo> g_sst;   // do perfil da tela, o mais novo primeiro (save_state.cpp SaveStatesDoPerfil)
+
+    void CarregarSaveStates(HWND j)
+    {
+        g_sst = SaveStatesDoPerfil(PastaDoPerfil(g_exeDir, PerfilDaTela(j)));
+        HWND lb = GetDlgItem(j, ID_SST_LISTA);
+        if (!lb) return;
+        SendMessageW(lb, LB_RESETCONTENT, 0, 0);
+        // sem estados: uma linha so, com o aviso (DesenharSaveState)
+        for (size_t i = 0; i < std::max<size_t>(g_sst.size(), 1); i++) SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)L"");
+        EnableWindow(GetDlgItem(j, ID_SST_APAGAR), FALSE);
+    }
+
+    void DesenharSaveState(const DRAWITEMSTRUCT* d)
+    {
+        const RECT ri = d->rcItem;
+        const int lw = ri.right - ri.left, lh = ri.bottom - ri.top;
+        if (lw <= 0 || lh <= 0 || (int)d->itemID < 0) return;
+        HDC dc = CreateCompatibleDC(d->hDC);
+        HBITMAP bmp = CreateCompatibleBitmap(d->hDC, lw, lh);
+        HGDIOBJ velho = SelectObject(dc, bmp);
+        RECT r{ 0, 0, lw, lh };
+        FillRect(dc, &r, PincelCartao());
+        SetBkMode(dc, TRANSPARENT);
+        HGDIOBJ antes = SelectObject(dc, g_fonte);
+        if (g_sst.empty())
+        {
+            SetTextColor(dc, TEXTO_FRACO);
+            RECT t{ S(12), 0, lw - S(12), lh };
+            DrawTextW(dc, TR(L"Nenhum estado salvo neste perfil ainda. No jogo, salve com a tecla de salvar.",
+                             L"No state saved in this profile yet. In the game, save with the save key."),
+                      -1, &t, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        }
+        else if ((int)d->itemID < (int)g_sst.size())
+        {
+            const SaveStateArquivo& s = g_sst[d->itemID];
+            const bool sel = (d->itemState & ODS_SELECTED) != 0;
+            Arredondado(dc, RECT{ S(4), S(3), lw - S(4), lh - S(3) }, S(8), sel ? RGB(44, 38, 28) : CAMPO, sel ? AMBAR_ESC : LINHA);
+            // fase (como o jogo chama) e, embaixo, a data e a posicao; na direita a posicao na lista da fase
+            std::wstring fase(s.fase.begin(), s.fase.end());
+            SelectObject(dc, g_fonteNome);
+            SetTextColor(dc, sel ? AMBAR : TEXTO);
+            RECT t{ S(16), S(6), lw - S(16), lh / 2 + S(2) };
+            DrawTextW(dc, (TR(L"Fase ", L"Level ") + fase).c_str(), -1, &t, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+            int n = 0;
+            for (int i = 0; i <= (int)d->itemID; i++) if (g_sst[i].fase == s.fase) n++;
+            wchar_t q[64];
+            swprintf(q, 64, TR(L"%dº da fase", L"#%d in the level"), n);
+            SelectObject(dc, g_fonte);
+            SetTextColor(dc, n == 1 ? VERDE : TEXTO_FRACO);
+            DrawTextW(dc, n == 1 ? TR(L"o mais novo da fase", L"newest in the level") : q, -1, &t, DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+            wchar_t l[160];
+            swprintf(l, 160, TR(L"%02d/%02d/%04d às %02d:%02d:%02d   •   posição %.0f, %.0f, %.0f", L"%02d/%02d/%04d at %02d:%02d:%02d   •   position %.0f, %.0f, %.0f"),
+                     (idioma::ingles && !idioma::outro) ? s.mes : s.dia, (idioma::ingles && !idioma::outro) ? s.dia : s.mes, s.ano, s.hora, s.minuto, s.segundo, s.x, s.y, s.z);
+            SetTextColor(dc, TEXTO_FRACO);
+            RECT t2{ S(16), lh / 2 - S(2), lw - S(16), lh - S(6) };
+            DrawTextW(dc, l, -1, &t2, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+        SelectObject(dc, antes);
+        BitBlt(d->hDC, ri.left, ri.top, lw, lh, dc, 0, 0, SRCCOPY);
+        SelectObject(dc, velho);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+    }
+
+    void ApagarSaveState(HWND j)
+    {
+        const int i = (int)SendDlgItemMessageW(j, ID_SST_LISTA, LB_GETCURSEL, 0, 0);
+        if (i < 0 || i >= (int)g_sst.size()) return;
+        const SaveStateArquivo& s = g_sst[i];
+        wchar_t p[256];
+        swprintf(p, 256, TR(L"Apagar o estado da fase %hs de %02d/%02d %02d:%02d:%02d?\r\n\r\nEle vai para a Lixeira do Windows (dá para recuperar de lá).",
+                            L"Delete the level %hs state from %02d/%02d %02d:%02d:%02d?\r\n\r\nIt goes to the Windows Recycle Bin (it can be restored from there)."),
+                 s.fase.c_str(), (idioma::ingles && !idioma::outro) ? s.mes : s.dia, (idioma::ingles && !idioma::outro) ? s.dia : s.mes, s.hora, s.minuto, s.segundo);
+        if (MessageBoxW(j, p, TR(L"Apagar", L"Delete"), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+        std::wstring de = s.arquivo.wstring();
+        de.push_back(L'\0');   // lista terminada com dois zeros
+        SHFILEOPSTRUCTW op{};
+        op.hwnd = j; op.wFunc = FO_DELETE; op.pFrom = de.c_str();
+        op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
+        if (SHFileOperationW(&op) != 0 || op.fAnyOperationsAborted)
+            MessageBoxW(j, TR(L"Não deu para apagar o estado.", L"Could not delete the state."), TR(L"Apagar", L"Delete"), MB_ICONWARNING);
+        CarregarSaveStates(j);
+    }
+
+    // o perfil da tela mudou (troca, novo, excluido, outro icone): o icone da aba PERFIL, o topo das abas TRAPACAS e
+    // SAVE STATE e a lista dos estados salvos (sao do perfil)
+    void AtualizarIconePerfil(HWND j)
+    {
+        InvalidateRect(GetDlgItem(j, ID_AVATAR), nullptr, FALSE);
+        InvalidateRect(GetDlgItem(j, ID_TRAPACA_PERFIL), nullptr, FALSE);
+        InvalidateRect(GetDlgItem(j, ID_SST_PERFIL), nullptr, FALSE);
+        CarregarSaveStates(j);
+    }
+
+    // imagem do jogador -> quadrado do meio recortado, 128x128, PNG na pasta do perfil
+    bool GravarImagemDoPerfil(const std::wstring& arquivo, const std::filesystem::path& pasta)
+    {
+        Gdiplus::Bitmap orig(arquivo.c_str());
+        if (orig.GetLastStatus() != Gdiplus::Ok || orig.GetWidth() == 0 || orig.GetHeight() == 0) return false;
+        const int w = (int)orig.GetWidth(), h = (int)orig.GetHeight(), lado = std::min(w, h);
+        Gdiplus::Bitmap novo(128, 128, PixelFormat32bppARGB);
+        {
+            Gdiplus::Graphics g(&novo);
+            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+            g.DrawImage(&orig, Gdiplus::Rect(0, 0, 128, 128), (w - lado) / 2, (h - lado) / 2, lado, lado, Gdiplus::UnitPixel);
+        }
+        UINT num = 0, tam = 0;
+        Gdiplus::GetImageEncodersSize(&num, &tam);
+        if (!tam) return false;
+        std::vector<BYTE> buf(tam);
+        auto* cod = (Gdiplus::ImageCodecInfo*)buf.data();
+        Gdiplus::GetImageEncoders(num, tam, cod);
+        for (UINT i = 0; i < num; i++)
+            if (!wcscmp(cod[i].MimeType, L"image/png"))
+            {
+                std::error_code ec;
+                std::filesystem::create_directories(pasta, ec);
+                return novo.Save((pasta / "_icone.png").wstring().c_str(), &cod[i].Clsid, nullptr) == Gdiplus::Ok;
+            }
+        return false;
+    }
+
+    // janela de escolha do icone (modal): 10 icones, IMAGEM PROPRIA..., CANCELAR
+    struct EscolhaIcone { int atual = 1; int resultado = -1; bool fim = false; };
+    EscolhaIcone g_escolha;
+
+    LRESULT CALLBACK ProcIcones(HWND w, UINT msg, WPARAM wp, LPARAM lp)
+    {
+        switch (msg)
+        {
+        case WM_COMMAND:
+        {
+            const int id = LOWORD(wp);
+            if (id >= ID_ICONE && id < ID_ICONE + N_ICONES) g_escolha.resultado = id - ID_ICONE + 1;
+            else if (id == ID_ICONE_IMAGEM) g_escolha.resultado = 0;
+            else if (id != ID_ICONE_CANCELAR && id != IDCANCEL) break;
+            DestroyWindow(w);
+            return 0;
+        }
+        case WM_DRAWITEM:
+        {
+            auto* d = (const DRAWITEMSTRUCT*)lp;
+            const int id = (int)d->CtlID;
+            if (id >= ID_ICONE && id < ID_ICONE + N_ICONES)
+            {
+                const int n = id - ID_ICONE + 1;
+                const bool sobre = MouseSobre(d->hwndItem) || (d->itemState & ODS_FOCUS);
+                DesenharQuadroIcone(d->hDC, d->rcItem, n, nullptr, FUNDO, n == g_escolha.atual ? AMBAR : sobre ? TEXTO_FRACO : LINHA);
+            }
+            else DesenharBotao(d, false, FonteBotao(), FUNDO);
+            return TRUE;
+        }
+        case WM_CTLCOLORSTATIC: return CorTexto((HDC)wp, TEXTO_FRACO);
+        case WM_CTLCOLORBTN: return (LRESULT)PincelFundo();
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT:
+        {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(w, &ps);
+            RECT r; GetClientRect(w, &r);
+            FillRect(dc, &r, PincelFundo());
+            Secao(dc, S(20), S(14), r.right - S(20), TR(L"ÍCONE DO PERFIL", L"PROFILE ICON"));
+            EndPaint(w, &ps);
+            return 0;
+        }
+        case WM_KEYDOWN:
+            if (wp == VK_ESCAPE) { DestroyWindow(w); return 0; }
+            break;
+        case WM_CLOSE: DestroyWindow(w); return 0;
+        case WM_DESTROY: g_escolha.fim = true; return 0;
+        }
+        return DefWindowProcW(w, msg, wp, lp);
+    }
+
+    // -1 = cancelou; 1-10 = icone; 0 = imagem propria (escolhe o arquivo aqui e grava na pasta do perfil)
+    int EscolherIcone(HWND j, const std::string& perfil)
+    {
+        static bool registrada = false;
+        if (!registrada)
+        {
+            WNDCLASSW wc{};
+            wc.lpfnWndProc = ProcIcones;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+            wc.hbrBackground = PincelFundo();
+            wc.lpszClassName = L"PredatorIconePerfil";
+            RegisterClassW(&wc);
+            registrada = true;
+        }
+        g_escolha = {};
+        g_escolha.atual = LerIconeDoPerfil(perfil, nullptr);
+        constexpr int LADO = 88, ESPACO = 14, M = 20, TOPO_G = 46;
+        const int largura = M * 2 + 5 * LADO + 4 * ESPACO, altura = TOPO_G + 2 * LADO + ESPACO + 20 + 40 + M + 24;
+        RECT area{ 0, 0, S(largura), S(altura) };
+        const DWORD estilo = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        AdjustWindowRect(&area, estilo, FALSE);
+        RECT pj; GetWindowRect(j, &pj);
+        const int lw = area.right - area.left, lh = area.bottom - area.top;
+        HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, L"PredatorIconePerfil", TR(L"Ícone do perfil", L"Profile icon"), estilo,
+                                 (pj.left + pj.right - lw) / 2, (pj.top + pj.bottom - lh) / 2, lw, lh, j, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!w) return -1;
+        TituloEscuro(w);
+        AplicarIcone(w);
+        auto criar = [&](const wchar_t* classe, const wchar_t* texto, DWORD est, int x, int y, int cw, int ch, int id) {
+            HWND c = CreateWindowExW(0, classe, texto, WS_CHILD | WS_VISIBLE | est, S(x), S(y), S(cw), S(ch), w, (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(c, WM_SETFONT, (WPARAM)g_fonte, TRUE);
+            return c;
+        };
+        for (int i = 0; i < N_ICONES; i++)
+            AcompanharMouse(criar(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, M + (i % 5) * (LADO + ESPACO), TOPO_G + (i / 5) * (LADO + ESPACO), LADO, LADO, ID_ICONE + i));
+        const int yb = TOPO_G + 2 * LADO + ESPACO + 16;
+        criar(L"STATIC", TR(L"Ou use uma imagem sua (PNG, JPG ou BMP): o meio dela vira um quadrado.",
+                            L"Or use your own picture (PNG, JPG or BMP): its middle becomes a square."), SS_LEFT, M, yb, largura - 2 * M, 20, -1);
+        AcompanharMouse(criar(L"BUTTON", TR(L"IMAGEM PRÓPRIA...", L"OWN PICTURE..."), BS_OWNERDRAW | WS_TABSTOP, M, yb + 26, 220, 38, ID_ICONE_IMAGEM));
+        AcompanharMouse(criar(L"BUTTON", TR(L"CANCELAR", L"CANCEL"), BS_OWNERDRAW | WS_TABSTOP, largura - M - 160, yb + 26, 160, 38, ID_ICONE_CANCELAR));
+        EnableWindow(j, FALSE);
+        ShowWindow(w, SW_SHOW);
+        MSG m;
+        while (!g_escolha.fim && GetMessageW(&m, nullptr, 0, 0) > 0)
+        {
+            if (m.message == WM_KEYDOWN && m.wParam == VK_ESCAPE && IsWindow(w)) { DestroyWindow(w); continue; }
+            if (IsWindow(w) && IsDialogMessageW(w, &m)) continue;
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+        EnableWindow(j, TRUE);
+        SetForegroundWindow(j);
+        if (g_escolha.resultado != 0) return g_escolha.resultado;
+        // imagem propria: escolher o arquivo
+        IFileOpenDialog* d = nullptr;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d)))) return -1;
+        DWORD o = 0; d->GetOptions(&o);
+        d->SetOptions(o | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST);
+        const COMDLG_FILTERSPEC filtro[] = { { TR(L"Imagens (PNG, JPG, BMP)", L"Pictures (PNG, JPG, BMP)"), L"*.png;*.jpg;*.jpeg;*.bmp;*.gif" } };
+        d->SetFileTypes(1, filtro);
+        d->SetTitle(TR(L"Imagem do perfil", L"Profile picture"));
+        int r = -1;
+        if (SUCCEEDED(d->Show(j)))
+        {
+            IShellItem* it = nullptr;
+            if (SUCCEEDED(d->GetResult(&it)))
+            {
+                PWSTR caminho = nullptr;
+                if (SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &caminho)))
+                {
+                    if (GravarImagemDoPerfil(caminho, PastaDoPerfil(g_exeDir, perfil))) r = 0;
+                    else MessageBoxW(j, TR(L"Não deu para abrir esta imagem.", L"Could not open this picture."), TR(L"Ícone do perfil", L"Profile icon"), MB_ICONWARNING);
+                    CoTaskMemFree(caminho);
+                }
+                it->Release();
+            }
+        }
+        d->Release();
+        return r;
+    }
+
+    void TrocarIcone(HWND j)
+    {
+        const std::string perfil = PerfilDaTela(j);
+        const int n = EscolherIcone(j, perfil);
+        if (n < 0) return;
+        const auto pasta = PastaDoPerfil(g_exeDir, perfil);
+        std::error_code ec;
+        std::filesystem::create_directories(pasta, ec);
+        std::ofstream(pasta / "_icone.txt") << n << "\n";
+        g_icone.lido = false;
+        AtualizarIconePerfil(j);
+    }
+
+    void NovoPerfil(HWND j)
+    {
+        EnableWindow(j, FALSE);
+        TecladoAbrir(TR(L"NOVO PERFIL", L"NEW PROFILE"), TR(L"Nome do perfil (até 15 letras, sem acentos):", L"Profile name (up to 15 letters):"), L"", 15,
+                     [j](bool ok, const std::wstring& texto) { PostMessageW(j, WM_PERFIL_NOVO, ok, (LPARAM)new std::wstring(texto)); });
+    }
+
+    void PerfilCriado(HWND j, bool ok, const std::wstring& texto)
+    {
+        EnableWindow(j, TRUE);
+        SetForegroundWindow(j);
+        if (!ok) return;
+        std::string nome;
+        for (wchar_t c : texto) if (c < 127) nome += (char)c;
+        nome = PerfilValido(nome);
+        const wchar_t* titulo = TR(L"Novo perfil", L"New profile");
+        if (nome.empty())
+        {
+            MessageBoxW(j, TR(L"Escreva um nome com letras sem acento, números, espaço, - ou _.", L"Type a name with letters, numbers, space, - or _."), titulo, MB_ICONWARNING);
+            return;
+        }
+        const std::wstring w(nome.begin(), nome.end());
+        HWND cb = GetDlgItem(j, ID_PERFIL);
+        int i = (int)SendMessageW(cb, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)w.c_str());
+        std::error_code ec;
+        if (i != CB_ERR || nome == PerfilPrincipal() || std::filesystem::exists(PastaDoPerfil(g_exeDir, nome), ec))
+        {
+            MessageBoxW(j, (TR(L"Já existe um perfil chamado \"", L"There is already a profile named \"") + w + L"\".").c_str(), titulo, MB_ICONWARNING);
+            return;
+        }
+        std::filesystem::create_directories(PastaDoPerfil(g_exeDir, nome), ec);
+        if (ec)
+        {
+            MessageBoxW(j, TR(L"Não deu para criar a pasta do perfil.", L"Could not create the profile folder."), titulo, MB_ICONWARNING);
+            return;
+        }
+        i = (int)SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)w.c_str());
+        SendMessageW(cb, CB_SETCURSEL, i, 0);
+        CarregarSaves(j);
+        g_icone.lido = false;
+        AtualizarIconePerfil(j);
+    }
+
+    void ExcluirPerfil(HWND j)
+    {
+        const std::string perfil = PerfilDaTela(j);
+        const wchar_t* titulo = TR(L"Excluir perfil", L"Delete profile");
+        if (perfil.empty())
+        {
+            MessageBoxW(j, TR(L"O perfil principal (User 1) não pode ser excluído.", L"The main profile (User 1) cannot be deleted."), titulo, MB_ICONINFORMATION);
+            return;
+        }
+        const std::wstring w(perfil.begin(), perfil.end());
+        std::wstring p = TR(L"Tem certeza que quer excluir o perfil \"", L"Are you sure you want to delete the profile \"") + w +
+                         TR(L"\"?\r\n\r\nOs jogos salvos, os mapas e as conquistas dele vão para a Lixeira do Windows (dá para recuperar de lá).",
+                            L"\"?\r\n\r\nIts saved games, maps and achievements go to the Windows Recycle Bin (they can be restored from there).");
+        if (MessageBoxW(j, p.c_str(), titulo, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+        const auto pasta = PastaDoPerfil(g_exeDir, perfil);
+        std::error_code ec;
+        if (std::filesystem::exists(pasta, ec))
+        {
+            std::wstring de = pasta.wstring();
+            de.push_back(L'\0');   // lista terminada com dois zeros
+            SHFILEOPSTRUCTW op{};
+            op.hwnd = j; op.wFunc = FO_DELETE; op.pFrom = de.c_str();
+            op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
+            if (SHFileOperationW(&op) != 0 || op.fAnyOperationsAborted)
+            {
+                MessageBoxW(j, TR(L"Não deu para excluir a pasta do perfil.", L"Could not delete the profile folder."), titulo, MB_ICONWARNING);
+                return;
+            }
+        }
+        HWND cb = GetDlgItem(j, ID_PERFIL);
+        const int i = (int)SendMessageW(cb, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)w.c_str());
+        if (i != CB_ERR) SendMessageW(cb, CB_DELETESTRING, i, 0);
+        SendMessageW(cb, CB_SETCURSEL, 0, 0);
+        if (g_op.perfil == perfil)
+        {
+            // o opcoes.ini nao pode continuar apontando para ele (a lista o traria de volta)
+            Opcoes copia = g_op;
+            OpcoesCarregar(g_exeDir);
+            g_op.perfil.clear();
+            OpcoesSalvar();
+            g_op = copia;
+            g_op.perfil.clear();
+        }
+        CarregarSaves(j);
+        g_icone.lido = false;
+        AtualizarIconePerfil(j);
     }
 
     // ---------------------------------------------------------------- conquistas
@@ -1111,8 +1993,13 @@ namespace
     void MostrarCategoria(HWND j, int cat)
     {
         if (cat == CAT_CONQUISTAS) CarregarConquistas(j);
+        if (cat == CAT_SAVESTATE) CarregarSaveStates(j);   // o jogo pode ter salvo estados desde a ultima vez
+        // nivel do microfone: o microfone so abre com o botao TESTAR e fecha ao sair da aba AUDIO (abrir o microfone de
+        // um fone Bluetooth faz o Windows passar o fone para o modo de chamada: som pior em tudo; audio_janela.cpp)
+        if (cat != CAT_AUDIO && g_categoria == CAT_AUDIO) MicTesteParar(j);
         g_categoria = cat;
         for (auto& [c, k] : g_daCategoria) ShowWindow(c, k == cat ? SW_SHOW : SW_HIDE);
+        AplicarRolagem(j);   // a coluna que rola mostra so o que cabe
         for (int i = 0; i < N_CAT; i++) InvalidateRect(GetDlgItem(j, ID_CAT + i), nullptr, FALSE);
         InvalidateRect(j, nullptr, FALSE);
     }
@@ -1294,6 +2181,13 @@ namespace
         }
         Secao(dc, S(24), S(118), S(264), TR(L"OPÇÕES", L"OPTIONS"));
         if (g_categoria == CAT_CONQUISTAS) DesenharBarraPontos(dc);
+        if (g_categoria == CAT_VIDEO && g_rolagemMax > 0)   // barra de rolagem da aba (sempre visivel)
+        {
+            const RECT t = TrilhoRolagem(), p = PuxadorRolagem();
+            Arredondado(dc, RECT{ S(t.left), S(t.top), S(t.right), S(t.bottom) }, S(BARRA_L / 2), CAMPO, LINHA);
+            Arredondado(dc, RECT{ S(p.left) + 1, S(p.top) + 1, S(p.right) - 1, S(p.bottom) - 1 }, S(BARRA_L / 2) - 1,
+                        g_arrasto >= 0 ? AMBAR : g_sobreBarra ? RGB(200, 144, 44) : AMBAR_ESC);
+        }
         if (g_categoria == CAT_PERFIL)
         {
             wchar_t t[96];
@@ -1315,6 +2209,7 @@ namespace
             // campo da pasta dentro de uma caixa desenhada no fundo (PintarFundo), com margem
             // menu de categorias; comeca na PASTA DO JOGO enquanto ela nao foi escolhida
             g_daCategoria.clear();
+            g_rolaveis.clear(); g_rolagem = 0;
             g_categoria = g_categoriaInicial >= 0 ? g_categoriaInicial : PastaValida(g_op.pastaJogo) ? CAT_VIDEO : CAT_PASTA;
             g_categoriaInicial = -1;
             {
@@ -1337,57 +2232,108 @@ namespace
             Criar(j, L"STATIC", L"", 0, 24, 184, 536, 40, ID_SITUACAO);
 
             g_criando = CAT_VIDEO;
-            Lista(j, ID_JANELA, 262, TR(L"Tamanho da janela:", L"Window size:"),
+            g_rolando = true;
+            {
+                // placa de video (placas_video.cpp): em notebook com duas placas o Windows pode dar a integrada ao jogo
+                HWND cb = Lista(j, ID_PLACA, 262, TR(L"Placa de vídeo:", L"Graphics card:"), { TR(L"Automática (a mais forte)", L"Automatic (the strongest)") }, 0);
+                g_placas = PlacasDeVideo();
+                int sel = 0;
+                for (size_t i = 0; i < g_placas.size(); i++)
+                {
+                    std::wstring t = g_placas[i].nome + L" (" + std::to_wstring(g_placas[i].memoriaMB) + L" MB";
+                    if (g_placas[i].integrada) t += TR(L", integrada", L", integrated");
+                    SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)(t + L")").c_str());
+                    if (!g_op.placaVideo.empty() && g_placas[i].nome == g_op.placaVideo) sel = (int)i + 1;
+                }
+                SendMessageW(cb, CB_SETCURSEL, sel, 0);
+            }
+            Lista(j, ID_JANELA, 294, TR(L"Tamanho da janela:", L"Window size:"),
                   { TR(L"Automático (o maior que cabe na tela)", L"Automatic (the largest that fits the screen)"), L"1280 × 720", L"1600 × 900", L"1920 × 1080", L"2560 × 1440" }, g_op.janela);
-            Criar(j, L"BUTTON", TR(L"Tela cheia (Alt+Enter troca durante o jogo)", L"Full screen (Alt+Enter switches during the game)"), WS_TABSTOP, 24, 294, 536, 24, ID_TELACHEIA);
-            Lista(j, ID_FORMATO, 322, TR(L"Formato da imagem:", L"Aspect ratio:"),
+            Criar(j, L"BUTTON", TR(L"Tela cheia (Alt+Enter troca durante o jogo)", L"Full screen (Alt+Enter switches during the game)"), WS_TABSTOP, 24, 326, 536, 24, ID_TELACHEIA);
+            Lista(j, ID_FORMATO, 354, TR(L"Formato da imagem:", L"Aspect ratio:"),
                   { TR(L"16:9 (como o jogo original)", L"16:9 (like the original game)"),
                     TR(L"Monitor - ultrawide 21:9 / 32:9 (experimental)", L"Monitor - ultrawide 21:9 / 32:9 (experimental)"),
                     TR(L"16:9 com barras pretas (ultrawide sem esticar)", L"16:9 with black bars (ultrawide without stretching)") }, g_op.formato);
-            Lista(j, ID_AA, 354, TR(L"Antisserrilhado (FXAA):", L"Anti-aliasing (FXAA):"),
+            Lista(j, ID_AA, 386, TR(L"Antisserrilhado (FXAA):", L"Anti-aliasing (FXAA):"),
                   { TR(L"Desligado", L"Off"), TR(L"1 - leve", L"1 - light"), TR(L"2 - médio", L"2 - medium"), TR(L"3 - forte (bordas mais lisas)", L"3 - strong (smoother edges)") }, g_op.antisserrilhado);
-            Lista(j, ID_MSAA, 386, TR(L"Antisserrilhado MSAA:", L"MSAA anti-aliasing:"),
+            Lista(j, ID_MSAA, 418, TR(L"Antisserrilhado MSAA:", L"MSAA anti-aliasing:"),
                   { TR(L"Desligado", L"Off"), L"2x", L"4x", TR(L"8x (mais pesado)", L"8x (heavier)") }, g_op.msaa);
-            Lista(j, ID_ESCALA, 418, TR(L"Resolução interna:", L"Internal resolution:"),
+            Lista(j, ID_SMAA, 450, TR(L"Antisserrilhado SMAA:", L"SMAA anti-aliasing:"),
+                  { TR(L"Desligado", L"Off"), TR(L"Baixo", L"Low"), TR(L"Médio", L"Medium"), TR(L"Alto", L"High"), TR(L"Ultra (mais pesado)", L"Ultra (heavier)") }, std::clamp(g_op.smaa, 0, 4));
+            Lista(j, ID_ESCALA, 482, TR(L"Resolução interna:", L"Internal resolution:"),
                   { TR(L"1x - 1280 × 720 (mais leve)", L"1x - 1280 × 720 (lightest)"), TR(L"1,5x - 1920 × 1080", L"1.5x - 1920 × 1080"),
                     TR(L"2x - 2560 × 1440 (mais nítido, mais pesado)", L"2x - 2560 × 1440 (sharper, heavier)"),
                     TR(L"3x - 3840 × 2160 / 4K (experimental)", L"3x - 3840 × 2160 / 4K (experimental)") }, g_op.escala);
             // FSR ligado: a resolucao interna sai do tamanho da janela (a lista de cima fica desligada)
-            Lista(j, ID_FSR, 450, TR(L"Upscale AMD FSR 1:", L"AMD FSR 1 upscaling:"),
+            Lista(j, ID_FSR, 514, TR(L"Upscale AMD FSR 1:", L"AMD FSR 1 upscaling:"),
                   { TR(L"Desligado", L"Off"), TR(L"Ultra qualidade (desenha em 1x: 1280 × 720, mais nítido)", L"Ultra quality (draws at 1x: 1280 × 720, sharpest)"),
                     TR(L"Qualidade (desenha em 0,75x: 960 × 540)", L"Quality (draws at 0.75x: 960 × 540)"),
                     TR(L"Equilibrado (desenha em 0,5x: 640 × 360)", L"Balanced (draws at 0.5x: 640 × 360)"),
                     TR(L"Desempenho (0,5x, ampliação simples, mais leve)", L"Performance (0.5x, simple upscaling, lightest)") }, ListaDoFsr(g_op.fsr));
-            Lista(j, ID_FSR_NITIDEZ, 482, TR(L"Nitidez do FSR:", L"FSR sharpness:"),
+            Lista(j, ID_FSR_NITIDEZ, 546, TR(L"Nitidez do FSR:", L"FSR sharpness:"),
                   { TR(L"Desligada", L"Off"), TR(L"Baixa", L"Low"), TR(L"Média", L"Medium"), TR(L"Alta", L"High"),
                     TR(L"Máxima", L"Maximum") }, g_op.fsrNitidez);
             EnableWindow(GetDlgItem(j, ID_ESCALA), g_op.fsr == 0);
             EnableWindow(GetDlgItem(j, ID_FSR_NITIDEZ), g_op.fsr != 0);
-            Lista(j, ID_SOMBRAS, 514, TR(L"Sombras:", L"Shadows:"),
+            Lista(j, ID_SOMBRAS, 578, TR(L"Sombras:", L"Shadows:"),
                   { L"Normal", TR(L"Alta (bordas mais definidas)", L"High (sharper edges)"), TR(L"Muito alta (mais pesada)", L"Very high (heavier)") }, g_op.sombras);
-            Lista(j, ID_FILTRO_TEX, 546, TR(L"Filtro de textura:", L"Texture filtering:"),
+            Lista(j, ID_FILTRO_TEX, 610, TR(L"Filtro de textura:", L"Texture filtering:"),
                   { TR(L"Original", L"Original"), TR(L"Anisotrópico 2x", L"Anisotropic 2x"), TR(L"Anisotrópico 4x", L"Anisotropic 4x"),
                     TR(L"Anisotrópico 8x", L"Anisotropic 8x"), TR(L"Anisotrópico 16x (chão nítido de longe)", L"Anisotropic 16x (sharp ground at a distance)") }, g_op.filtroTextura);
-            Lista(j, ID_DISTANCIA, 578, TR(L"Distância de visão:", L"Draw distance:"),
+            Lista(j, ID_DISTANCIA, 642, TR(L"Distância de visão:", L"Draw distance:"),
                   { TR(L"Mínima (0,5x, mais leve)", L"Shortest (0.5x, lighter)"), TR(L"Curta (0,75x)", L"Short (0.75x)"),
                     TR(L"Original", L"Original"), TR(L"Longe (1,5x)", L"Far (1.5x)"), TR(L"Muito longe (2x)", L"Very far (2x)"),
                     TR(L"Máxima (3x, mais pesada)", L"Maximum (3x, heavier)") }, g_op.distancia + 2);
-            Lista(j, ID_DETALHE, 610, TR(L"Detalhe de longe:", L"Detail at a distance:"),
+            Lista(j, ID_DETALHE, 674, TR(L"Detalhe de longe:", L"Detail at a distance:"),
                   { TR(L"Mínimo (0,5x, mais leve)", L"Lowest (0.5x, lighter)"), TR(L"Baixo (0,75x)", L"Low (0.75x)"),
                     TR(L"Original", L"Original"), TR(L"Alto (1,5x)", L"High (1.5x)"), TR(L"Muito alto (2x)", L"Very high (2x)"),
                     TR(L"Máximo (3x, mais pesado)", L"Maximum (3x, heavier)") }, g_op.detalhe + 2);
-            Lista(j, ID_AO, 642, TR(L"Oclusão de ambiente:", L"Ambient occlusion:"),
+            Lista(j, ID_AO, 706, TR(L"Oclusão de ambiente:", L"Ambient occlusion:"),
                   { TR(L"Desligada (original)", L"Off (original)"), TR(L"Leve", L"Light"), TR(L"Média", L"Medium"),
                     TR(L"Forte (cantos bem marcados)", L"Strong (well-marked corners)") }, g_op.ao);
-            Lista(j, ID_FPS, 674, TR(L"Quadros por segundo:", L"Frames per second:"),
+            Lista(j, ID_FPS, 738, TR(L"Quadros por segundo:", L"Frames per second:"),
                   { TR(L"30 FPS (como o jogo original)", L"30 FPS (like the original game)"), TR(L"60 FPS (mais fluido, pesa o dobro)", L"60 FPS (smoother, twice the load)"),
                     TR(L"Sem limite (experimental)", L"Unlocked (experimental)") }, g_op.fps);
+            {
+                // campo de visao (fov.cpp): barra de 95 graus (o do jogo) ate 140; o numero fica ao lado
+                Criar(j, L"STATIC", TR(L"Campo de visão (FOV):", L"Field of view (FOV):"), 0, 24, 774, 166, 20, -1);
+                HWND b = Criar(j, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 182, 768, 300, 32, ID_FOV);
+                SendMessageW(b, TBM_SETRANGE, FALSE, MAKELPARAM(0, FOV_MAX));
+                SendMessageW(b, TBM_SETLINESIZE, 0, 1);
+                SendMessageW(b, TBM_SETPAGESIZE, 0, 5);
+                SendMessageW(b, TBM_SETPOS, TRUE, std::clamp(g_op.fov, 0, FOV_MAX));
+                BarraEscura(b);
+                Criar(j, L"STATIC", L"", SS_LEFT, 490, 774, 70, 20, ID_FOV_VALOR);
+                TextoFov(j, std::clamp(g_op.fov, 0, FOV_MAX));
+            }
+            {
+                // tamanho da mira (mira.cpp): 25% a 150% do tamanho do jogo; o numero fica ao lado
+                Criar(j, L"STATIC", TR(L"Tamanho da mira:", L"Crosshair size:"), 0, 24, 806, 166, 20, -1);
+                HWND b = Criar(j, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 182, 800, 300, 32, ID_MIRA);
+                SendMessageW(b, TBM_SETRANGE, FALSE, MAKELPARAM(MIRA_MIN, MIRA_MAX));
+                SendMessageW(b, TBM_SETLINESIZE, 0, 5);
+                SendMessageW(b, TBM_SETPAGESIZE, 0, 25);
+                SendMessageW(b, TBM_SETPOS, TRUE, std::clamp(g_op.mira, MIRA_MIN, MIRA_MAX));
+                BarraEscura(b);
+                Criar(j, L"STATIC", L"", SS_LEFT, 490, 806, 70, 20, ID_MIRA_VALOR);
+                TextoMira(j, std::clamp(g_op.mira, MIRA_MIN, MIRA_MAX));
+            }
             Criar(j, L"BUTTON", TR(L"Sincronia vertical (evita \"rasgos\" na imagem, pode baixar o FPS)", L"Vertical sync (avoids image \"tearing\", may lower the FPS)"),
-                  WS_TABSTOP, 24, 701, 536, 24, ID_VSYNC);
+                  WS_TABSTOP, 24, 837, 536, 24, ID_VSYNC);
             Criar(j, L"BUTTON", TR(L"Auto HDR (realces mais brilhantes; precisa do HDR ligado no Windows)", L"Auto HDR (brighter highlights; needs HDR turned on in Windows)"),
-                  WS_TABSTOP, 24, 726, 536, 24, ID_AUTOHDR);
+                  WS_TABSTOP, 24, 862, 536, 24, ID_AUTOHDR);
             Criar(j, L"BUTTON", TR(L"HDR falso (mais contraste e cor em monitor comum, sem HDR)", L"Fake HDR (more contrast and color on a regular monitor, no HDR)"),
-                  WS_TABSTOP, 24, 751, 536, 24, ID_HDRFALSO);
+                  WS_TABSTOP, 24, 887, 536, 24, ID_HDRFALSO);
+            g_rolando = false;
+            int fim = 0;
+            for (const auto& r : g_rolaveis)
+            {
+                fim = std::max(fim, r.y + r.h);
+                if (GetDlgCtrlID(r.c) > 0 && GetDlgCtrlID(r.c) != ID_FOV_VALOR && GetDlgCtrlID(r.c) != ID_MIRA_VALOR) SetWindowSubclass(r.c, RodaRola, 2, 0);
+            }
+            g_rolagemMax = std::max(0, fim + 8 - ROLA_FIM);
+            g_arrasto = -1;
+            AplicarRolagem(j);
             Criar(j, L"STATIC", TR(L"Opções mais altas deixam a imagem mais bonita, mas pesam na placa de vídeo.",
                                    L"Higher options make the image nicer, but weigh on the graphics card."), SS_LEFT, 584, 262, 270, 60, ID_DICA);   // no lado direito (a coluna da esquerda vai ate o rodape)
 
@@ -1402,9 +2348,10 @@ namespace
             // ---- coluna da direita: perfil, internet, requisitos
             g_criando = CAT_PERFIL;
             {
-                Criar(j, L"STATIC", TR(L"Perfil:", L"Profile:"), 0, DIR, 150, 120, 20, -1);
-                HWND cb = Criar(j, WC_COMBOBOXW, L"", CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_TABSTOP | WS_VSCROLL, DIR + 130, 146, 250, 240, ID_PERFIL);
-                SendMessageW(cb, CB_LIMITTEXT, 15, 0);
+                Criar(j, L"BUTTON", L"", WS_TABSTOP, DIR, 140, 72, 72, ID_AVATAR);   // icone do perfil: clique para trocar
+                Criar(j, L"STATIC", TR(L"Perfil:", L"Profile:"), 0, DIR + 90, 150, 105, 20, -1);
+                // so escolhe na lista (nao da para digitar): criar e excluir perfil tem os botoes ao lado
+                HWND cb = Criar(j, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, DIR + 200, 146, 230, 240, ID_PERFIL);
                 std::vector<std::string> nomes = PerfisExistentes();
                 int sel = 0;
                 for (size_t i = 0; i < nomes.size(); i++)
@@ -1414,14 +2361,16 @@ namespace
                     if (i > 0 && nomes[i] == g_op.perfil) sel = (int)i;
                 }
                 SendMessageW(cb, CB_SETCURSEL, sel, 0);
-                Criar(j, L"STATIC", TR(L"Cada perfil tem os seus jogos salvos e o seu progresso. Para criar outro, escreva um nome novo"
-                                       L" (até 15 letras) e clique em Jogar.",
-                                       L"Each profile has its own saved games and progress. To create another, type a new name"
-                                       L" (up to 15 letters) and click Play."), SS_LEFT, DIR, 180, 536, 40, ID_DICA_PERFIL);
+                Criar(j, L"BUTTON", TR(L"NOVO PERFIL", L"NEW PROFILE"), WS_TABSTOP, DIR + 442, 144, 150, 34, ID_NOVO_PERFIL);
+                Criar(j, L"BUTTON", TR(L"EXCLUIR PERFIL", L"DELETE PROFILE"), WS_TABSTOP, DIR + 602, 144, 170, 34, ID_EXCLUIR_PERFIL);
+                Criar(j, L"STATIC", TR(L"Cada perfil tem os seus jogos salvos e o seu progresso. Clique no ícone para trocá-lo.",
+                                       L"Each profile has its own saved games and progress. Click the icon to change it."),
+                      SS_LEFT, DIR + 90, 184, 746, 40, ID_DICA_PERFIL);
                 // jogos salvos do perfil: miniatura, nome e data; os botoes valem para o selecionado
                 HWND lb = Criar(j, L"LISTBOX", L"", LBS_OWNERDRAWFIXED | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP,
                                 DIR, 266, 836, 336, ID_SAVES);
                 SetWindowTheme(lb, L"DarkMode_Explorer", nullptr);
+                SetWindowSubclass(lb, ListaSemPisca, 3, 0);
                 Criar(j, L"BUTTON", g_op.launcherIcones ? TR(L"VER EM LISTA", L"LIST VIEW") : TR(L"VER EM ÍCONES", L"ICON VIEW"),
                       WS_TABSTOP, DIR + 836 - 180, 228, 180, 30, ID_VISTA_SAVES);
                 Criar(j, L"BUTTON", TextoFiltro(), WS_TABSTOP, DIR + 836 - 370, 228, 180, 30, ID_FILTRO_SAVES);
@@ -1441,6 +2390,72 @@ namespace
                                        L"To join a friend's match over the internet, type their IP (they see theirs in MY IP)."
                                        L" Leave it empty to play only on the local network. Whoever creates the match types nothing here."),
                       SS_LEFT, DIR, 298, 536, 62, ID_DICA_NET);
+            }
+            g_criando = CAT_AUDIO;
+            {
+                g_saidasSom = DispositivosSom(false);
+                g_micsSom = DispositivosSom(true);
+                const std::wstring padrao = TR(L"Padrão do Windows", L"Windows default");
+                ListaSom(j, ID_SOM_SAIDA, 150, TR(L"Som do jogo:", L"Game sound:"), g_saidasSom, g_op.somSaida,
+                         padrao + L" (" + NomeSomPadrao(false) + L")", ID_TESTE_SAIDA);
+                ListaSom(j, ID_SOM_FONE, 192, TR(L"Fone do chat de voz:", L"Voice chat headset:"), g_saidasSom, g_op.vozFone,
+                         TR(L"O mesmo do som do jogo", L"The same as the game sound"), ID_TESTE_FONE);
+                ListaSom(j, ID_SOM_MIC, 234, TR(L"Microfone:", L"Microphone:"), g_micsSom, g_op.vozMicrofone,
+                         padrao + L" (" + NomeSomPadrao(true) + L")", 0);
+                Criar(j, L"STATIC", TR(L"Nível do microfone:", L"Microphone level:"), 0, 24, 280, 166, 20, -1);
+                Criar(j, L"STATIC", L"", SS_OWNERDRAW, 190, 274, 500, 30, ID_NIVEL_MIC);
+                Criar(j, L"BUTTON", TR(L"TESTAR", L"TEST"), WS_TABSTOP, 700, 272, 110, 34, ID_TESTE_MIC);
+                BarraVolume(j, ID_VOL_JOGO, ID_VOL_JOGO_VALOR, 326, TR(L"Volume do jogo:", L"Game volume:"), 100, std::clamp(g_op.volumeJogo, 0, 100));
+                BarraVolume(j, ID_VOL_VOZ, ID_VOL_VOZ_VALOR, 368, TR(L"Volume do chat de voz:", L"Voice chat volume:"), VOLUME_VOZ_MAX,
+                            std::clamp(g_op.volumeVoz, 0, VOLUME_VOZ_MAX));
+                Criar(j, L"STATIC", TR(L"TESTAR toca um bipe no dispositivo escolhido; no microfone, abre ele (fale: a barra deve mexer). Num fone Bluetooth, "
+                                       L"com o microfone aberto o som do fone fica pior (modo de chamada do Windows) até PARAR.\n"
+                                       L"O chat de voz funciona nas partidas SYSTEM LINK criadas com \"Chat de voz: Sim\". O volume do chat vai até 200% "
+                                       L"(para quem fala baixo do outro lado). Com o jogo aberto, as mesmas opções ficam no F2, botão ÁUDIO.",
+                                       L"TEST plays a beep on the chosen device; on the microphone, it opens it (speak: the bar should move). On a Bluetooth headset, "
+                                       L"the headset sound gets worse while the microphone is open (Windows call mode) until STOP.\n"
+                                       L"Voice chat works in SYSTEM LINK matches created with \"Voice chat: Yes\". The chat volume goes up to 200% "
+                                       L"(for quiet players on the other side). With the game open, the same options are in F2, AUDIO button."),
+                      SS_LEFT, 24, 418, 790, 84, ID_DICA_AUDIO);
+                // janela recriada (troca de idioma) no meio do teste do microfone: o botao e a barra continuam
+                if (MicMedindo()) { SetDlgItemTextW(j, ID_TESTE_MIC, TR(L"PARAR", L"STOP")); SetTimer(j, ID_NIVEL_MIC, 50, nullptr); }
+            }
+            g_criando = CAT_SAVESTATE;
+            {
+                // save state (save_state.cpp): usa o checkpoint do proprio jogo; os estados ficam no disco do perfil, por fase
+                Criar(j, L"STATIC", L"", SS_OWNERDRAW, 24, 140, 836, 48, ID_SST_PERFIL);   // de qual perfil (como na aba TRAPACAS)
+                Criar(j, L"BUTTON", TR(L"Teclas de salvar e carregar o estado ligadas", L"Save and load state keys on"),
+                      WS_TABSTOP, 24, 202, 790, 24, ID_SST_LIGADO);
+                std::vector<const wchar_t*> teclas;
+                for (int i = 0; i < SAVESTATE_N_TECLAS; i++) teclas.push_back(SaveStateNomeTecla(i));
+                auto ListaTecla = [&](int id, int x, int y, const wchar_t* rotulo, int vk)
+                {
+                    Criar(j, L"STATIC", rotulo, 0, x, y + 4, 156, 20, -1);
+                    HWND cb = Criar(j, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, x + 160, y, 140, 240, id);
+                    for (const wchar_t* t : teclas) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)t);
+                    SendMessageW(cb, CB_SETCURSEL, std::max(0, SaveStateIndice(vk)), 0);
+                };
+                ListaTecla(ID_SST_SALVAR, 24, 238, TR(L"Salvar o estado:", L"Save state:"), g_op.saveStateSalvar);
+                ListaTecla(ID_SST_CARREGAR, 444, 238, TR(L"Carregar o estado:", L"Load state:"), g_op.saveStateCarregar);
+                Criar(j, L"STATIC", TR(L"Estados salvos neste perfil (o mais novo em cima):", L"States saved in this profile (newest on top):"),
+                      0, 24, 290, 640, 20, -1);
+                {
+                    HWND lb = Criar(j, L"LISTBOX", L"", LBS_OWNERDRAWFIXED | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP,
+                                    24, 316, 676, 252, ID_SST_LISTA);
+                    SetWindowTheme(lb, L"DarkMode_Explorer", nullptr);
+                    SetWindowSubclass(lb, ListaSemPisca, 3, 0);
+                }
+                Criar(j, L"BUTTON", TR(L"APAGAR", L"DELETE"), WS_TABSTOP, 716, 316, 144, 38, ID_SST_APAGAR);
+                Criar(j, L"STATIC", TR(L"Salva o ponto exato em que você está na fase (posição, vida, munição, inimigos) e volta a ele quando quiser. "
+                                       L"A tecla de carregar volta ao estado mais novo da fase; com o jogo aberto, o F2, botão SAVE STATE, tem a lista da fase "
+                                       L"para escolher. Os estados ficam guardados neste perfil, por fase (até 10 por fase), e continuam depois de voltar ao menu "
+                                       L"ou fechar o jogo; o seu jogo salvo não muda. Não funciona no multijogador, nem para salvar durante uma cena.",
+                                       L"Saves the exact point where you are in the level (position, health, ammo, enemies) and goes back to it whenever you want. "
+                                       L"The load key goes back to the newest state of the level; with the game open, F2, SAVE STATE button, has the level's list "
+                                       L"to pick from. States are kept in this profile, per level (up to 10 per level), and stay after going back to the menu "
+                                       L"or closing the game; your saved game does not change. It does not work in multiplayer, nor for saving during a cutscene."),
+                      SS_LEFT, 24, 582, 836, 84, ID_SST_DICA);
+                CarregarSaveStates(j);
             }
             g_criando = CAT_REQUISITOS;
             {
@@ -1465,23 +2480,24 @@ namespace
                     { TR(L"Adrenalina infinita (código Bloodlust)", L"Infinite adrenaline (code Bloodlust)"),
                       TR(L"A barra de adrenalina fica sempre cheia para usar os poderes ferais.", L"The adrenaline bar is always full for the feral abilities.") },
                     { TR(L"Todos os poderes ferais (código FeralAttack)", L"All feral abilities (code FeralAttack)"),
-                      TR(L"Libera os poderes ferais (visão, faro, velocidade, ataque) desde o começo.", L"Unlocks the feral abilities (vision, smell, speed, attack) from the start.") },
+                      TR(L"Libera todos os poderes ferais (visões, faro, atletismo, regeneração, ataque) desde o começo.", L"Unlocks all feral abilities (visions, smell, athletics, regeneration, attack) from the start.") },
                     { TR(L"Todas as fases (código GiveMeItAll)", L"All levels (code GiveMeItAll)"),
-                      TR(L"Libera todas as fases do modo história no perfil. Fica gravado quando o jogo salvar o perfil.", L"Unlocks every story level in the profile. It stays saved once the game saves the profile.") },
+                      TR(L"Libera todas as fases do modo história. Fica gravado no perfil: depois de ligada, não dá para desligar.", L"Unlocks every story level. It is stored in the profile: once on, it cannot be turned off.") },
                     { TR(L"Todos os mapas (código GiveMeTheMaps)", L"All maps (code GiveMeTheMaps)"),
-                      TR(L"Libera todos os mapas no perfil. Também fica gravado quando o jogo salvar o perfil.", L"Unlocks every map in the profile. It also stays saved once the game saves the profile.") },
+                      TR(L"Libera todos os mapas. Fica gravado no perfil: depois de ligada, não dá para desligar.", L"Unlocks every map. It is stored in the profile: once on, it cannot be turned off.") },
                     { TR(L"Invencível (novo, não existe no jogo original)", L"Invincible (new, not in the original game)"),
                       TR(L"A vida volta ao máximo a cada quadro, como o código ImJackCarver o tempo todo.", L"Health goes back to full every frame, like the code ImJackCarver all the time.") } };
+                Criar(j, L"STATIC", L"", SS_OWNERDRAW, PAINEL_X, 140, 836, 48, ID_TRAPACA_PERFIL);   // de qual perfil
                 for (int i = 0; i < 6; i++)
                 {
-                    Criar(j, L"BUTTON", t[i].nome, WS_TABSTOP, PAINEL_X, 150 + i * 70, 836, 24, ID_TRAPACA + i);
-                    Criar(j, L"STATIC", t[i].desc, SS_LEFT, PAINEL_X + 32, 176 + i * 70, 804, 40, ID_TRAPACA_DESC + i);
+                    Criar(j, L"BUTTON", t[i].nome, WS_TABSTOP, PAINEL_X, 202 + i * 64, 836, 24, ID_TRAPACA + i);
+                    Criar(j, L"STATIC", t[i].desc, SS_LEFT, PAINEL_X + 32, 226 + i * 64, 804, 40, ID_TRAPACA_DESC + i);
                 }
-                Criar(j, L"STATIC", TR(L"As trapaças valem só no modo história (o jogo não deixa no multijogador). Um save feito com"
-                                       L" munição, adrenalina ou poderes ferais ligados guarda essas trapaças, como no jogo original.",
-                                       L"Cheats work only in the story mode (the game does not allow them in multiplayer). A save made with"
-                                       L" ammo, adrenaline or feral abilities on keeps those cheats, like in the original game."),
-                      SS_LEFT, PAINEL_X, 580, 836, 44, ID_TRAPACA_AVISO);
+                Criar(j, L"STATIC", TR(L"As trapaças valem só no modo história (o jogo não deixa no multijogador). Munição, adrenalina, poderes"
+                                       L" ferais e invencível não ficam gravados no save: desligando aqui, desligam de verdade.",
+                                       L"Cheats work only in the story mode (the game does not allow them in multiplayer). Ammo, adrenaline,"
+                                       L" feral abilities and invincible are not stored in the save: turning them off here really turns them off."),
+                      SS_LEFT, PAINEL_X, 596, 836, 44, ID_TRAPACA_AVISO);
             }
 
             g_criando = CAT_CONQUISTAS;
@@ -1492,6 +2508,7 @@ namespace
                 HWND lb = Criar(j, L"LISTBOX", L"", LBS_OWNERDRAWFIXED | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP,
                                 PAINEL_X, 220, 836, 444, ID_CONQ);
                 SetWindowTheme(lb, L"DarkMode_Explorer", nullptr);
+                SetWindowSubclass(lb, ListaSemPisca, 3, 0);
             }
             g_criando = -1;
             Criar(j, L"BUTTON", TR(L"CONTROLES", L"CONTROLS"), WS_TABSTOP, 24, 686, 170, 38, ID_CONTROLES);
@@ -1508,6 +2525,7 @@ namespace
             g_marcado[ID_AVISOTECLAS] = g_op.avisoTeclas;
             g_marcado[ID_REGISTRO] = g_op.mostrarRegistro;
             g_marcado[ID_DIRETO] = g_op.pularLauncher;
+            g_marcado[ID_SST_LIGADO] = g_op.saveState;
             {
                 const bool trapacas[] = { g_op.trapacaMunicao, g_op.trapacaAdrenalina, g_op.trapacaFeral, g_op.trapacaFases, g_op.trapacaMapas, g_op.trapacaInvencivel };
                 for (int i = 0; i < 6; i++) g_marcado[ID_TRAPACA + i] = trapacas[i];
@@ -1521,6 +2539,7 @@ namespace
         {
             auto* m = (MEASUREITEMSTRUCT*)lp;
             if (m->CtlID == ID_SAVES || m->CtlID == ID_CONQ) { m->itemHeight = S(m->CtlID == ID_SAVES ? 80 : 84); return TRUE; }
+            if (m->CtlID == ID_SST_LISTA) { m->itemHeight = S(56); return TRUE; }
             break;
         }
         case WM_RENOMEADO:
@@ -1535,7 +2554,15 @@ namespace
             CarregarSaves(j);
             return 0;
         }
+        case WM_PERFIL_NOVO:
+        {
+            auto* t = (std::wstring*)lp;
+            PerfilCriado(j, wp != 0, *t);
+            delete t;
+            return 0;
+        }
         case WM_TIMER:
+            if (wp == ID_NIVEL_MIC) { InvalidateRect(GetDlgItem(j, ID_NIVEL_MIC), nullptr, FALSE); return 0; }
             if (wp == ID_SALVAR)
             {
                 KillTimer(j, ID_SALVAR);
@@ -1549,6 +2576,15 @@ namespace
             int id = LOWORD(wp);
             if (Caixa(id) && (HIWORD(wp) == BN_CLICKED || HIWORD(wp) == BN_DOUBLECLICKED))
             {
+                // fases e mapas ficam gravados no perfil: ligar pede confirmacao e depois nao desliga mais
+                if (id == ID_TRAPACA + 3 || id == ID_TRAPACA + 4)
+                {
+                    wchar_t nome[128] = {}; GetWindowTextW((HWND)lp, nome, 128);
+                    if (g_marcado[id]) { MessageBoxW(j, TR(L"Esta trapaça já fica gravada no perfil e não dá para desligar.", L"This cheat is stored in the profile and cannot be turned off."), nome, MB_ICONINFORMATION); return 0; }
+                    if (MessageBoxW(j, TR(L"Esta trapaça fica gravada no perfil quando o jogo salvar e não dá para desligar depois. Ligar mesmo assim?",
+                                       L"This cheat is stored in the profile when the game saves and cannot be turned off later. Turn it on anyway?"), nome,
+                                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
+                }
                 g_marcado[id] = !g_marcado[id];
                 InvalidateRect((HWND)lp, nullptr, FALSE);
                 return 0;
@@ -1595,8 +2631,15 @@ namespace
                     PostMessageW(j, WM_COMMAND, MAKEWPARAM(ID_PERFIL, CBN_EDITCHANGE), lp);
                     return 0;
                 }
-                if (HIWORD(wp) == CBN_EDITCHANGE) CarregarSaves(j);
+                if (HIWORD(wp) == CBN_EDITCHANGE)
+                {
+                    CarregarSaves(j);
+                    AtualizarIconePerfil(j);   // icone do outro perfil
+                }
                 return 0;
+            case ID_AVATAR: TrocarIcone(j); return 0;
+            case ID_NOVO_PERFIL: NovoPerfil(j); return 0;
+            case ID_EXCLUIR_PERFIL: ExcluirPerfil(j); return 0;
             case ID_SAVES:
                 if (HIWORD(wp) == LBN_SELCHANGE || HIWORD(wp) == LBN_DBLCLK)
                 {
@@ -1605,6 +2648,14 @@ namespace
                     for (int id = ID_RENOMEAR; id <= ID_ABRIRSAVE; id++) EnableWindow(GetDlgItem(j, id), SaveSelecionado(j) >= 0);
                 }
                 if (HIWORD(wp) == LBN_DBLCLK && SaveSelecionado(j) >= 0) RenomearSave(j);
+                return 0;
+            case ID_SST_LISTA:
+                if (HIWORD(wp) == LBN_SELCHANGE)
+                {
+                    const int i = (int)SendMessageW((HWND)lp, LB_GETCURSEL, 0, 0);
+                    EnableWindow(GetDlgItem(j, ID_SST_APAGAR), i >= 0 && i < (int)g_sst.size());
+                    InvalidateRect((HWND)lp, nullptr, FALSE);
+                }
                 return 0;
             case ID_CONQ:   // na grade: clicou numa conquista -> a explicacao dela na linha do resumo
                 if (HIWORD(wp) == LBN_SELCHANGE && g_op.launcherIcones)
@@ -1641,6 +2692,7 @@ namespace
             case ID_RENOMEAR: RenomearSave(j); return 0;
             case ID_DUPLICAR: DuplicarSave(j); return 0;
             case ID_APAGAR: ApagarSave(j); return 0;
+            case ID_SST_APAGAR: ApagarSaveState(j); return 0;
             case ID_ABRIRSAVE:
                 if (int i = SaveSelecionado(j); i >= 0) ShellExecuteW(j, L"open", g_saves[i].dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 return 0;
@@ -1649,6 +2701,20 @@ namespace
             case ID_CONTROLES: ControlesAbrirJanela(false); return 0;
             case ID_INSTRUCOES: MostrarInstrucoes(j); return 0;
             case ID_MEUIP: MostrarMeuIp(j); return 0;
+            case ID_TESTE_SAIDA: SomTestar(IdSom(j, ID_SOM_SAIDA, g_saidasSom)); return 0;   // bipe no dispositivo escolhido
+            case ID_TESTE_FONE:
+            {
+                std::wstring id = IdSom(j, ID_SOM_FONE, g_saidasSom);
+                SomTestar(id.empty() ? IdSom(j, ID_SOM_SAIDA, g_saidasSom) : id);   // "o mesmo do jogo"
+                return 0;
+            }
+            case ID_SOM_MIC:   // testando: o medidor passa a ouvir o microfone escolhido
+                if (HIWORD(wp) == CBN_SELCHANGE && MicMedindo()) MicMedirIniciar(IdSom(j, ID_SOM_MIC, g_micsSom));
+                return 0;
+            case ID_TESTE_MIC:   // TESTAR/PARAR: abre/fecha o microfone para a barra de nivel
+                if (MicMedindo()) MicTesteParar(j);
+                else { MicMedirIniciar(IdSom(j, ID_SOM_MIC, g_micsSom)); SetTimer(j, ID_NIVEL_MIC, 50, nullptr); SetDlgItemTextW(j, ID_TESTE_MIC, TR(L"PARAR", L"STOP")); }
+                return 0;
             case ID_SALVAR:   // salva as opcoes no opcoes.ini sem abrir o jogo; o botao mostra "SALVO" por 2 s
                 LerTela(j);
                 OpcoesSalvar();
@@ -1665,13 +2731,88 @@ namespace
             auto* d = (const DRAWITEMSTRUCT*)lp;
             if (d->CtlID == ID_SAVES) { DesenharSave(d); return TRUE; }
             if (d->CtlID == ID_CONQ) { DesenharConquista(d); return TRUE; }
+            if (d->CtlID == ID_NIVEL_MIC) { DesenharNivelMic(d, CARTAO); return TRUE; }
+            if (d->CtlID == ID_AVATAR) { DesenharAvatar(j, d); return TRUE; }
+            if (d->CtlID == ID_TRAPACA_PERFIL) { DesenharPerfilDasTrapacas(j, d); return TRUE; }
+            if (d->CtlID == ID_SST_PERFIL)
+            {
+                DesenharPerfilDasTrapacas(j, d, TR(L"Os estados salvos ficam neste perfil, separados por fase (troque o perfil na aba PERFIL).",
+                                                   L"Saved states are kept in this profile, per level (change the profile in the PROFILE tab)."));
+                return TRUE;
+            }
+            if (d->CtlID == ID_SST_LISTA) { DesenharSaveState(d); return TRUE; }
             const int id = (int)d->CtlID;
             if (Caixa(id)) DesenharCaixa(d, g_marcado[id], g_fonte, CARTAO);
             else if (id >= ID_CAT && id < ID_CAT + N_CAT) DesenharItemMenu(d, id == ID_CAT + g_categoria, FonteMenu(), FUNDO);
             else DesenharBotao(d, id == ID_JOGAR, FonteBotao(), id >= ID_CONTROLES && id <= ID_SALVAR && id != ID_MEUIP ? FUNDO : CARTAO);
             return TRUE;
         }
-        case WM_LBUTTONDOWN: SetFocus(j); return 0;   // clique fora das caixas: tira a selecao (azul) da caixa com foco
+        case WM_MOUSEMOVE:   // puxador da barra de rolagem: arrastar e acender com o mouse em cima
+        {
+            const int mx = (int)(short)LOWORD(lp) * 100 / S(100), my = (int)(short)HIWORD(lp) * 100 / S(100);
+            if (g_arrasto >= 0)
+            {
+                const RECT p = PuxadorRolagem();
+                const int curso = (ROLA_FIM - ROLA_TOPO) - (p.bottom - p.top);
+                if (curso > 0) Rolar(j, (my - g_arrasto - ROLA_TOPO) * g_rolagemMax / curso);
+                return 0;
+            }
+            const bool sobre = NaBarra(mx, my);
+            if (sobre != g_sobreBarra)
+            {
+                g_sobreBarra = sobre;
+                const RECT t = TrilhoRolagem();
+                RECT r{ S(t.left), S(t.top), S(t.right), S(t.bottom) };
+                InvalidateRect(j, &r, FALSE);
+                if (sobre) { TRACKMOUSEEVENT te{ sizeof(te), TME_LEAVE, j, 0 }; TrackMouseEvent(&te); }
+            }
+            break;
+        }
+        case WM_MOUSELEAVE:
+            if (g_sobreBarra && g_arrasto < 0) { g_sobreBarra = false; InvalidateRect(j, nullptr, FALSE); }
+            break;
+        case WM_LBUTTONUP:
+            if (g_arrasto >= 0) { g_arrasto = -1; ReleaseCapture(); InvalidateRect(j, nullptr, FALSE); return 0; }
+            break;
+        case WM_CAPTURECHANGED:
+            if (g_arrasto >= 0) { g_arrasto = -1; InvalidateRect(j, nullptr, FALSE); }
+            break;
+        case WM_MOUSEWHEEL:
+            if (g_categoria == CAT_VIDEO && g_rolagemMax > 0)
+            {
+                Rolar(j, g_rolagem - GET_WHEEL_DELTA_WPARAM(wp) * 48 / WHEEL_DELTA);
+                return 0;
+            }
+            break;
+        case WM_HSCROLL:   // barra do campo de visao
+            if ((HWND)lp == GetDlgItem(j, ID_FOV)) { TextoFov(j, (int)SendMessageW((HWND)lp, TBM_GETPOS, 0, 0)); return 0; }
+            if ((HWND)lp == GetDlgItem(j, ID_MIRA)) { TextoMira(j, (int)SendMessageW((HWND)lp, TBM_GETPOS, 0, 0)); return 0; }
+            if ((HWND)lp == GetDlgItem(j, ID_VOL_JOGO)) { TextoVolume(j, ID_VOL_JOGO_VALOR, (int)SendMessageW((HWND)lp, TBM_GETPOS, 0, 0)); return 0; }
+            if ((HWND)lp == GetDlgItem(j, ID_VOL_VOZ)) { TextoVolume(j, ID_VOL_VOZ_VALOR, (int)SendMessageW((HWND)lp, TBM_GETPOS, 0, 0)); return 0; }
+            break;
+        case WM_NOTIFY:
+            if (auto* n = (const NMHDR*)lp; (n->idFrom == ID_FOV || n->idFrom == ID_MIRA || n->idFrom == ID_VOL_JOGO || n->idFrom == ID_VOL_VOZ) &&
+                                             n->code == NM_CUSTOMDRAW) return DesenharBarra(n);
+            break;
+        case WM_LBUTTONDOWN:
+        {
+            SetFocus(j);   // clique fora das caixas: tira a selecao (azul) da caixa com foco
+            const int mx = (int)(short)LOWORD(lp) * 100 / S(100), my = (int)(short)HIWORD(lp) * 100 / S(100);
+            if (NaBarra(mx, my))
+            {
+                RECT p = PuxadorRolagem();
+                if (my < p.top || my >= p.bottom)   // clique no trilho: o puxador vem para onde clicou
+                {
+                    const int alto = p.bottom - p.top, curso = (ROLA_FIM - ROLA_TOPO) - alto;
+                    if (curso > 0) Rolar(j, (my - alto / 2 - ROLA_TOPO) * g_rolagemMax / curso);
+                    p = PuxadorRolagem();
+                }
+                g_arrasto = my - p.top;
+                SetCapture(j);
+                InvalidateRect(j, nullptr, FALSE);
+            }
+            return 0;
+        }
         case WM_ERASEBKGND: return 1;   // o WM_PAINT pinta tudo (sem piscar)
         case WM_PAINT:
         {
@@ -1694,8 +2835,9 @@ namespace
             int id = GetDlgCtrlID((HWND)lp);
             COLORREF cor = TEXTO;
             if (id == ID_CONQ_RESUMO) cor = AMBAR;
-            if (id == ID_DICA || id == ID_DICA_NET || id == ID_DICA_PERFIL || id == ID_REQ_MIN) cor = TEXTO_FRACO;
+            if (id == ID_DICA || id == ID_DICA_NET || id == ID_DICA_PERFIL || id == ID_REQ_MIN || id == ID_DICA_AUDIO || id == ID_SST_DICA) cor = TEXTO_FRACO;
             if (id >= ID_TRAPACA_DESC && id < ID_TRAPACA_DESC + 6) cor = TEXTO_FRACO;
+            if (id == ID_TRAPACA_DESC + 3 || id == ID_TRAPACA_DESC + 4) cor = AMBAR;   // ficam gravadas no perfil
             if (id == ID_TRAPACA_AVISO) cor = AMBAR;
             if (id == ID_REQ_PC) cor = g_pcAtende ? VERDE : AMBAR;
             if (id == ID_SITUACAO)
@@ -1710,8 +2852,10 @@ namespace
             return CorCampo((HDC)wp);
         case WM_CTLCOLOREDIT:
             return CorCampo((HDC)wp);
+        case WM_CTLCOLORBTN:   // botoes desenhados aqui: o fundo que o Windows pinta antes (ao voltar de fora da tela) era branco
+            return (LRESULT)PincelFundo();
         case WM_CLOSE: DestroyWindow(j); return 0;
-        case WM_DESTROY: LimparSaves(); PostQuitMessage(0); return 0;
+        case WM_DESTROY: KillTimer(j, ID_NIVEL_MIC); MicMedirParar(); LimparSaves(); PostQuitMessage(0); return 0;
         }
         return DefWindowProcW(j, msg, wp, lp);
     }
@@ -1733,7 +2877,7 @@ bool LauncherMostrar(const std::filesystem::path& exeDir)
 {
     g_exeDir = exeDir;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES };
+    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };   // BAR: a barra do campo de visao
     InitCommonControlsEx(&icc);
     tema::Iniciar(GetDpiForSystem() / 96.0f);   // escala de tela do Windows (o programa avisa que cuida dela: main.cpp)
     g_fonte = CreateFontW(-S(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");

@@ -89,6 +89,7 @@ namespace
         }
         case WM_CTLCOLORSTATIC: return tema::CorTexto((HDC)wp, tema::TEXTO);
         case WM_CTLCOLOREDIT: return tema::CorCampo((HDC)wp);
+        case WM_CTLCOLORBTN: return (LRESULT)tema::PincelFundo();   // fundo dos botoes desenhados aqui (era branco ao voltar de fora da tela)
         case WM_ERASEBKGND: return 1;
         case WM_PAINT:
         {

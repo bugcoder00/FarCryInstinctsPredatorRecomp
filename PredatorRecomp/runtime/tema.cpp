@@ -261,4 +261,95 @@ namespace tema
         SetBkColor(dc, CAMPO);
         return (LRESULT)g_campo;
     }
+
+    namespace
+    {
+        // a barra comum so redesenha o retangulo estreito do botao dela; o nosso e redondo e maior: quando a posicao
+        // muda (mouse, teclado, roda), a barra inteira e redesenhada para nao deixar pedacos do botao antigo
+        // desenho inteiro da barra (fundo do pai, trilho, parte escolhida, botao) num bitmap e de uma vez na tela: o desenho
+        // do Windows (mesmo com NM_CUSTOMDRAW) deixava pedacos brancos ao voltar de fora da tela
+        void PintarBarra(HWND b, HDC dc)
+        {
+            RECT r; GetClientRect(b, &r);
+            HDC mem = CreateCompatibleDC(dc);
+            HBITMAP bmp = CreateCompatibleBitmap(dc, std::max<LONG>(1, r.right), std::max<LONG>(1, r.bottom));
+            HGDIOBJ antes = SelectObject(mem, bmp);
+            HBRUSH fundo = (HBRUSH)SendMessageW(GetParent(b), WM_CTLCOLORSTATIC, (WPARAM)mem, (LPARAM)b);
+            FillRect(mem, &r, fundo ? fundo : g_fundo);
+            RECT canal{}, botao{};
+            SendMessageW(b, TBM_GETCHANNELRECT, 0, (LPARAM)&canal);
+            SendMessageW(b, TBM_GETTHUMBRECT, 0, (LPARAM)&botao);
+            const int meioX = (botao.left + botao.right) / 2, meioY = (botao.top + botao.bottom) / 2;
+            const bool ativa = IsWindowEnabled(b) != FALSE;
+            const int a = S(6);
+            RECT t{ canal.left, meioY - a / 2, canal.right, meioY - a / 2 + a };
+            Arredondado(mem, t, a / 2, CAMPO, LINHA);
+            Arredondado(mem, RECT{ t.left, t.top, std::max<LONG>(t.left + a, meioX), t.bottom }, a / 2, ativa ? AMBAR_ESC : LINHA);
+            const int d = S(16);
+            const bool apertado = GetCapture() == b, foco = GetFocus() == b;
+            Arredondado(mem, RECT{ meioX - d / 2, meioY - d / 2, meioX - d / 2 + d, meioY - d / 2 + d }, d / 2,
+                        ativa ? (apertado ? TEXTO : AMBAR) : TEXTO_FRACO, foco ? TEXTO : CLR_NONE, S(2));
+            BitBlt(dc, 0, 0, r.right, r.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, antes);
+            DeleteObject(bmp); DeleteDC(mem);
+        }
+
+        LRESULT CALLBACK SubBarra(HWND b, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+        {
+            if (msg == TBM_GETPOS) return DefSubclassProc(b, msg, wp, lp);   // a pergunta abaixo passa por aqui tambem
+            if (msg == WM_ERASEBKGND) return 1;   // o WM_PAINT pinta tudo
+            if (msg == WM_PAINT || msg == WM_PRINTCLIENT)
+            {
+                if (msg == WM_PRINTCLIENT) { PintarBarra(b, (HDC)wp); return 0; }
+                PAINTSTRUCT ps;
+                HDC dc = BeginPaint(b, &ps);
+                PintarBarra(b, dc);
+                EndPaint(b, &ps);
+                return 0;
+            }
+            const LRESULT antes = SendMessageW(b, TBM_GETPOS, 0, 0);
+            const LRESULT r = DefSubclassProc(b, msg, wp, lp);
+            if (msg != WM_PAINT && msg != WM_ERASEBKGND && msg != WM_NCDESTROY && SendMessageW(b, TBM_GETPOS, 0, 0) != antes)
+                InvalidateRect(b, nullptr, TRUE);
+            if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS || msg == WM_LBUTTONUP || msg == WM_LBUTTONDOWN) InvalidateRect(b, nullptr, TRUE);
+            return r;
+        }
+    }
+
+    void BarraEscura(HWND barra)
+    {
+        SendMessageW(barra, WM_CHANGEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0);   // sem o pontilhado do foco
+        SetWindowSubclass(barra, SubBarra, 3, 0);
+    }
+
+    LRESULT DesenharBarra(const NMHDR* n)
+    {
+        auto* cd = (const NMCUSTOMDRAW*)n;
+        if (cd->dwDrawStage == CDDS_PREPAINT)
+        {
+            // o botao redondo e maior que o da barra comum: sem apagar tudo, o lugar antigo dele ficava na tela (rastro)
+            HBRUSH fundo = (HBRUSH)SendMessageW(GetParent(n->hwndFrom), WM_CTLCOLORSTATIC, (WPARAM)cd->hdc, (LPARAM)n->hwndFrom);
+            FillRect(cd->hdc, &cd->rc, fundo ? fundo : g_fundo);
+            return CDRF_NOTIFYITEMDRAW;
+        }
+        if (cd->dwDrawStage != CDDS_ITEMPREPAINT) return CDRF_DODEFAULT;
+        RECT botao{}; SendMessageW(n->hwndFrom, TBM_GETTHUMBRECT, 0, (LPARAM)&botao);
+        const int meioX = (botao.left + botao.right) / 2, meioY = (botao.top + botao.bottom) / 2;
+        if (cd->dwItemSpec == TBCD_CHANNEL)
+        {
+            const int a = S(6);
+            RECT t{ cd->rc.left, meioY - a / 2, cd->rc.right, meioY - a / 2 + a };
+            Arredondado(cd->hdc, t, a / 2, CAMPO, LINHA);
+            RECT cheio{ t.left, t.top, std::max<LONG>(t.left + a, meioX), t.bottom };
+            Arredondado(cd->hdc, cheio, a / 2, IsWindowEnabled(n->hwndFrom) ? AMBAR_ESC : LINHA);
+        }
+        else if (cd->dwItemSpec == TBCD_THUMB)
+        {
+            const int d = S(16);
+            const bool apertado = (cd->uItemState & CDIS_SELECTED) != 0, foco = GetFocus() == n->hwndFrom;
+            RECT b{ meioX - d / 2, meioY - d / 2, meioX - d / 2 + d, meioY - d / 2 + d };
+            Arredondado(cd->hdc, b, d / 2, IsWindowEnabled(n->hwndFrom) ? (apertado ? TEXTO : AMBAR) : TEXTO_FRACO, foco ? TEXTO : CLR_NONE, S(2));
+        }
+        return CDRF_SKIPDEFAULT;   // TBCD_TICS tambem (sem marcas)
+    }
 }

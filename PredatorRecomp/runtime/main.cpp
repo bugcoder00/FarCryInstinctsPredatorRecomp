@@ -329,6 +329,10 @@ static std::vector<uint8_t> ReadAll(const std::filesystem::path& p)
 static int MainPrograma(int argc, char** argv)
 {
     timeBeginPeriod(1);   // relogio do Windows em 1 ms (o padrao de ~15,6 ms deixava toda espera curta lenta)
+    // A tela nao apaga nem o PC entra em descanso enquanto o launcher ou o jogo estiverem abertos (jogando so com o
+    // controle o Windows nao ve atividade e desligava a tela). ES_CONTINUOUS vale ate esta thread acabar: a thread
+    // principal vive o programa inteiro (launcher, depois a espera da thread do jogo).
+    SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
     // O programa ajusta o tamanho das janelas a escala de tela do Windows (125%, 150%...). Sem avisar isso, o Windows
     // desenhava o launcher e a janela de controles em 100% e esticava a imagem: letras borradas. A janela do jogo passa
     // a ter o tamanho escolhido em pixels de verdade.
@@ -434,6 +438,9 @@ static int MainPrograma(int argc, char** argv)
         auto num = [](const char* n) { const char* e = getenv(n); return e ? atoi(e) : 0; };
         OpcoesAtuais().filtroTextura = num("FCRECOMP_FILTRO"); OpcoesAtuais().distancia = num("FCRECOMP_DISTANCIA");
         OpcoesAtuais().detalhe = num("FCRECOMP_DETALHE"); OpcoesAtuais().ao = 0;   // FCRECOMP_AO=1-3 (xenos_draw.cpp)
+        OpcoesAtuais().fov = num("FCRECOMP_FOV");   // graus a mais no campo de visao (fov.cpp); a placa: FCRECOMP_PLACA
+        OpcoesAtuais().smaa = num("FCRECOMP_SMAA");   // SMAA 1-4 (render.cpp)
+        OpcoesAtuais().mira = getenv("FCRECOMP_MIRA") ? num("FCRECOMP_MIRA") : 100;   // tamanho da mira em % (mira.cpp)
         // FCRECOMP_CVAR="nome=valor,nome=valor" forca variaveis do motor (graficos_extra.cpp)
         OpcoesAtuais().modoTeste = true;
     }
@@ -472,9 +479,9 @@ static int MainPrograma(int argc, char** argv)
     {
         // opcoes em uso (para repetir uma gravacao com as mesmas: FCRECOMP_FSR, FCRECOMP_AO etc.)
         const auto& o = OpcoesAtuais();
-        Log("[opcoes] %s: fxaa %d msaa %d escala %d fsr %d nitidez %d sombras %d filtro %d distancia %d detalhe %d ao %d fps %d hdr %d hdr_falso %d formato %d",
-            o.modoTeste ? "teste" : "opcoes.ini", o.antisserrilhado, o.msaa, o.escala, o.fsr, o.fsrNitidez, o.sombras, o.filtroTextura,
-            o.distancia, o.detalhe, o.ao, o.fps, o.autoHdr ? 1 : 0, o.hdrFalso ? 1 : 0, o.formato);
+        Log("[opcoes] %s: fxaa %d msaa %d smaa %d escala %d fsr %d nitidez %d sombras %d filtro %d distancia %d detalhe %d ao %d fps %d hdr %d hdr_falso %d formato %d fov %d mira %d",
+            o.modoTeste ? "teste" : "opcoes.ini", o.antisserrilhado, o.msaa, o.smaa, o.escala, o.fsr, o.fsrNitidez, o.sombras, o.filtroTextura,
+            o.distancia, o.detalhe, o.ao, o.fps, o.autoHdr ? 1 : 0, o.hdrFalso ? 1 : 0, o.formato, o.fov, o.mira);
     }
     Log("jogos salvos: %s (perfil %s)", g_saveDir.string().c_str(), OpcoesAtuais().perfil.empty() ? "principal" : OpcoesAtuais().perfil.c_str());
 

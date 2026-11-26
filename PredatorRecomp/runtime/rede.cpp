@@ -942,8 +942,4 @@ KFUNC(NetDll_XNetQosLookup)
 }
 KFUNC(NetDll_XNetQosRelease) { Ret(ctx, 0); }   // a memoria fica (poucos bytes por busca)
 
-// Voz pela rede (headset): nao ha. XamVoiceCreate(usuario, flags, voz*) devolve "sem voz"
-KFUNC(XamVoiceCreate) { if (Gpr32(ctx, 5)) W32(Gpr32(ctx, 5), 0); Ret(ctx, 0); }
-KFUNC(XamVoiceHeadsetPresent) { Ret(ctx, 0); }
-KFUNC(XamVoiceClose) { Ret(ctx, 0); }
-KFUNC(XamVoiceSubmitPacket) { Ret(ctx, 0); }
+// Voz pela rede (headset, XamVoice*): voz.cpp (o proprio jogo manda os pacotes de voz pelos sockets daqui)

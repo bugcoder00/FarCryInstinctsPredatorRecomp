@@ -55,6 +55,7 @@ namespace predator::gpu
                     }
                 }
                 m_out.loopMode = needsLoop;
+                if (m_opt.genericFetch && !m_opt.pixel) PrepareGenericFetch();
 
                 Line("bool p0 = false;");
                 Line("int a0 = 0, aL = 0;");
@@ -208,7 +209,7 @@ namespace predator::gpu
                     const std::size_t at = (std::size_t{ c.address } + k) * 3;
                     if (at + 3 > m_mc.code.size()) { Warn("bloco exec passa do fim do shader"); break; }
                     const std::uint32_t* words = m_mc.code.data() + at;
-                    if ((c.sequence >> (2 * k)) & 1) EmitFetch(DecodeFetch(words));
+                    if ((c.sequence >> (2 * k)) & 1) EmitFetch(DecodeFetch(words), static_cast<std::uint32_t>(at));
                     else EmitAlu(DecodeAlu(words));
                 }
                 if (guarded) Close();
@@ -255,15 +256,91 @@ namespace predator::gpu
             }
 
             // ------------------------------------------------------------ leituras
-            void EmitFetch(const FetchInstruction& f)
+            void EmitFetch(const FetchInstruction& f, std::uint32_t at)
             {
                 if (f.srcRelative) Warn("leitura com registrador de origem relativo (aL)");
-                if (f.opcode == FetchOpcode::Vertex) EmitVertexFetch(f);
+                if (f.opcode == FetchOpcode::Vertex) EmitVertexFetch(f, at);
                 else EmitTextureFetch(f);
             }
 
-            void EmitVertexFetch(const FetchInstruction& f)
+            // modo generico: confere se todas as leituras de vertice podem vir da tabela vfp[] e junta os registradores
+            // de indice e de destino que elas usam (o D3D do jogo troca entre eles conforme a declaracao de vertices)
+            void PrepareGenericFetch()
             {
+                m_out.vfAddrs = VertexFetchAddresses(m_mc.code);
+                if (m_out.vfAddrs.empty() || m_out.vfAddrs.size() > kMaxGenericFetches) return;
+                for (std::uint32_t at : m_out.vfAddrs)
+                {
+                    const FetchInstruction f = DecodeFetch(m_mc.code.data() + at);
+                    if (f.srcRelative || f.dstRelative) { m_out.vfAddrs.clear(); return; }
+                    if (std::find(m_out.vfSrc.begin(), m_out.vfSrc.end(), f.srcRegister) == m_out.vfSrc.end()) m_out.vfSrc.push_back(f.srcRegister);
+                    if (std::find(m_out.vfDst.begin(), m_out.vfDst.end(), f.dstRegister) == m_out.vfDst.end()) m_out.vfDst.push_back(f.dstRegister);
+                }
+                if (m_out.vfSrc.size() > 16 || m_out.vfDst.size() > 16) { m_out.vfAddrs.clear(); m_out.vfSrc.clear(); m_out.vfDst.clear(); return; }
+                if (m_opt.attribFetch)
+                {
+                    // o input assembler tem no maximo 32 entradas por pipeline
+                    if (m_out.vfAddrs.size() > 32 || !FetchesFirst()) { m_out.vfAddrs.clear(); m_out.vfSrc.clear(); m_out.vfDst.clear(); return; }
+                }
+                m_out.generic = true;
+            }
+
+            // Modo por atributos: as leituras de vertice tem que vir antes de qualquer outra instrucao (blocos exec
+            // incondicionais, sem predicado, sem lacos nem saltos antes delas). Ai o resultado de cada uma pode ser
+            // colocado no registrador de destino logo no inicio do shader (entrada do input layout por registrador).
+            bool FetchesFirst() const
+            {
+                if (m_out.loopMode) return false;
+                std::size_t vistos = 0;
+                for (const CfInstruction& c : m_mc.controlFlow)
+                {
+                    if (vistos == m_out.vfAddrs.size()) return true;
+                    if (c.opcode == CfOpcode::Nop || c.opcode == CfOpcode::Alloc || c.opcode == CfOpcode::MarkVsFetchDone) continue;
+                    if (c.opcode != CfOpcode::Exec && c.opcode != CfOpcode::ExecEnd) return false;
+                    for (std::uint32_t k = 0; k < c.count && vistos < m_out.vfAddrs.size(); ++k)
+                    {
+                        const std::size_t at = (std::size_t{ c.address } + k) * 3;
+                        if (at + 3 > m_mc.code.size() || !((c.sequence >> (2 * k)) & 1)) return false;
+                        const FetchInstruction f = DecodeFetch(m_mc.code.data() + at);
+                        if (f.opcode != FetchOpcode::Vertex || f.predicated) return false;
+                        ++vistos;
+                    }
+                    if (c.EndsProgram() && vistos < m_out.vfAddrs.size()) return false;
+                }
+                return vistos == m_out.vfAddrs.size();
+            }
+
+            // leitura de vertice com tudo vindo de vfp[2k] e vfp[2k+1] (montado pelo runtime a partir do shader que o
+            // jogo preencheu; vfp[2k+1] = os componentes do formato, veja VFetchG em xenos_common.hlsl.h). vfp[2k]:
+            // x = slot | formato << 8 | com sinal << 16 | inteiro << 17 | arredonda indice << 18 | componente do indice << 20
+            //     | qual registrador de indice << 24;  y = offset (dwords);  z = stride | ajuste de expoente << 8
+            //     | qual registrador de destino << 16;  w = swizzle de destino (3 bits por componente)
+            void EmitGenericVertexFetch(const FetchInstruction& f, std::uint32_t at)
+            {
+                const auto it = std::lower_bound(m_out.vfAddrs.begin(), m_out.vfAddrs.end(), at);
+                if (it == m_out.vfAddrs.end() || *it != at) { Warn("leitura de vertice fora da tabela generica"); return; }
+                const std::size_t k = static_cast<std::size_t>(it - m_out.vfAddrs.begin());
+                if (m_opt.attribFetch) return;   // por atributos: os registradores ja vem preenchidos no inicio
+                BeginPredicate(f.predicated, f.predicateCondition);
+                Open("{");
+                Line(std::format("uint4 vP = vfp[{}], vF = vfp[{}];", 2 * k, 2 * k + 1));
+                std::string src = std::format("r[{}]", m_out.vfSrc.back());
+                for (std::size_t i = m_out.vfSrc.size() - 1; i-- > 0;)
+                    src = std::format("(((vP.x >> 24) & 15u) == {}u ? r[{}] : {})", i, m_out.vfSrc[i], src);
+                Line(std::format("float4 vS = {};", src));
+                Line("float vI = vS[(vP.x >> 20) & 3u];");
+                Line("uint vIdx = (vP.x & 0x40000u) ? uint(floor(vI + 0.5)) : uint(vI);");
+                Line("float4 vV = VFetchG(vIdx, vP, vF);");
+                Line("uint vD = (vP.z >> 16) & 15u;");
+                for (std::size_t i = 0; i < m_out.vfDst.size(); ++i)
+                    Line(std::format("{}if (vD == {}u) r[{}] = FetchSwz(r[{}], vV, vP.w);", i ? "else " : "", i, m_out.vfDst[i], m_out.vfDst[i]));
+                Close();
+                EndPredicate(f.predicated);
+            }
+
+            void EmitVertexFetch(const FetchInstruction& f, std::uint32_t at)
+            {
+                if (m_out.generic) { EmitGenericVertexFetch(f, at); return; }
                 if (!f.miniFetch)
                 {
                     m_fetchSlot = f.constIndex;
@@ -827,5 +904,44 @@ namespace predator::gpu
         Emitter(mc, options, out).Run();
         if (options.pixel && !out.loopMode) out.earlyAlpha = EarlyAlphaWorthIt(mc);
         return out;
+    }
+
+    std::vector<std::uint32_t> VertexFetchAddresses(std::span<const std::uint32_t> code)
+    {
+        std::vector<std::uint32_t> addrs;
+        const Microcode mc = DecodeShader(code);
+        for (const CfInstruction& c : mc.controlFlow)
+        {
+            if (!c.IsExec()) continue;
+            for (std::uint32_t k = 0; k < c.count; ++k)
+            {
+                const std::size_t at = (std::size_t{ c.address } + k) * 3;
+                if (at + 3 > code.size()) break;
+                if (((c.sequence >> (2 * k)) & 1) && DecodeFetch(code.data() + at).opcode == FetchOpcode::Vertex)
+                    addrs.push_back(static_cast<std::uint32_t>(at));
+            }
+        }
+        std::sort(addrs.begin(), addrs.end());
+        addrs.erase(std::unique(addrs.begin(), addrs.end()), addrs.end());
+        return addrs;
+    }
+
+    std::uint64_t VertexFetchMaskedHash(std::span<const std::uint32_t> code)
+    {
+        // nas leituras de vertice so ficam opcode/registrador de origem (w0 bits 0-11) e os bits de predicado (w1/w2
+        // bit 31); o resto e o que o D3D do jogo preenche
+        const std::vector<std::uint32_t> addrs = VertexFetchAddresses(code);
+        std::uint64_t h = 0xCBF29CE484222325ull;
+        std::size_t next = 0;
+        for (std::size_t i = 0; i < code.size(); ++i)
+        {
+            std::uint32_t w = code[i];
+            while (next < addrs.size() && addrs[next] + 3 <= i) ++next;
+            if (next < addrs.size() && i >= addrs[next] && i < addrs[next] + 3)
+                w &= (i == addrs[next]) ? 0x00000FFFu : 0x80000000u;
+            for (int j = 0; j < 4; ++j) { h ^= (w >> (j * 8)) & 0xFF; h *= 0x100000001B3ull; }
+        }
+        h ^= 0x9E3779B97F4A7C15ull * (addrs.size() + 1);   // nao confunde com o hash normal (FNV do codigo inteiro)
+        return h;
     }
 }

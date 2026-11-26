@@ -9,6 +9,7 @@ void InputInit(HWND hwnd);         // input.cpp: mouse e controles.ini
 bool InputWindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& result);
 std::string InputStatus();
 bool BugKey(unsigned vk);          // content.cpp: F12 = pacote do bug
+bool SaveStateTecla(unsigned vk);  // save_state.cpp: teclas de salvar/carregar o estado (antes das de diagnostico)
 std::wstring PacoteBugPlacaParada(const std::string& explicacao);   // content.cpp: pasta bugs\bug_N para a placa parada
 std::string BugStatus();
 void ProfilerRegisterThread(const char* name);   // profiler.cpp
@@ -27,6 +28,7 @@ std::atomic<uint64_t> g_missionStartFrame{ 0 };   // quadro em que a fase comeco
 #include <shellapi.h>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <vector>
 #include <algorithm>
 #include <unordered_map>
@@ -56,7 +58,10 @@ int g_tileState = 0;
 // quadro com faixas de cada processo so desenhava a faixa da esquerda (0-768) e os 40% da direita saiam pretos (item 31).
 uint32_t g_tileFullWidth = 1280;
 int64_t RoteiroTiqueAtual();     // input.cpp (registros de depuracao por tique do roteiro)
+int64_t OclusaoLogTique();       // input.cpp: tique do roteiro (FCRECOMP_OCLUSAOLOG=t...) ou quadro (=q...)
 
+void QuadroTroca();   // quadro_na_hora.cpp
+bool QuadroTrocaImediata(uint32_t intervalo);
 namespace
 {
     constexpr uint32_t REG_CP_RB_RPTR = 0x01C4;
@@ -162,8 +167,8 @@ namespace
     void LogVistoPeloJogo(uint32_t reg, bool antiga)
     {
         static const char* qlog = getenv("FCRECOMP_OCLUSAOLOG");
-        if (!qlog || qlog[0] != 't' || g_tileState != 2) return;
-        int64_t ini = atoll(qlog + 1), fim = strchr(qlog, '-') ? atoll(strchr(qlog, '-') + 1) : ini, tq = RoteiroTiqueAtual();
+        if (!qlog || (qlog[0] != 't' && qlog[0] != 'q') || g_tileState != 2) return;
+        int64_t ini = atoll(qlog + 1), fim = strchr(qlog, '-') ? atoll(strchr(qlog, '-') + 1) : ini, tq = OclusaoLogTique();
         if (tq < ini || tq > fim) return;
         uint32_t soma = 0;
         for (uint32_t r : { reg - 0x40, reg })
@@ -183,10 +188,10 @@ namespace
             uint32_t n = QuerySamples((guest & 0x1FFFFFFF) - 0x40);
             // FCRECOMP_OCLUSAOLOG=t4370-4445: cada resposta nesses tiques do roteiro (bloco, amostras, troca de tela)
             static const char* qlog = getenv("FCRECOMP_OCLUSAOLOG");
-            if (qlog && qlog[0] == 't')
+            if (qlog && (qlog[0] == 't' || qlog[0] == 'q'))
             {
                 int64_t ini = atoll(qlog + 1), fim = strchr(qlog, '-') ? atoll(strchr(qlog, '-') + 1) : ini;
-                int64_t tq = RoteiroTiqueAtual();
+                int64_t tq = OclusaoLogTique();
                 if (tq >= ini && tq <= fim)
                     Log("[oclusao] tique %lld troca %llu: bloco %08X respondido com %u%s", (long long)tq, (unsigned long long)g_swapCount.load(),
                         (guest & 0x1FFFFFFF) - 0x40, n, xdraw::QueryResult((guest & 0x1FFFFFFF) - 0x40, 0xFFFFFFFFu) == 0xFFFFFFFFu ? " (sem contagem: padrao)" : "");
@@ -249,15 +254,41 @@ namespace
                 Log("[oclusao] troca %llu: registro %08X respondido com %u (adiado desde a troca %llu)", (unsigned long long)troca, q.reg1, n,
                     (unsigned long long)q.troca);
             static const char* qlog = getenv("FCRECOMP_OCLUSAOLOG");
-            if (qlog && qlog[0] == 't')
+            if (qlog && (qlog[0] == 't' || qlog[0] == 'q'))
             {
-                int64_t ini = atoll(qlog + 1), fim = strchr(qlog, '-') ? atoll(strchr(qlog, '-') + 1) : ini, tq = RoteiroTiqueAtual();
+                int64_t ini = atoll(qlog + 1), fim = strchr(qlog, '-') ? atoll(strchr(qlog, '-') + 1) : ini, tq = OclusaoLogTique();
                 if (tq >= ini && tq <= fim)
                     Log("[oclusao] tique %lld troca %llu: consulta nova %08X respondida com %u (adiada desde a troca %llu)", (long long)tq,
                         (unsigned long long)troca, q.reg1, n, (unsigned long long)q.troca);
             }
         }
         g_queriesAdiadas.resize(keep);
+    }
+
+    // Farol do jipe atravessando a pedra (01_beach, cutscene do SpawnTrigger; video do Xbox 360 do usuario): o GetData do
+    // jogo (sub_82741238) so pergunta uma vez por quadro. A caixa de teste do quadro N ia para a placa na troca N, mas a
+    // contagem so era colhida na troca N+1 (o processador de comandos quase nunca fica parado entre as duas): o jogo
+    // ouvia "ainda nao" em N+1 e N+2 e so via o farol escondido 3 quadros depois de ele sumir atras da pedra (o brilho
+    // ficava ~6 quadros por cima dela; no Xbox some em 1-2). Agora o GetData que ouve "ainda nao" pede ao processador de
+    // comandos (entre dois pacotes ou na espera dele) para colher e responder ja, e espera um pouco a placa terminar o
+    // quadro ja enviado. FCRECOMP_OCLUSAOSEMESPERA=1 volta ao antigo.
+    std::atomic<uint32_t> g_oclPedido{ 0 }, g_oclAtendido{ 0 }, g_oclReg{ 0 };
+    std::atomic<int> g_oclEstado{ 0 };   // 0 = respondida (ou nao adiada), 1 = caixa ja enviada a placa, 2 = caixa no quadro aberto
+    void AtenderPedidoOclusao()
+    {
+        const uint32_t p = g_oclPedido.load(std::memory_order_acquire);
+        if (p == g_oclAtendido.load(std::memory_order_relaxed)) return;
+        int estado = 0;
+        if (g_drawReady && !g_queriesAdiadas.empty() && !AoVivoLigado("OCLUSAOLENTA"))
+        {
+            render::ColherOclusao(false);
+            ResponderAdiadas(g_swapCount.load());
+            const uint32_t r = g_oclReg.load(std::memory_order_relaxed);
+            for (auto& q : g_queriesAdiadas)
+                if (q.reg1 == r || q.reg2 == r) { estado = q.troca < g_swapCount.load() ? 1 : 2; break; }
+        }
+        g_oclEstado.store(estado, std::memory_order_relaxed);
+        g_oclAtendido.store(p, std::memory_order_release);
     }
 
     void AnswerPendingQueries(uint64_t frame)
@@ -295,6 +326,7 @@ namespace
     void CpWait(int spin)
     {
         static const bool spinOnly = getenv("FCRECOMP_SPINWAIT") != nullptr;
+        AtenderPedidoOclusao();   // o GetData do jogo pode estar esperando uma contagem
         int micros = 50;
         if (!spinOnly && spin > 400 + 20) micros = 200;    // ~20 x 50 us = 1 ms
         if (!spinOnly && spin > 400 + 40) micros = 500;    // + 20 x 200 us = ~5 ms
@@ -351,6 +383,7 @@ namespace
     void WriteRegister(uint32_t index, uint32_t value)
     {
         index &= 0xFFFF;
+        perf::g_regs++;
         SetReg(index, value);
         // versao das constantes dos shaders (xenos_draw reaproveita o envio anterior se nada mudou)
         if (index >= 0x4000 && index < 0x4800) g_constVersion[index >= 0x4400]++;
@@ -397,6 +430,38 @@ namespace
         }
         if (index == REG_SCRATCH_REG0 && kGpuLogEnv)
             g_logRegsAfterScratch = 12;
+    }
+
+    // Varios registradores seguidos direto do buffer de comandos (src = endereco do jogo do primeiro valor). Os dois lados
+    // guardam os valores em big-endian: e uma copia so. Na selva da 02_native passam ~500 mil registradores por quadro
+    // (constantes dos shaders, nas duas faixas do tiling); um a um pelo WriteRegister eram ~5 ms por quadro da thread da
+    // GPU. Vai um a um quando algum precisa de tratamento (scratch) ou com registros de depuracao ligados.
+    // FCRECOMP_REGSUMAUM=1 volta ao antigo.
+    void WriteRegisters(uint32_t first, uint32_t src, uint32_t n)
+    {
+        static const bool umAUm = getenv("FCRECOMP_REGSUMAUM") != nullptr || getenv("FCRECOMP_NANLOG") != nullptr || kGpuLogEnv;
+        first &= 0xFFFF;
+        const uint32_t last = first + n;
+        if (umAUm || g_logRegsAfterScratch > 0 || last > 0x10000 || (first < REG_SCRATCH_REG0 + 8 && last > REG_SCRATCH_REG0))
+        {
+            for (uint32_t i = 0; i < n; i++)
+            {
+                g_regSrc = src + i * 4;
+                WriteRegister(first + i, R32(src + i * 4));
+            }
+            g_regSrc = 0;
+            return;
+        }
+        if (!n) return;
+        memcpy((uint32_t*)g_gpuRegsHost + first, G(src), (size_t)n * 4);
+        perf::g_regs += n;
+        // versao das constantes (como no WriteRegister)
+        if (first < 0x4800 && last > 0x4000)
+        {
+            if (first < 0x4400) g_constVersion[0]++;
+            if (last > 0x4400) g_constVersion[1]++;
+        }
+        if (first < 0x4928 && last > 0x4900) { g_constVersion[0]++; g_constVersion[1]++; }
     }
 
     // ------------------------------------------------------------ escritas da CPU nos registradores
@@ -485,9 +550,30 @@ namespace
         return h;
     }
 
+    // Atalho do IM_LOAD (26/11): o jogo carrega o shader a cada troca (milhares de vezes por quadro) e quase sempre o mesmo
+    // microcode no mesmo endereco. Antes cada carga copiava o codigo, montava um vetor e calculava o FNV byte a byte
+    // (LoadShader ~6,5% da linha de desenho no roteiro 2026-11-25_20-39). Agora (tipo, endereco, tamanho) guarda o shader e
+    // uma copia crua dos bytes; se a memoria for igual (memcmp), o shader e o mesmo. O hash continua o de sempre.
+    // FCRECOMP_SHADERSEMATALHO=1 volta ao antigo.
+    struct ImLoadVisto { std::vector<uint8_t> cru; std::shared_ptr<Shader> s; };
+    std::unordered_map<uint64_t, ImLoadVisto> g_imLoadVistos;   // so a linha de desenho (sob g_shaderMutex)
+
     void LoadShader(uint32_t type, uint32_t guestAddr, uint32_t sizeDwords)
     {
         if (type > 1 || sizeDwords == 0 || sizeDwords > 0x10000) return;
+        static const bool semAtalho = getenv("FCRECOMP_SHADERSEMATALHO") != nullptr;
+        const uint64_t chaveIm = ((uint64_t)guestAddr << 32) ^ ((uint64_t)sizeDwords << 1) ^ type;
+        const uint8_t* cru = G(guestAddr);
+        if (!semAtalho)
+        {
+            std::lock_guard lock(g_shaderMutex);
+            auto it = g_imLoadVistos.find(chaveIm);
+            if (it != g_imLoadVistos.end() && it->second.cru.size() == sizeDwords * 4u && !memcmp(it->second.cru.data(), cru, sizeDwords * 4u))
+            {
+                g_currentShader[type] = it->second.s;
+                return;
+            }
+        }
         std::vector<uint32_t> code(sizeDwords);
         for (uint32_t i = 0; i < sizeDwords; i++)
             code[i] = R32(guestAddr + i * 4);
@@ -514,6 +600,13 @@ namespace
                 (unsigned long long)h, sizeDwords, g_shaders.size());
         }
         g_currentShader[type] = s;
+        if (!semAtalho)
+        {
+            if (g_imLoadVistos.size() > 8192) g_imLoadVistos.clear();
+            auto& v = g_imLoadVistos[chaveIm];
+            v.cru.assign(cru, cru + sizeDwords * 4u);
+            v.s = s;
+        }
     }
 
     // ------------------------------------------------------------ texturas usadas nos desenhos
@@ -776,9 +869,9 @@ namespace
                         xdraw::NotaCaptura(t);
                     }
                     static const char* qlog = getenv("FCRECOMP_OCLUSAOLOG");
-                    if (qlog && qlog[0] == 't' && meio == 0x00)
+                    if (qlog && (qlog[0] == 't' || qlog[0] == 'q') && meio == 0x00)
                     {
-                        int64_t ini = atoll(qlog + 1), fim = strchr(qlog, '-') ? atoll(strchr(qlog, '-') + 1) : ini, tq = RoteiroTiqueAtual();
+                        int64_t ini = atoll(qlog + 1), fim = strchr(qlog, '-') ? atoll(strchr(qlog, '-') + 1) : ini, tq = OclusaoLogTique();
                         if (tq >= ini && tq <= fim)
                             Log("[oclusao] tique %lld troca %llu: registro %08X (faixa %d) respondido com %u", (long long)tq,
                                 (unsigned long long)g_swapCount.load(), reg, g_tileState, n);
@@ -846,8 +939,7 @@ namespace
             uint32_t index = offsetType & 0x7FF;
             uint32_t type = (offsetType >> 16) & 0xFF;
             uint32_t baseIndex = type == 0 ? 0x4000 : type == 1 ? 0x4800 : type == 2 ? 0x4900 : type == 3 ? 0x4908 : 0x2000;
-            for (uint32_t i = 1; i < count; i++)
-                WriteRegister(baseIndex + index + i - 1, D(i));
+            if (count > 1) WriteRegisters(baseIndex + index, addr + 4, count - 1);
             // FCRECOMP_NANLOG=1: anota constantes de shader que chegam como NaN (endereco no buffer de comandos)
             if (static const bool nanLog = getenv("FCRECOMP_NANLOG") != nullptr; nanLog && type == 0)
                 for (uint32_t i = 1; i < count; i++)
@@ -865,8 +957,7 @@ namespace
         case 0x55:   // SET_CONSTANT2
         {
             uint32_t index = D(0) & 0xFFFF;
-            for (uint32_t i = 1; i < count; i++)
-                WriteRegister(index + i - 1, D(i));
+            if (count > 1) WriteRegisters(index, addr + 4, count - 1);
             break;
         }
 
@@ -974,6 +1065,7 @@ namespace
                 g_lastPlanes.clear();
             }
             g_swapCount++;
+            ::QuadroTroca();   // quadro_na_hora.cpp
             if (perf::AvLog() && g_swapCount <= 6) Log("[av] %.1f ms: troca %llu processada (desenhos ate aqui %llu)", perf::Now(), (unsigned long long)g_swapCount.load(), (unsigned long long)g_drawCount.load());
             diag::SetFrame(g_swapCount);
             // teste do vigia de travamento: FCRECOMP_TRAVATESTE=quadro para a GPU emulada por 12 s nesse quadro
@@ -1112,6 +1204,11 @@ namespace
                         frames * 1000.0 / total, total / frames, g_ms[Idle] / frames, g_ms[WaitReg] / frames, g_ms[Draw] / frames,
                         g_ms[Texture] / frames, g_ms[Copy] / frames, g_ms[perf::Shader] / frames, g_ms[Resolve] / frames, g_ms[Present] / frames, g_ms[Fence] / frames);
                     Log("[perf]   GPU real: %.1f ms por quadro", gpuSum / frames);
+                    Log("[perf]   buffer de comandos: %.1f ms por quadro (com desenho/resolve/apresentar dentro), %.0f pacotes, %.0f registradores",
+                        g_ms[Pacotes] / frames, g_pacotes / frames, g_regs / frames);
+                    g_pacotes = g_regs = 0;
+                    Log("[perf]   jogo esperando consultas de oclusao: %.1f ms por quadro (%.1f esperas)", g_oclEsperaMs / frames, g_oclEsperas / frames);
+                    g_oclEsperaMs = g_oclEsperas = 0;
                     gpuSum = 0;
                     double vmUse, vmBudget, vmSys;
                     render::VideoMemory(vmUse, vmBudget, vmSys);
@@ -1166,6 +1263,8 @@ namespace
         uint32_t end = ptr + count * 4;
         while (ptr < end)
         {
+            AtenderPedidoOclusao();
+            perf::g_pacotes++;
             uint32_t header = R32(ptr);
             ptr += 4;
             switch (header >> 30)
@@ -1175,12 +1274,16 @@ namespace
                 uint32_t n = ((header >> 16) & 0x3FFF) + 1;
                 uint32_t reg = header & 0x7FFF;
                 bool single = header & 0x8000;
-                for (uint32_t i = 0; i < n; i++)
+                if (!single) WriteRegisters(reg, ptr, n);
+                else
                 {
-                    g_regSrc = ptr + i * 4;
-                    WriteRegister(single ? reg : reg + i, R32(ptr + i * 4));
+                    for (uint32_t i = 0; i < n; i++)
+                    {
+                        g_regSrc = ptr + i * 4;
+                        WriteRegister(reg, R32(ptr + i * 4));
+                    }
+                    g_regSrc = 0;
                 }
-                g_regSrc = 0;
                 ptr += n * 4;
                 break;
             }
@@ -1323,7 +1426,10 @@ namespace
 
             uint32_t newRptr = wptr;
             if (wptr > rptr)
+            {
+                perf::Scope pp(perf::Pacotes);
                 ExecuteBuffer(ringGuest + rptr * 4, wptr - rptr);
+            }
             else if (ringDwords - rptr > ringDwords / 4)
             {
                 // o jogo recomecou o ring do inicio sem chegar perto do fim (acontece na abertura: rptr=31 wptr=25):
@@ -1534,6 +1640,38 @@ namespace
     // do Windows, entao as duas janelas mostram a mesma posicao e a troca nao aparece.
     const bool g_reinicio = getenv("PREDATOR_REINICIO") != nullptr;
 
+    // Barra progressiva da troca de programa (item 3 da lista de 26/11; antes um trecho correndo sem fim). Segue o
+    // trabalho de verdade, sem relogio: 0% no processo que sai, 5-90% a preparacao da placa do processo novo
+    // (superficies, shaders e pipelines contados: xdraw::WarmUpProgress), 90% preparacao pronta, 95% o 1o quadro do
+    // jogo novo, 100% a imagem dele acendeu - e ai a tela sai (xenos_draw.cpp mostra a barra cheia ~0,2 s antes).
+    // PREDATOR_TROCA_T0 (inicio da troca no processo antigo) so marca que e uma troca e mede quanto ela levou.
+    struct Troca { ULONGLONG t0 = 0; std::wstring destino; bool saindo = false, completa = false, deEditor = false; };
+    std::wstring NomeDoExe(const std::wstring& caminho) { return caminho.substr(caminho.find_last_of(L"\\/") + 1); }
+    Troca& TrocaAtual()
+    {
+        static Troca t = [] {
+            Troca r;
+            wchar_t v[64] = {};
+            if (GetEnvironmentVariableW(L"PREDATOR_TROCA_T0", v, 64)) r.t0 = _wcstoui64(v, nullptr, 10);
+            wchar_t de[MAX_PATH] = {};
+            r.deEditor = GetEnvironmentVariableW(L"PREDATOR_TROCA_DE", de, MAX_PATH) && _wcsnicmp(de, L"PredatorEditor", 14) == 0;
+            wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
+            r.destino = NomeDoExe(exe);
+            return r;
+        }();
+        return t;
+    }
+    float ProgressoTroca()
+    {
+        Troca& t = TrocaAtual();
+        if (!t.t0) return -1;
+        if (t.completa) return 1;      // o jogo novo acendeu (TrocaCompletar)
+        if (t.saindo) return 0;        // processo antigo: o novo ainda nao comecou
+        if (!g_prepDone) return 0.05f + 0.85f * std::clamp(xdraw::WarmUpProgress(), 0.0f, 1.0f);
+        return g_swapCount > 0 ? 0.95f : 0.90f;
+    }
+    bool TrocaParaEditor() { return _wcsnicmp(TrocaAtual().destino.c_str(), L"PredatorEditor", 14) == 0; }
+
     void DesenharTelaCarregando(HDC dc, int w, int h)
     {
         RECT r{ 0, 0, w, h };
@@ -1547,17 +1685,52 @@ namespace
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(235, 235, 235));
         RECT tr{ 0, by - h / 6, w, by - bh * 2 };
-        DrawTextW(dc, TR(L"Carregando", L"Loading"), -1, &tr, DT_CENTER | DT_BOTTOM | DT_SINGLELINE);
+        const float p = ProgressoTroca();
+        const bool editor = TrocaParaEditor();
+        DrawTextW(dc, p >= 0 && editor ? TR(L"Carregando o editor de mapas", L"Loading the map editor") : TR(L"Carregando", L"Loading"), -1, &tr,
+                  DT_CENTER | DT_BOTTOM | DT_SINGLELINE);
         SelectObject(dc, antes);
         DeleteObject(titulo);
         HBRUSH borda = CreateSolidBrush(RGB(70, 70, 70)), cheio = CreateSolidBrush(RGB(200, 120, 30));
         RECT b{ bx - 2, by - 2, bx + bw + 2, by + bh + 2 };
         FrameRect(dc, &b, borda);
-        // um trecho de 1/4 da barra correndo da esquerda para a direita (1,4 s por volta)
-        double f = (double)(GetTickCount64() % 1400) / 1400.0;
-        int seg = bw / 4, x0 = bx - seg + (int)((bw + seg) * f);
-        RECT s{ std::max(bx, x0), by, std::min(bx + bw, x0 + seg), by + bh };
-        if (s.right > s.left) FillRect(dc, &s, cheio);
+        if (p >= 0)
+        {
+            RECT s{ bx, by, bx + (int)(bw * std::clamp(p, 0.0f, 1.0f)), by + bh };
+            if (s.right > s.left) FillRect(dc, &s, cheio);
+            // porcentagem e o que esta acontecendo (o processo antigo ainda nao tem a placa nova: "abrindo")
+            const wchar_t* etapa;
+            uint32_t feitos = 0, total = 0;
+            const int e = TrocaAtual().saindo || !g_reinicio ? -2 : g_prepDone ? -1 : xdraw::WarmUpEtapa(feitos, total);
+            if (p >= 1) etapa = TR(L"Pronto", L"Done");
+            else if (e == -2) etapa = editor ? TR(L"Abrindo o editor de mapas", L"Opening the map editor") : TR(L"Abrindo o jogo", L"Opening the game");
+            else if (e == -1) etapa = editor ? TR(L"Iniciando o editor de mapas", L"Starting the map editor") :
+                                      TrocaAtual().deEditor ? TR(L"Iniciando o jogo", L"Starting the game") : TR(L"Carregando a fase", L"Loading the level");
+            else if (e == xdraw::ETAPA_FIM) etapa = TR(L"Terminando a preparação", L"Finishing the preparation");
+            else if (e == xdraw::ETAPA_SUPERFICIES) etapa = TR(L"Recriando as superfícies de desenho", L"Recreating the drawing surfaces");
+            else if (e == xdraw::ETAPA_SHADERS) etapa = TR(L"Compilando os shaders", L"Compiling the shaders");
+            else if (e == xdraw::ETAPA_PIPELINES) etapa = TR(L"Criando os pipelines da placa de vídeo", L"Creating the graphics card pipelines");
+            else if (e == xdraw::ETAPA_SHADERS_JOGO) etapa = TR(L"Traduzindo e compilando os shaders do jogo", L"Translating and compiling the game's shaders");
+            else etapa = TR(L"Iniciando a placa de vídeo (DirectX 12)", L"Starting the graphics card (DirectX 12)");
+            wchar_t linha[160];
+            if (total) swprintf(linha, 160, L"%d%%  •  %ls: %u / %u", (int)(p * 100), etapa, feitos, total);
+            else swprintf(linha, 160, L"%d%%  •  %ls", (int)(p * 100), etapa);
+            HFONT texto = CreateFontW(-9 * esc, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            HGDIOBJ a2 = SelectObject(dc, texto);
+            SetTextColor(dc, RGB(160, 160, 160));
+            RECT pc{ 0, by + bh * 2, w, by + bh * 2 + 20 * esc };
+            DrawTextW(dc, linha, -1, &pc, DT_CENTER | DT_TOP | DT_SINGLELINE);
+            SelectObject(dc, a2);
+            DeleteObject(texto);
+        }
+        else
+        {
+            // sem o inicio da troca: um trecho de 1/4 da barra correndo da esquerda para a direita (1,4 s por volta)
+            double f = (double)(GetTickCount64() % 1400) / 1400.0;
+            int seg = bw / 4, x0 = bx - seg + (int)((bw + seg) * f);
+            RECT s{ std::max(bx, x0), by, std::min(bx + bw, x0 + seg), by + bh };
+            if (s.right > s.left) FillRect(dc, &s, cheio);
+        }
         DeleteObject(borda); DeleteObject(cheio);
     }
 
@@ -1668,7 +1841,19 @@ namespace
         SelectObject(mem, texto);
         SetTextColor(mem, RGB(160, 160, 160));
         wchar_t linha[160];
-        swprintf(linha, 160, L"%d%%", (int)(p * 100 + 0.5f));
+        // Etapa atual (item 1 da lista de 26/11): o que o programa esta fazendo, com a contagem quando tem
+        uint32_t feitos = 0, total = 0;
+        const int etapa = g_prepDone ? -1 : xdraw::WarmUpEtapa(feitos, total);
+        const wchar_t* nome =
+            etapa < 0 ? TR(L"Iniciando o jogo", L"Starting the game") :
+            etapa == xdraw::ETAPA_FIM ? TR(L"Terminando a preparação", L"Finishing the preparation") :
+            etapa == xdraw::ETAPA_SUPERFICIES ? TR(L"Recriando as superfícies de desenho", L"Recreating the drawing surfaces") :
+            etapa == xdraw::ETAPA_SHADERS ? TR(L"Compilando os shaders", L"Compiling the shaders") :
+            etapa == xdraw::ETAPA_PIPELINES ? TR(L"Criando os pipelines da placa de vídeo", L"Creating the graphics card pipelines") :
+            etapa == xdraw::ETAPA_SHADERS_JOGO ? TR(L"Traduzindo e compilando os shaders do jogo", L"Translating and compiling the game's shaders") :
+            TR(L"Iniciando a placa de vídeo (DirectX 12)", L"Starting the graphics card (DirectX 12)");
+        if (total) swprintf(linha, 160, L"%d%%  •  %ls: %u / %u", (int)(p * 100 + 0.5f), nome, feitos, total);
+        else swprintf(linha, 160, L"%d%%  •  %ls", (int)(p * 100 + 0.5f), nome);
         RECT pc{ 0, by + bh * 2, w, by + bh * 2 + 20 * esc };
         DrawTextW(mem, linha, -1, &pc, DT_CENTER | DT_TOP | DT_SINGLELINE);
         RECT d{ 0, by + bh * 2 + 24 * esc, w, h };
@@ -1800,7 +1985,7 @@ namespace
             return 0;
         }
         case WM_KEYDOWN:
-            if (BugKey((unsigned)wp) || diag::OnKey((unsigned)wp)) return 0;
+            if (BugKey((unsigned)wp) || SaveStateTecla((unsigned)wp) || diag::OnKey((unsigned)wp)) return 0;
             break;
         case WM_DESTROY:
             Log("[gpu] janela fechada, encerrando");
@@ -1971,6 +2156,48 @@ namespace
 }
 
 HWND GetGameWindow() { return g_window; }
+
+// nan_diag.cpp (GetData do jogo ouviu "ainda nao"): pede ao processador de comandos para colher as contagens ja prontas e
+// responder as consultas adiadas; repete enquanto a caixa da consulta cujo ultimo registro e "reg" (fisico) ja estiver
+// na placa, ate ~12 ms. Volta true se vale perguntar de novo. Veja AtenderPedidoOclusao.
+bool OclusaoEsperarResposta(uint32_t reg)
+{
+    static const bool desligado = getenv("FCRECOMP_OCLUSAOSEMESPERA") != nullptr;
+    static const bool quadroAberto = getenv("FCRECOMP_OCLUSAOESPERA2") != nullptr;   // teste: espera tambem a caixa do quadro aberto
+    if (desligado || !g_drawReady || !OclusaoAdiar()) return false;
+    // Teto por quadro do jogo (25/11): na selva da 02_native o jogo pergunta ~28 vezes por quadro e cada espera ia ate a
+    // placa terminar o quadro anterior (~21 ms por quadro somados): o jogo ficava parado em vez de preparar o proximo
+    // quadro (22-23 qps; sem espera nenhuma, 30). Agora, somadas, as esperas de um quadro param no teto; depois dele a
+    // consulta responde "ainda nao" na hora, como com FCRECOMP_OCLUSAOSEMESPERA. FCRECOMP_OCLUSAOTETO=ms muda o teto
+    // (0 = sem teto, como antes).
+    static const double teto = [] { const char* e = getenv("FCRECOMP_OCLUSAOTETO"); return e ? atof(e) : 4.0; }();
+    static uint64_t quadroTeto = ~0ull;
+    static double gastoNoQuadro = 0;
+    static std::mutex m;
+    std::lock_guard lock(m);
+    if (const uint64_t q = g_swapCount.load(); q != quadroTeto) { quadroTeto = q; gastoNoQuadro = 0; }
+    if (teto > 0 && gastoNoQuadro >= teto) return false;
+    const double ini = perf::Now();
+    struct Gasto { double ini; ~Gasto() { gastoNoQuadro += perf::Now() - ini; } } gasto{ ini };
+    const double limite = teto > 0 ? std::min(12.0, teto - gastoNoQuadro) : 12.0;
+    struct Conta { double ini; ~Conta() { perf::g_oclEsperaMs += perf::Now() - ini; perf::g_oclEsperas++; } } conta{ ini };
+    bool algum = false;
+    for (int volta = 0;; volta++)
+    {
+        g_oclReg.store(reg, std::memory_order_relaxed);
+        const uint32_t meu = g_oclPedido.fetch_add(1, std::memory_order_acq_rel) + 1;
+        for (int spin = 0; (int32_t)(g_oclAtendido.load(std::memory_order_acquire) - meu) < 0; spin++)
+        {
+            if (perf::Now() - ini > limite) return algum;
+            ShortWait(spin, 100);
+        }
+        const int estado = g_oclEstado.load(std::memory_order_relaxed);
+        algum = true;
+        if (estado == 0 || (estado == 2 && !quadroAberto)) return true;
+        if (perf::Now() - ini > limite) return true;
+        ShortWait(volta < 20 ? 0 : 400, 200);
+    }
+}
 // render.cpp: a placa de video parou (Present falhou). A janela mostra o aviso e fecha o jogo (thread da janela).
 // FCRECOMP_PLACATRAVOU_SEMFECHAR=1: so anota (investigacao com a imagem congelada).
 void AvisarPlacaTravou()
@@ -2028,6 +2255,33 @@ bool SalvarImagemDaJanela(const std::wstring& arquivo)
         else ok = false;
     DeleteObject(bmp);
     return ok;
+}
+
+// Troca de programa (xam.cpp), antes de cobrir a janela: inicio da troca e o programa que vai abrir (barra progressiva,
+// ProgressoTroca). O processo novo recebe o inicio por PREDATOR_TROCA_T0.
+void TrocaComecou(const std::wstring& exeDestino)
+{
+    Troca& t = TrocaAtual();
+    t.t0 = GetTickCount64();
+    t.destino = NomeDoExe(exeDestino);
+    t.completa = false;   // a troca que trouxe este processo ja acabou
+    t.saindo = true;   // este processo esta saindo: a tela dele diz "abrindo" (ele tambem pode ter vindo de uma troca)
+    SetEnvironmentVariableW(L"PREDATOR_TROCA_T0", std::to_wstring(t.t0).c_str());
+    wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    SetEnvironmentVariableW(L"PREDATOR_TROCA_DE", NomeDoExe(exe).c_str());
+}
+
+// Processo novo: o jogo acendeu; a barra passa a 100% (xenos_draw.cpp mostra a tela cheia ~0,2 s e depois solta)
+void TrocaCompletar() { TrocaAtual().completa = true; }
+
+// Processo novo de uma troca: a tela segurada saiu (xenos_draw.cpp, Soltar). Anota no log quanto a troca levou.
+void TrocaTerminou()
+{
+    static bool feito = false;
+    Troca& t = TrocaAtual();
+    if (feito || !g_reinicio || !t.t0) return;
+    feito = true;
+    Log("[janela] troca de programa levou %.1f s", (GetTickCount64() - t.t0) / 1000.0);
 }
 
 // Troca de programa (xam.cpp): cobre esta janela com a tela de carregamento ate o processo fechar e tira a animacao de
@@ -2275,7 +2529,10 @@ GUEST_DECLARE_ORIGINAL(FPS_TROCA);
 GUEST_FUNC(FPS_TROCA)
 {
     const int modo = ModoFps();
-    if (modo != 0)
+    // jogando: a troca sai na hora e o ritmo e feito antes de ler a entrada (quadro_na_hora.cpp)
+    if (const uint32_t pedido = Gpr32(ctx, 3) >> 16; modo != 2 && QuadroTrocaImediata(modo == 1 ? std::min(pedido, 1u) : pedido))
+        SetGpr(ctx, 3, 0xFFFFu);
+    else if (modo != 0)
     {
         uint32_t r3 = Gpr32(ctx, 3);
         uint32_t novo = modo == 1 ? (1u << 16) | (r3 & 0xFFFF) : 0xFFFFu;

@@ -32,8 +32,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
+#include <vector>
+#include <windows.h>
+
+void AtoresDaCenaLimpar();   // atores das cenas (abaixo)
 
 void RelogioAcelerar(uint32_t fator);        // input.cpp
 std::atomic<bool> g_acelerando{ false };     // cena do script sendo adiantada (relogio acelerado, som calado, FPS sem limite)
@@ -50,6 +55,7 @@ namespace
 constexpr uint32_t BUSCA_ELEMENTO = 0x82469EC8;   // (r3 = conjunto de elementos da pagina, r4 = id) -> elemento
 constexpr uint32_t WSTRING_COPIA = 0x82158218;    // (r3 = wstring, r4 = texto, r5 = tamanho)
 constexpr uint32_t PARAR_SEQUENCIA = 0x82342990;  // (r3 = sistema de filmes, r4 = sequencia)
+constexpr uint32_t PARAR_FALA = 0x8223FF00;       // (r3 = voz do personagem, r4 = som): para a fala (veja sub_82309B00)
 constexpr uint32_t SISTEMA_FILMES = 0x82910000 + 8900;
 
 constexpr uint32_t ID_RETOMAR = 229177234;        // B_Resume
@@ -72,6 +78,30 @@ bool g_pular = false;                             // pedido de pular a cena do s
 bool g_modoVideo = false;                         // o item escondido esta como OPCOES DE VIDEO (fora das cenas)
 const char* TextoItem() { return g_modoVideo ? TR("OPÇÕES DE VÍDEO", "VIDEO OPTIONS") : TR("PULAR CENA", "SKIP SCENE"); }
 std::atomic<bool> g_cenaScript{ false };
+// Cena de verdade = BeginCutScene E o jogador preso nela: a camera dele presa a cena (Movie:BindCarverEyes, sinal
+// Player_BindEyes) ou uma animacao dele tocando com o mapa de controles da cena (Movie:PlayAnimCarver, sinal
+// Player_PlayAnimationWithActionMap). As 37 cenas de ancora das fases fazem um dos dois (36 BindEyes, 02_native
+// Crowe_Capture1 a animacao). Sem isso o BeginCutScene e falso: 02_native, checkpoint salvo com o 8-2-1-End tocando
+// (depois da cena da Valerie refem): o jogo restaura o trabalho Crowe_Hostage do comeco, ele manda BeginCutScene de
+// novo e o EndCutScene nunca vem (o gatilho CutScene_End1 so dispara uma vez e ja disparou); o PULAR CENA aparecia e
+// deixava a tela preta 60 s esperando o fim. FCRECOMP_PULARCENA_SEMJOGADOR=1 volta a aceitar so o BeginCutScene.
+bool g_olhosPresos = false;                       // BindCarverEyes sem UnBindCarverEyes depois
+bool g_jogadorPreso = false;                      // nesta cena o jogador ja foi preso (BindCarverEyes ou PlayAnimCarver);
+                                                  // fica ate o EndCutScene (13_black_forest: a abertura solta a camera
+                                                  // ~20 s antes do EndCutScene)
+bool CenaReal()
+{
+    static const bool semJogador = [] { const char* e = getenv("FCRECOMP_PULARCENA_SEMJOGADOR"); return e && atoi(e) != 0; }();
+    return g_cenaScript && (semJogador || g_olhosPresos || g_jogadorPreso);
+}
+// O BeginCutScene falso tambem trava o jogo (o MissionHandler esconde o HUD, manda o Carver ficar parado e marca
+// GameRules.cut_scene_in_progress): passados ESPERA_FALSA s de jogo sem o jogador preso, a cena falsa e encerrada pelo
+// proprio tratador do jogo (Mission:Event__GUI_EndCutScene, o mesmo do gatilho CutScene_End1). Nas cenas de verdade o
+// jogador e preso no maximo ~2 s de jogo depois do BeginCutScene (30_mountain se_7_2_3: Wait 2). PularCenaQuadro, abaixo.
+constexpr double ESPERA_FALSA = 4.0;
+double TempoDoJogo() { return std::bit_cast<double>(R64(0x828BBE50 + 40)); }   // relogio do jogo: tempo total (s)
+double g_cenaInicioJogo = 0;                      // tempo do jogo no BeginCutScene
+bool g_falsaEncerrada = false;                    // ja tentou encerrar esta cena falsa
 double g_ultimoFimCena = -1e9;                    // hora do ultimo EndCutScene
 int g_fimQuadros = 0;
 // trabalhos com uma animacao de cena (DisableCollisions) tocando durante a cena: 22_duneb 1-1-1 tem cinco atores (Carver,
@@ -87,7 +117,9 @@ bool AtoresAndando()   // algum ator pendente atualizado nos ultimos 5 quadros (
     for (auto& [t, q] : g_animCena) if (g_quadro - q <= 5) return true;
     return false;
 }
-int g_esperaAtores = 0;                             // quadros ate soltar o relogio depois do EndCutScene (0 = nada)          // entre SendCommandCarver("BeginCutScene") e ("EndCutScene")
+// falas das acoes PlaySound da cena ainda tocando: {voz do personagem, som} (sub_82309B00 abaixo)
+std::vector<std::pair<uint32_t, uint32_t>> g_falas;
+int g_esperaAtores = 0;                            // quadros ate soltar o relogio depois do EndCutScene (0 = nada)          // entre SendCommandCarver("BeginCutScene") e ("EndCutScene")
           // cena do script sendo adiantada (relogio acelerado, som calado)
 double g_acelInicio = 0;
 std::atomic<double> g_clarearInicio{ 0 };         // fim do pulo: a tela clareia em CLAREAR ms
@@ -195,6 +227,35 @@ void PararCenas(GuestCpu& ctx)
     }
 }
 
+// Legenda das falas: o jogo (R32(0x8291234C) + 836) guarda o som dono da legenda em +40 (-1 = nenhum); a pagina avanca
+// com o som (sub_823BA4xx -> sub_82152EE0). Quando o gerente para um som pelo caminho dele (sub_823B65F0), se a legenda
+// e desse som ele escreve +40 = -1 e +44 = 1 e ela some. A parada da fala (sub_8223FF00 sem objeto em voz+184) vai
+// direto para sub_823BB048, que nao faz isso: o som parava e a legenda ("Segundo a inteligencia, estao torturando ele
+// num porao...") continuava passando sozinha por varios segundos depois do PULAR CENA. Aqui a legenda e tirada do
+// mesmo jeito. FCRECOMP_PULARCENA_LEGENDA=0 desliga.
+void LimparLegenda(const char* quando)
+{
+    static const bool desligado = [] { const char* e = getenv("FCRECOMP_PULARCENA_LEGENDA"); return e && atoi(e) == 0; }();
+    if (desligado || !Ligado()) return;
+    const uint32_t jogo = R32(0x8291234Cu);
+    const uint32_t legenda = jogo ? R32(jogo + 836) : 0;
+    if (!legenda || R32(legenda + 40) == 0xFFFFFFFFu) return;
+    Log("[pularcena] legenda do som %08X tirada (%s)", R32(legenda + 40), quando);
+    W32(legenda + 40, 0xFFFFFFFFu);
+    W8(legenda + 44, 1);
+}
+
+// pulo: para as falas da cena que ainda tocam (o proprio jogo confere se o som ainda e o da voz e se ainda toca)
+void PararFalas(GuestCpu& ctx)
+{
+    int paradas = 0;
+    for (const auto& [voz, som] : g_falas)
+        if (R32(voz + 188) == som) { Chamar(ctx, PARAR_FALA, voz, som); paradas++; }
+    if (!g_falas.empty()) Log("[pularcena] %d fala(s) da cena parada(s) de %zu", paradas, g_falas.size());
+    g_falas.clear();
+    LimparLegenda("falas paradas");
+}
+
 // texto UTF-8 -> UTF-16 big-endian na memoria do jogo
 uint32_t TextoNoJogo(const std::string& s, uint32_t& tamanho)
 {
@@ -235,6 +296,7 @@ void PararAceleracao(const char* motivo, bool filmesDepois = false)
     if (filmesDepois) { g_filmesPendentes = true; g_somCalado = false; }   // os sons novos continuam sendo parados
     else SonsDoPuloFim();   // e o som volta (audio.cpp)
     g_clarearInicio = perf::Now();
+    LimparLegenda("fim do pulo");
     Log("[pularcena] cena do script adiantada: %s depois de %.1f s (relogio %ux)", motivo, (perf::Now() - g_acelInicio) / 1000.0, Fator());
 }
 
@@ -274,8 +336,9 @@ GUEST_FUNC(sub_821AFA10)
     g_pagina = pagina;
     g_elemento = e;
     g_fimQuadros = 0;
-    g_animCena.clear(); g_trabCena.clear();
+    g_animCena.clear(); g_trabCena.clear(); g_falas.clear(); AtoresDaCenaLimpar();
     g_cenaScript = false;   // fase nova (carregada ou reiniciada no meio de uma cena)
+    g_olhosPresos = false; g_jogadorPreso = false;
     PararAceleracao("fase nova");
     if (g_filmesPendentes) { g_filmesPendentes = false; SonsDoPuloFim(); }
     g_pular = false; g_pularTodos = false;
@@ -298,11 +361,11 @@ GUEST_FUNC(sub_8216E4D0)
         // o item so aparece durante uma cena (PULAR CENA); OPCOES DE VIDEO fica em OPCOES (menu_video.cpp)
         MenuVideoFechar(ctx, true);   // a pagina de video ficou no modo video (menu fechado com START em cima dela)
         const int cenas = CenasTocando();
-        const bool cena = !g_acelerando && (g_cenaScript || cenas > 0);
+        const bool cena = !g_acelerando && (CenaReal() || cenas > 0);
         g_modoVideo = false;
         MostrarItem(cena);
-        Log("[pularcena] menu de pausa aberto: cena do script %s, %d cena(s) de filme, item %s", g_cenaScript ? "sim" : "nao", cenas,
-            g_modoVideo ? "OPCOES DE VIDEO" : "PULAR CENA");
+        Log("[pularcena] menu de pausa aberto: cena do script %s (olhos presos %s, jogador preso na cena %s), %d cena(s) de filme, PULAR CENA %s",
+            g_cenaScript ? "sim" : "nao", g_olhosPresos ? "sim" : "nao", g_jogadorPreso ? "sim" : "nao", cenas, cena ? "mostrado" : "escondido");
     }
     GUEST_ORIGINAL(sub_8216E4D0)(ctx, base);
     // o texto do item volta ao da tabela ("CHEATS (DEBUG)") depois da montagem: escreve de novo com a pagina na tela
@@ -340,8 +403,8 @@ GUEST_FUNC(sub_821AE910)
     if (!g_elemento || !ev || R32(ev + 4) != ID_PULAR) { GUEST_ORIGINAL(sub_821AE910)(ctx, base); return; }
     if (g_modoVideo) { MenuVideoAbrir(ctx, Gpr32(ctx, 3)); return; }   // OPCOES DE VIDEO: a pagina de video por cima do menu de pausa
     g_pular = CenasTocando() > 0;
-    if (g_cenaScript) IniciarPulo();
-    Log("[pularcena] PULAR CENA escolhido (cena do script %s, filme %s)", g_cenaScript ? "sim" : "nao", g_pular ? "sim" : "nao");
+    if (CenaReal()) IniciarPulo();
+    Log("[pularcena] PULAR CENA escolhido (cena do script %s, filme %s)", CenaReal() ? "sim" : "nao", g_pular ? "sim" : "nao");
     MostrarItem(false);
     W32(ev + 4, ID_RETOMAR);
     GUEST_ORIGINAL(sub_821AE910)(ctx, base);
@@ -353,6 +416,7 @@ GUEST_DECLARE_ORIGINAL(sub_82342CC8);
 GUEST_FUNC(sub_82342CC8)
 {
     GUEST_ORIGINAL(sub_82342CC8)(ctx, base);
+    if (g_acelerando && !g_falas.empty()) PararFalas(ctx);   // a fala que tocava quando o jogador pediu o pulo
     if (static const bool diag = getenv("FCRECOMP_PULARCENA_LOG") != nullptr; diag)
     {
         static std::map<uint32_t, int> vistas;
@@ -380,7 +444,7 @@ GUEST_FUNC(sub_82342CC8)
     }
     // teste: FCRECOMP_PULARCENA_AUTO=s pula a cena do script s segundos depois do BeginCutScene (sem o menu)
     if (static const double autoS = getenv("FCRECOMP_PULARCENA_AUTO") ? atof(getenv("FCRECOMP_PULARCENA_AUTO")) : 0; autoS > 0)
-        if (g_cenaScript && !g_acelerando && perf::Now() - g_cenaInicio > autoS * 1000) { Log("[pularcena] teste: pulo automatico"); IniciarPulo(); }
+        if (CenaReal() && !g_acelerando && perf::Now() - g_cenaInicio > autoS * 1000) { Log("[pularcena] teste: pulo automatico"); IniciarPulo(); }
     if (g_acelerando)   // registro a cada segundo: quanto o tempo do jogo andou (relogio em 0x828BBE50: +40 total, +104 quadro)
     {
         static double ultimo = 0; static uint64_t quadros = 0; quadros++;
@@ -488,6 +552,47 @@ GUEST_FUNC(sub_82342CC8)
     terminou();
 }
 
+// Atores da cena (roteiro 2026-11-26_13-03, 26_shantynight): as acoes das ancoras recebem em r4 um bloco na pilha cujo
+// +0 e o personagem (o mesmo de sub_82309B00). Com a cena inteira, as falas 03A2 da animacao vem de tres personagens;
+// as que sobravam depois do pulo (itens 1, 3, 4, 6) eram do Carver, e nessa hora o personagem dele esta na pilha de
+// sub_824B8020 (quadros de 82443DE8...). Quando o pulo acontece antes da animacao comecar (ainda carregando), ela comeca
+// depois do pulo e nenhum grupo foi visto na cena; por isso audio.cpp (SomAnimacaoCalar) tambem cala, depois do pulo,
+// os sons de animacao com um ator da cena na pilha (grupos que ainda nao apareceram fora de cena).
+std::mutex g_atoresMutex;
+std::set<uint32_t> g_atoresCena;   // personagens das animacoes/falas das cenas (limpo no BeginCutScene e na fase nova)
+bool EnderecoPersonagem(uint32_t a) { return (a >= 0x40000000 && a < 0x7FFF0000) || (a >= 0xA0000000 && a < 0xBFFF0000); }
+void AtorDaCenaGuardar(uint32_t bloco)
+{
+    if (!bloco) return;
+    const uint32_t p = R32(bloco);
+    if (!EnderecoPersonagem(p)) return;
+    std::lock_guard l(g_atoresMutex);
+    if (g_atoresCena.size() < 64 && g_atoresCena.insert(p).second) Log("[pularcena] ator da cena %08X", p);
+}
+void AtoresDaCenaLimpar() { std::lock_guard l(g_atoresMutex); g_atoresCena.clear(); }
+static bool Legivel(uint32_t a)   // pagina da memoria do jogo existe (a pilha pode acabar antes de +0x800)
+{
+    static std::map<uint32_t, bool> cache;
+    const uint32_t pg = a >> 12;
+    if (auto it = cache.find(pg); it != cache.end()) return it->second;
+    MEMORY_BASIC_INFORMATION mbi{};
+    const bool ok = VirtualQuery(G(a & ~0xFFFu), &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD));
+    if (cache.size() < 4096) cache[pg] = ok;
+    return ok;
+}
+// audio.cpp: algum ator da cena na pilha (sp ate sp+0x800)? Devolve o personagem (0 = nenhum)
+uint32_t AtorDaCenaNaPilha(uint32_t sp)
+{
+    std::lock_guard l(g_atoresMutex);
+    if (g_atoresCena.empty()) return 0;
+    for (uint32_t o = 0; o < 0x800; o += 4)
+    {
+        if ((o == 0 || ((sp + o) & 0xFFF) == 0) && !Legivel(sp + o)) break;
+        if (const uint32_t v = R32(sp + o); g_atoresCena.count(v)) return v;
+    }
+    return 0;
+}
+
 // Acoes das ancoras de IA (trabalho generico): sub_82306800(r3 = trabalho, r4, r5 = acao, r6 = indice) escolhe pelo
 // tipo (acao+4; nomes na tabela 0x828BB178: 11 = PlayAnimation, 12 = PlaySequence, 25 = Wait) e devolve o estado.
 // Estado da acao em r3 + (indice+3)*76. Diagnostico (FCRECOMP_PULARCENA_LOG): registra quando o retorno muda.
@@ -513,6 +618,7 @@ GUEST_FUNC(sub_82306800)
     // mesmo tempo (guardas de 22_duneb) seguem normais, senao eles ficam parados depois do pulo.
     const bool deCena = tipo == 11 && (R32(acao + 72) >> 24) != 0;
     if (deCena && indice == 0 && (g_cenaScript || g_animCena.count(trabalho))) g_animCena[trabalho] = g_quadro;
+    if (deCena && (g_cenaScript || g_animCena.count(trabalho))) AtorDaCenaGuardar(Gpr32(ctx, 4));
     if (g_acelerando && deCena && PuloDireto() && (g_cenaScript || g_animCena.count(trabalho)) &&
         (indice != 0 || filhos[trabalho].second >= nFilhas))
     {
@@ -527,7 +633,19 @@ GUEST_FUNC(sub_82306800)
     // as filhas das animacoes de cena (24_shantyday se-3-1-1: Wait 18 s antes do Unbind do Carver do barco; 21_dunea:
     // Wait 8 s do caminhao) e, entre o BeginCutScene e o EndCutScene, para as do trabalho da cena e dos atores
     // (02_native Crowe_Capture1, 13_black_forest elevador: Wait 9 s dentro de LookAt, 30_mountain 7_2_3...)
-    if (g_acelerando && PuloDireto() && tipo == 25 && R32(acao + 36) == 2 && R32(trabalho + (indice + 3) * 76 + 56) != 0 &&
+    // Menos o Wait logo depois de um Relocate (15): e o tempo para um gatilho ver o personagem no lugar. 02_native
+    // Crowe_Capture1: Relocate do jogador para Orient_carver (dentro do ProximityTrigger15, EnterDelay 3,5 s), Wait 3,
+    // Relocate para last_carver; cortado, o gatilho nao via o jogador, a cena da injecao (Crowe_Injection1) nao
+    // comecava e a fase empacava sem HUD. Esse Wait so anda com o relogio acelerado.
+    static std::map<uint32_t, std::pair<uint32_t, uint32_t>> acaoAtual;   // trabalho -> {acao, tipo da acao anterior}
+    if (indice == 0)
+    {
+        auto& a = acaoAtual[trabalho];
+        if (a.first != acao) a = { acao, a.first ? R32(a.first + 4) : 0u };
+        if (acaoAtual.size() > 512) acaoAtual.clear();
+    }
+    const bool depoisDeRelocate = indice == 0 && acaoAtual.count(trabalho) && acaoAtual[trabalho].second == 15;
+    if (g_acelerando && PuloDireto() && tipo == 25 && !depoisDeRelocate && R32(acao + 36) == 2 && R32(trabalho + (indice + 3) * 76 + 56) != 0 &&
         ((indice != 0 && g_animCena.count(trabalho)) || (g_cenaScript && (g_trabCena.count(trabalho) || g_animCena.count(trabalho)))))
         W32(trabalho + 176, R32(trabalho + 164));
     const uint32_t trabalhoAntes = g_trabalhoAtual;
@@ -550,6 +668,62 @@ GUEST_FUNC(sub_82306800)
         tipo <= 25 ? RStr(nome).c_str() : "?", volta, R32(estado + 56), R32(estado + 60), g_acelerando ? " [acelerando]" : "");
 }
 
+// Acao PlaySound (tipo 13): sub_82309B00(r3 = trabalho, r4 = personagem, r5 = acao, r6 = estado). Na fase 0 (+56) ela
+// toca o som (acao+24) na voz do personagem: sub_8223FE80(voz = R32(r4 + 4), &som, 40) devolve o som, guardado em
+// estado+48 e em voz+188 (acao+28 = 1 e outro caminho, sem voz). A fala longa das cenas e assim (26_shantynight
+// se-4-1-1_carver: <PlayAnimation SE_4_1_1_CARVER><PlaySound ID="58589200"/></PlayAnimation>): ela toca por fora do
+// gerente de vozes (audio.cpp nao a via) e a acao acaba logo (acao+36 = 0, sem esperar o som), entao o pulo cortava a
+// animacao e o Carver continuava falando. Agora as falas dos trabalhos da cena sao guardadas e paradas no pulo com a
+// parada do proprio jogo (sub_8223FF00, a mesma do fim da PlaySound com acao+36); as que comecam durante o pulo param na hora.
+GUEST_DECLARE_ORIGINAL(sub_82309B00);
+GUEST_FUNC(sub_82309B00)
+{
+    const uint32_t trabalho = Gpr32(ctx, 3), personagem = Gpr32(ctx, 4), acao = Gpr32(ctx, 5), estado = Gpr32(ctx, 6);
+    const bool comecando = R32(estado + 56) == 0;
+    GUEST_ORIGINAL(sub_82309B00)(ctx, base);
+    static const bool falas = [] { const char* e = getenv("FCRECOMP_PULARCENA_FALAS"); return !e || atoi(e) != 0; }();   // =0 desliga
+    if (!Ligado() || !falas || !comecando || R32(acao + 28) == 1 || !personagem) return;
+    if (!(g_cenaScript || g_acelerando) || !(g_trabCena.count(trabalho) || g_animCena.count(trabalho))) return;
+    AtorDaCenaGuardar(personagem);   // (r4 = o mesmo bloco das acoes: +0 = personagem)
+    const uint32_t som = R32(estado + 48), voz = R32(personagem + 4);
+    if (!voz || som == 0 || som == 0xFFFFFFFFu || R32(voz + 188) != som) return;
+    if (g_acelerando)
+    {
+        Chamar(ctx, PARAR_FALA, voz, som);   // (Chamar devolve os registradores: r3 continua o retorno da acao)
+        Log("[pularcena] fala da cena (som %08X, trabalho %08X) parada no pulo", som, trabalho);
+        LimparLegenda("fala parada no pulo");
+    }
+    else
+    {
+        g_falas.push_back({ voz, som });
+        Log("[pularcena] fala da cena: som %08X na voz %08X (trabalho %08X)", som, voz, trabalho);
+    }
+}
+
+// Fala tocada na voz de um personagem: sub_8223FDA0(r3 = voz, r4 = &som, r5) devolve o som tocando (-1 = nao tocou).
+// Chamada por sub_8223FE80 (PlaySound das ancoras e outros), 82100BBC e 8232A444. Depuracao (FCRECOMP_FALALOG=1):
+// registra cada fala com a cadeia de retornos, para achar quem toca uma fala.
+GUEST_DECLARE_ORIGINAL(sub_8223FDA0);
+GUEST_FUNC(sub_8223FDA0)
+{
+    static const bool falaLog = getenv("FCRECOMP_FALALOG") != nullptr;
+    if (!falaLog) { GUEST_ORIGINAL(sub_8223FDA0)(ctx, base); return; }
+    const uint32_t voz = Gpr32(ctx, 3), pSom = Gpr32(ctx, 4), r5 = Gpr32(ctx, 5), lr = (uint32_t)Lr(ctx);
+    std::string chain;
+    uint32_t sp = Gpr32(ctx, 1);
+    for (int i = 0; i < 16 && sp >= 0x10000000 && sp < 0x80000000; i++)
+    {
+        const uint32_t next = R32(sp);
+        if (next <= sp) break;
+        char b[16]; snprintf(b, sizeof(b), " %08X", R32(next - 8)); chain += b;
+        sp = next;
+    }
+    const uint32_t som = pSom ? R32(pSom) : 0;
+    GUEST_ORIGINAL(sub_8223FDA0)(ctx, base);
+    Log("[fala] voz %08X som %08X (+4 %08X) r5 %08X lr %08X -> %08X%s | pilha:%s", voz, som, pSom ? R32(pSom + 4) : 0, r5, lr,
+        Gpr32(ctx, 3), g_acelerando ? " [acelerando]" : "", chain.c_str());
+}
+
 // Movie:SendCommandCarver(comando, ...) do script (sub_8233EA30 -> sub_8226AAF0(r3, r4 = comando, f1, r6)): as cenas
 // das fases (MissionHandler BeginCutScene/EndCutScene, chamados pelas acoes das ancoras de IA: animacao longa do
 // Carver com a fala) mandam "BeginCutScene" e "EndCutScene"
@@ -560,8 +734,9 @@ GUEST_FUNC(sub_8226AAF0)
     if (cmd == "BeginCutScene")
     {
         // a lista de sons e guardada no comeco da cena (nao numa cena emendada logo depois de outra)
-        if (!g_acelerando && perf::Now() - g_ultimoFimCena > 1000) { SonsCenaComeca(); g_animCena.clear(); g_trabCena.clear(); }
-        g_cenaScript = true; g_cenaInicio = perf::Now();
+        if (!g_acelerando && perf::Now() - g_ultimoFimCena > 1000) { SonsCenaComeca(); AtoresDaCenaLimpar(); g_animCena.clear(); g_trabCena.clear(); g_falas.clear(); g_jogadorPreso = false; }
+        if (g_olhosPresos) g_jogadorPreso = true;   // camera presa antes do BeginCutScene (abertura de 13_black_forest)
+        g_cenaScript = true; g_cenaInicio = perf::Now(); g_cenaInicioJogo = TempoDoJogo(); g_falsaEncerrada = false;
         if (g_trabalhoAtual) g_trabCena.insert(g_trabalhoAtual);
         if (g_fimQuadros) { g_fimQuadros = 0; g_acelInicio = perf::Now(); Log("[pularcena] outra cena emendada: continua pulando"); }
     }
@@ -570,16 +745,64 @@ GUEST_FUNC(sub_8226AAF0)
         // a intro do treino sao duas cenas seguidas (EndCutScene, Stand, BeginCutScene no mesmo quadro): espera
         // alguns quadros antes de soltar o relogio para ver se outra cena comeca
         g_cenaScript = false;
+        g_jogadorPreso = false;
         g_ultimoFimCena = perf::Now();
         if (g_acelerando) g_fimQuadros = 10;
+        else g_falas.clear();   // cena vista ate o fim
     }
     Log("[pularcena] SendCommandCarver(\"%s\") trabalho %08X", cmd.c_str(), g_trabalhoAtual);
     GUEST_ORIGINAL(sub_8226AAF0)(ctx, base);
 }
 
+// Movie:PlayAnimCarver, Movie:BindCarverEyes e Movie:UnBindCarverEyes do script (funcoes registradas junto com
+// SendCommandCarver, sub_8233E8xx: nome em r3, funcao em r4): o jogador preso na cena (veja CenaReal acima)
+GUEST_DECLARE_ORIGINAL(sub_8233EB18);
+GUEST_FUNC(sub_8233EB18)
+{
+    if (g_cenaScript && !g_jogadorPreso) { g_jogadorPreso = true; Log("[pularcena] PlayAnimCarver na cena do script"); }
+    GUEST_ORIGINAL(sub_8233EB18)(ctx, base);
+}
+GUEST_DECLARE_ORIGINAL(sub_8233EEA0);
+GUEST_FUNC(sub_8233EEA0)
+{
+    g_olhosPresos = true;
+    if (g_cenaScript) g_jogadorPreso = true;
+    Log("[pularcena] BindCarverEyes");
+    GUEST_ORIGINAL(sub_8233EEA0)(ctx, base);
+}
+GUEST_DECLARE_ORIGINAL(sub_8233EFA0);
+GUEST_FUNC(sub_8233EFA0)
+{
+    g_olhosPresos = false;
+    Log("[pularcena] UnBindCarverEyes");
+    GUEST_ORIGINAL(sub_8233EFA0)(ctx, base);
+}
+
+// input.cpp (a cada quadro do jogador, onde o Lua pode rodar): encerra o BeginCutScene falso (veja CenaReal).
+// FCRECOMP_PULARCENA_FALSA=0 deixa a cena falsa como o jogo deixa (jogador preso, sem HUD).
+uint32_t LuaRodar(GuestCpu& ctx, const std::string& texto);   // npc_editor.cpp
+void PularCenaQuadro(GuestCpu& ctx)
+{
+    static const bool ligado = [] { const char* e = getenv("FCRECOMP_PULARCENA_FALSA"); return Ligado() && (!e || atoi(e) != 0); }();
+    if (!ligado || !g_cenaScript || g_falsaEncerrada || g_acelerando || CenaReal()) return;
+    const double t = TempoDoJogo() - g_cenaInicioJogo;
+    if (t < ESPERA_FALSA) return;
+    const uint32_t r = LuaRodar(ctx, "if Mission and Mission.Event__GUI_EndCutScene then Mission:Event__GUI_EndCutScene() end");
+    if (r == ~0u) return;   // Lua ainda nao pronto: tenta no proximo quadro
+    g_falsaEncerrada = true;
+    Log("[pularcena] BeginCutScene sem o jogador preso ha %.1f s de jogo: cena falsa encerrada pelo "
+        "Mission:Event__GUI_EndCutScene (Lua %u, 0 = ok)", t, r);
+    if (r != 0) g_cenaScript = false;   // o Lua falhou: pelo menos o PULAR CENA nao fica esperando
+}
+
+// cena_direta.cpp: uma cena do script (BeginCutScene sem EndCutScene ainda) esta tocando agora
+bool CenaDoScriptTocando() { return g_cenaScript; }
+bool CenaDiretaTelaPreta();   // cena_direta.cpp
+
 // render.cpp: brilho da imagem final - preta enquanto a cena e adiantada, clareando depois
 float BrilhoTela()
 {
+    if (CenaDiretaTelaPreta()) return 0.0f;   // cena_direta.cpp: tela preta ate abrir a fase (FCRECOMP_CENA)
     if (g_acelerando.load(std::memory_order_relaxed)) return 0.0f;
     const double ini = g_clarearInicio.load(std::memory_order_relaxed);
     if (ini <= 0) return 1.0f;

@@ -12,6 +12,7 @@
 
 bool ProfilerKeyRequest();   // profiler.cpp: medicao na tecla F3 (FCRECOMP_PROFILE=F3)
 bool InputStopRecording();   // input.cpp: F4 termina a gravacao do roteiro (FCRECOMP_GRAVAR)
+bool InputTeclaEmAcao(int vk);   // input.cpp: a tecla esta numa acao do controles.ini
 extern std::atomic<uint64_t> g_missionStartFrame;   // gpu.cpp
 
 namespace xdraw { void IniciarRajada(); }   // xenos_draw.cpp: tecla ' (rajada de fotos)
@@ -144,6 +145,8 @@ namespace diag
 
     bool OnKey(unsigned vk)
     {
+        // tecla de uma acao do jogo (reatribuida na janela de controles): vai so para o jogo
+        if (vk >= VK_F5 && vk <= VK_F11 && ::InputTeclaEmAcao((int)vk)) return false;
         switch (vk)
         {
         case VK_F3:

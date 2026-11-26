@@ -165,6 +165,7 @@ KFUNC(XamLoaderLaunchTitle)
 
     std::wstring JanelaParaReinicio();                              // gpu.cpp
     bool CapturarJanelaParaReinicio(const std::wstring& arquivo);   // gpu.cpp
+    void TrocaComecou(const std::wstring& exeDestino);              // gpu.cpp: inicio da barra progressiva
     void AudioSilenciar();                                          // audio.cpp
     SetEnvironmentVariableW(L"PREDATOR_REINICIO", JanelaParaReinicio().c_str());
     // portas abertas no roteador (rede.cpp/upnp.cpp): o processo novo fica com elas e as fecha quando sair
@@ -172,6 +173,7 @@ KFUNC(XamLoaderLaunchTitle)
     // n. da troca (roteiros de teste por etapa, input.cpp)
     SetEnvironmentVariableW(L"PREDATOR_ETAPA", std::to_wstring(getenv("PREDATOR_ETAPA") ? atoi(getenv("PREDATOR_ETAPA")) + 1 : 1).c_str());
     // cobre a janela com a tela de carregamento (gpu.cpp); a nova nasce com a mesma tela. Nao ha mais foto (item 30)
+    TrocaComecou(exe);
     std::wstring tela = dir + L"tela_reinicio.bmp";
     SetEnvironmentVariableW(L"PREDATOR_TELA", CapturarJanelaParaReinicio(tela) ? tela.c_str() : nullptr);
     wchar_t evento[64];

@@ -31,6 +31,10 @@ namespace xdraw
     // Progresso do aquecimento do Init para o titulo da janela ("" quando acabou)
     std::string WarmUpStatus();
     float WarmUpProgress();   // 0 a 1 (tela de preparacao)
+    // Etapa da preparacao para o texto da tela (gpu.cpp): 0 nenhuma (DirectX iniciando), 1 superficies, 2 shaders da
+    // receita, 3 pipelines, 4 shaders do jogo (1a vez); feitos/total = contagem da etapa (0/0 = sem contagem)
+    enum { ETAPA_NADA, ETAPA_SUPERFICIES, ETAPA_SHADERS, ETAPA_PIPELINES, ETAPA_SHADERS_JOGO, ETAPA_FIM };   // FIM: aquecimento acabou, falta pouco
+    int WarmUpEtapa(uint32_t& feitos, uint32_t& total);
     extern int g_expMode;   // FCRECOMP_EXPERIMENTO (medicao): configuracao atual
     void Shutdown();                 // libera os recursos da GPU (chamar antes de sair)
     void Draw(const DrawInfo& info);

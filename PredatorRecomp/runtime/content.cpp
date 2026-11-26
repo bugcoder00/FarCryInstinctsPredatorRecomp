@@ -189,7 +189,7 @@ namespace
 // ---------------------------------------------------------------- usuario e perfil
 
 bool InputUsuarioLigado(uint32_t usuario);   // input.cpp: jogador 1 sempre; 2 quando separado do 1; 3 e 4 com dispositivo
-std::string RedeNomeLocal();                 // rede.cpp: nome do usuario do Windows
+std::string RedeNomeLocal();                 // rede.cpp: PREDATOR_LAN_NOME ou o nome do usuario do Windows
 
 KFUNC(XamUserGetSigninState)
 {
@@ -209,8 +209,10 @@ KFUNC(XamUserGetXUID)
 KFUNC(XamUserGetName)
 {
     if (!InputUsuarioLigado(Gpr32(ctx, 3))) { Ret(ctx, X_ERROR_NO_SUCH_USER); return; }
-    // nome do jogador: o do perfil escolhido no launcher (item 32); o principal = o nome do usuario do Windows
-    static const std::string nome1 = !OpcoesAtuais().perfil.empty() ? OpcoesAtuais().perfil : RedeNomeLocal();
+    // nome do jogador (a gamertag no System Link): o do perfil escolhido no launcher; o principal = "User 1" (o nome
+    // dele no launcher). PREDATOR_LAN_NOME (testes de rede com varias janelas) ainda manda.
+    static const std::string nome1 = getenv("PREDATOR_LAN_NOME") ? RedeNomeLocal()
+                                   : !OpcoesAtuais().perfil.empty() ? OpcoesAtuais().perfil : std::string("User 1");
     static const std::string nomes[4] = { nome1, nome1.substr(0, 13) + " 2", nome1.substr(0, 13) + " 3", nome1.substr(0, 13) + " 4" };
     const char* name = nomes[Gpr32(ctx, 3) & 3].c_str();
     uint32_t buf = Gpr32(ctx, 4), len = Gpr32(ctx, 5);

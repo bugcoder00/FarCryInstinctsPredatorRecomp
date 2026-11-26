@@ -23,7 +23,10 @@ int RunShaderTest(const char* dir)
         // hash do nome (ps_HASH.bin): o tradutor usa para as excecoes por shader
         g_translateHash = strtoull(e.path().stem().string().substr(3).c_str(), nullptr, 16);
         std::string warnings, errors;
-        std::string hlsl = TranslateXenosShader(code, pixel, &warnings);
+        // FCRECOMP_TESTEGENERICO=1: vertex shaders no modo generico (xenos_draw ResolverVs)
+        static const bool generico = getenv("FCRECOMP_TESTEGENERICO") != nullptr;
+        VsGenerico gen;
+        std::string hlsl = TranslateXenosShader(code, pixel, &warnings, nullptr, nullptr, nullptr, generico && !pixel ? &gen : nullptr);
         auto hlslPath = e.path();
         hlslPath.replace_extension(".hlsl");
         std::ofstream(hlslPath) << hlsl;
