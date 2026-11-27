@@ -77,6 +77,13 @@ recompilation**: the game's PowerPC code is translated to C++ and runs natively,
 (integrated graphics works). More details (controls, profiles, map editor, split screen, internet play) are in
 `README.txt` inside the package.
 
+## Support the project
+
+If you'd like to support my work on the code, you can donate through
+[PayPal](https://www.paypal.com/donate/?business=22ZK6H2MXX6CJ&no_recurring=0&currency_code=BRL). Donations are
+entirely optional and support my time on the recompiler and the runtime only: they don't buy access to anything,
+every release stays free for everyone, and the game itself remains the property of its owners.
+
 ## Found a problem?
 
 Open an Issue. Press **F12** right when the problem shows up and attach the `bugs\bug_N` folder it creates next to

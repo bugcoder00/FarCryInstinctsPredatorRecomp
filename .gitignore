@@ -15,6 +15,10 @@
 !/res/
 /res/*
 !/res/logo.png
+# botao Sponsor do GitHub
+!/.github/
+/.github/*
+!/.github/FUNDING.yml
 
 !/tools/
 /tools/*
