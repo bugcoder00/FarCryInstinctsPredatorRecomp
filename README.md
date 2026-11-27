@@ -1,5 +1,7 @@
 # Far Cry Instincts Predator Recomp
 
+[![Verified developer on RecompStore](https://recompstore.com/assets/press/verified-dark.svg)](https://recompstore.com/dev/bugcoder00)
+
 A native PC port (Windows, DirectX 12) of *Far Cry Instincts Predator* (Xbox 360), made by **static
 recompilation**: the game's PowerPC code is translated to C++ and runs natively, together with a custom runtime
 (kernel, files, video, audio, input and network). The recompiler and the runtime were written from scratch.
