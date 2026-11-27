@@ -165,6 +165,11 @@ void QuadroPasso4()
 void QuadroDesenhoComeco()
 {
     if (!g_desenhoNovo) return;
+    // So a 30 FPS (27/11): a espera foi medida a 30, onde cabe na folga de ~20 ms antes do Present. A 60/45 FPS o
+    // quadro inteiro tem 16,7/22 ms: com a thread de desenho esperando ~9 ms pelo passo do jogo, passo + desenho em
+    // fila passavam de 16,7 ms numa maquina rapida, perdiam o vblank e o jogo ficava em 30 FPS fixo (1.0.1, RTX 5080;
+    // a 1.0.0 dava 60). Fora dos 30 a thread de desenho volta a trabalhar um passo atras, em paralelo, como antes.
+    if (ModoFps() != 0) return;
     const double ini = perf::Now();
     std::unique_lock l(g_dm);
     if (!g_esperar || g_passos4 >= g_passos) return;
