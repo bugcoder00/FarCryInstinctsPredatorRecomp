@@ -79,8 +79,8 @@ recompilation**: the game's PowerPC code is translated to C++ and runs natively,
 
 ## Support the project
 
-If you'd like to support my work on the code, you can donate through
-[PayPal](https://www.paypal.com/donate/?business=22ZK6H2MXX6CJ&no_recurring=0&currency_code=BRL). Donations are
+If you'd like to support my work on the code, you can donate on
+[Ko-fi](https://ko-fi.com/bugcoder00). Donations are
 entirely optional and support my time on the recompiler and the runtime only: they don't buy access to anything,
 every release stays free for everyone, and the game itself remains the property of its owners.
 
