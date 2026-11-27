@@ -395,9 +395,13 @@ static int MainPrograma(int argc, char** argv)
     // Gravacao de roteiro (tools\gravar_roteiro.ps1, so FCRECOMP_GRAVAR): e quem joga jogando, nao um teste. Usa e grava
     // o opcoes.ini como sempre (antes as opcoes do ini eram ignoradas e as do F2 nao ficavam salvas), so sem o launcher.
     const bool gravando = getenv("FCRECOMP_GRAVAR") != nullptr;
+    // Coleta da receita (coletar_receita.bat / collect_recipe.bat, FCRECOMP_COLETARRECEITA) tambem e quem joga: antes ela
+    // ligava o modo teste e o jogo ignorava o launcher e o opcoes.ini (janela 1280x720, 1x, sem sombras/AA...; o log de
+    // um jogador em 27/11 comecava com "[opcoes] teste:")
     bool modoTeste = argc > 1;
     for (char** e = _environ; e && *e && !modoTeste; e++)
-        modoTeste = strncmp(*e, "FCRECOMP_", 9) == 0 && strncmp(*e, "FCRECOMP_GRAVAR=", 16) != 0;
+        modoTeste = strncmp(*e, "FCRECOMP_", 9) == 0 && strncmp(*e, "FCRECOMP_GRAVAR=", 16) != 0 &&
+                    strncmp(*e, "FCRECOMP_COLETARRECEITA=", 24) != 0;
     // troca de fase (xam.cpp, XamLoaderLaunchTitle): o jogo se reabre com PREDATOR_REINICIO; o launcher nao aparece
     const bool reinicio = getenv("PREDATOR_REINICIO") != nullptr;
     if (!modoTeste && !reinicio && !gravando)
