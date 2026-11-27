@@ -11,6 +11,11 @@
 !/DIAGNOSTICO.md
 !/*.bat
 
+# imagem do topo do README
+!/res/
+/res/*
+!/res/logo.png
+
 !/tools/
 /tools/*
 !/tools/*.py
