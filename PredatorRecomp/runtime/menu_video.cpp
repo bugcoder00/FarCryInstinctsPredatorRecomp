@@ -143,7 +143,7 @@ int Valor(Linha l)
     case RESOLUCAO: return o.fsr > 0 ? 3 + ListaDoFsr(o.fsr) : std::clamp(o.escala, 0, 3);   // 4..7 = FSR ultra, qualidade, equilibrado, desempenho (render.cpp)
     case SOMBRAS: return std::clamp(o.sombras, 0, 2);
     case SUAVIZACAO: return std::clamp(o.antisserrilhado, 0, 3);
-    case FPS: return std::clamp(o.fps, 0, 2);
+    case FPS: return FpsLista(std::clamp(o.fps, 0, 2));   // lista 30, 45, 60
     default: return o.vsync ? 1 : 0;
     }
 }
@@ -160,7 +160,7 @@ std::string NomeValor(Linha l, int v)
                                                  "FSR ULTRA QUALITY", "FSR QUALITY", "FSR BALANCED", "FSR PERFORMANCE" }; return TR(n[v], e[v]); }
     case SOMBRAS: { static const char* n[] = { "NORMAL", "ALTA", "MUITO ALTA" }, *e[] = { "NORMAL", "HIGH", "VERY HIGH" }; return TR(n[v], e[v]); }
     case SUAVIZACAO: { static const char* n[] = { "DESLIGADA", "LEVE", "MÉDIA", "FORTE" }, *e[] = { "OFF", "LOW", "MEDIUM", "HIGH" }; return TR(n[v], e[v]); }
-    case FPS: { static const char* n[] = { "30", "60", "SEM LIMITE" }, *e[] = { "30", "60", "UNLOCKED" }; return TR(n[v], e[v]); }
+    case FPS: { static const char* n[] = { "30", "45", "60" }; return n[v]; }
     default: return v ? TR("SIM", "YES") : TR("NÃO", "NO");
     }
 }
@@ -178,14 +178,14 @@ const char* Ajuda(Linha l)
         "Imagem mais nítida, mas pesa mais na placa de vídeo. FSR desenha menor e amplia para a janela (mais leve).",
         "Sombras com bordas mais definidas (mais pesadas).",
         "Suaviza as bordas serrilhadas da imagem.",
-        "30 como o original, 60 mais fluido. Sem limite é experimental.",
+        "30 como o original, 45 e 60 mais fluidos.",
         "Evita \"rasgos\" na imagem, mas pode baixar o FPS.",
     };
     static const char* e[] = {
         "Sharper image, but heavier on the graphics card. FSR draws smaller and upscales to the window (lighter).",
         "Shadows with sharper edges (heavier).",
         "Smooths the jagged edges of the image.",
-        "30 like the original, 60 smoother. Unlocked is experimental.",
+        "30 like the original, 45 and 60 smoother.",
         "Avoids image \"tearing\", but may lower the FPS.",
     };
     return TR(n[l], e[l]);
@@ -201,7 +201,7 @@ void Mudar(Linha l, int v)
     case RESOLUCAO: if (v <= 3) { o.escala = v; o.fsr = 0; } else o.fsr = FsrDaLista(v - 3); xdraw::PedirNovaEscala(); break;
     case SOMBRAS: o.sombras = v; xdraw::PedirNovaEscala(); break;
     case SUAVIZACAO: o.antisserrilhado = v; xdraw::RecarregarSuavizacao(); break;
-    case FPS: o.fps = v; break;
+    case FPS: o.fps = FpsLista(v); break;
     default: o.vsync = v != 0; break;
     }
     Log("[video] %s = %s", NomeLinha(l), NomeValor(l, v).c_str());

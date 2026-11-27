@@ -29,10 +29,10 @@ HOW TO PLAY
 4. Adjust video and controls if you want and click Play.
    The first time, the program prepares the files and the graphics: it may take about 1 minute longer.
    "Internal resolution" 1.5x or 2x makes the image sharper but is much heavier on the graphics card
-   (on integrated graphics use 1x). 3x (4K) is experimental: it needs a strong graphics card.
-   "Frames per second": 30 (like the original game), 60 (smoother, twice the load on the graphics card) or
-   unlocked (experimental).
-   "Aspect ratio": "Monitor" is for ultrawide monitors (21:9, 32:9; experimental): the game shows more of
+   (on integrated graphics use 1x). 3x (4K) needs a strong graphics card.
+   "Frames per second": 30 (like the original game), 45 (in between) or 60 (smoother, twice the load on the
+   graphics card).
+   "Aspect ratio": "Monitor" is for ultrawide monitors (21:9, 32:9): the game shows more of
    the scene on the sides and the HUD and menus stay in the center. Use it in full screen; 2x looks sharper.
    "16:9 with black bars" shows the game like the original, without stretching, with black bars on the sides.
    The Save button stores the options without opening the game.

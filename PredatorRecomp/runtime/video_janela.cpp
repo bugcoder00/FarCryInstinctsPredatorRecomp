@@ -103,7 +103,7 @@ namespace
         case ID_DISTANCIA: o.distancia = v - 2; break;   // listas com os niveis menores no topo (como no launcher)
         case ID_DETALHE: o.detalhe = v - 2; break;
         case ID_AO: o.ao = v; break;
-        case ID_FPS: o.fps = v; break;
+        case ID_FPS: o.fps = FpsLista(v); break;   // lista 30, 45, 60
         default: return;
         }
         Log("[video] janela F2: opcao %d = %d", id - ID_ESCALA, v);
@@ -131,7 +131,7 @@ namespace
         Lista(j, ID_ESCALA, TR(L"Resolução interna:", L"Internal resolution:"),
               { TR(L"1x - 1280 × 720 (mais leve)", L"1x - 1280 × 720 (lightest)"), TR(L"1,5x - 1920 × 1080", L"1.5x - 1920 × 1080"),
                 TR(L"2x - 2560 × 1440 (mais nítido, mais pesado)", L"2x - 2560 × 1440 (sharper, heavier)"),
-                TR(L"3x - 3840 × 2160 / 4K (experimental)", L"3x - 3840 × 2160 / 4K (experimental)") }, std::clamp(o.escala, 0, 3));
+                TR(L"3x - 3840 × 2160 / 4K", L"3x - 3840 × 2160 / 4K") }, std::clamp(o.escala, 0, 3));
         Lista(j, ID_FSR, TR(L"Upscale AMD FSR 1:", L"AMD FSR 1 upscaling:"),
               { TR(L"Desligado", L"Off"), TR(L"Ultra qualidade (desenha em 1x: 1280 × 720, mais nítido)", L"Ultra quality (draws at 1x: 1280 × 720, sharpest)"),
                 TR(L"Qualidade (desenha em 0,75x: 960 × 540)", L"Quality (draws at 0.75x: 960 × 540)"),
@@ -167,8 +167,8 @@ namespace
               { TR(L"Desligada (original)", L"Off (original)"), TR(L"Leve", L"Light"), TR(L"Média", L"Medium"),
                 TR(L"Forte (cantos bem marcados)", L"Strong (well-marked corners)") }, std::clamp(o.ao, 0, 3));
         Lista(j, ID_FPS, TR(L"Quadros por segundo:", L"Frames per second:"),
-              { TR(L"30 FPS (como o jogo original)", L"30 FPS (like the original game)"), TR(L"60 FPS (mais fluido, pesa o dobro)", L"60 FPS (smoother, twice the load)"),
-                TR(L"Sem limite (experimental)", L"Unlocked (experimental)") }, std::clamp(o.fps, 0, 2));
+              { TR(L"30 FPS (como o jogo original)", L"30 FPS (like the original game)"), TR(L"45 FPS (meio-termo)", L"45 FPS (in between)"),
+                TR(L"60 FPS (mais fluido, pesa o dobro)", L"60 FPS (smoother, twice the load)") }, FpsLista(std::clamp(o.fps, 0, 2)));
         {
             const int yf = Y0 + N_LISTAS * PASSO;
             Criar(j, L"STATIC", TR(L"Campo de visão (FOV):", L"Field of view (FOV):"), 0, 16, yf + 4, 200, 20, -1);

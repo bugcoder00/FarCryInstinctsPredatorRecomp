@@ -68,6 +68,19 @@ namespace
         Log("[lan]   %s %X (%d): %s", o, id, n, t.c_str());
     }
     std::string Ip(uint32_t ip) { char b[20]; snprintf(b, sizeof(b), "%u.%u.%u.%u", ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255); return b; }
+    // endereco para o registro: os da rede de casa (192.168, 10, 172.16-31...) inteiros, os outros resumidos
+    bool IpPrivado(uint32_t ip)
+    {
+        const uint32_t a = ip >> 24, b = (ip >> 16) & 255;
+        return a == 0 || a == 10 || a == 127 || a >= 224 || (a == 172 && b >= 16 && b < 32) || (a == 192 && b == 168) ||
+               (a == 169 && b == 254) || (a == 100 && b >= 64 && b < 128);   // 100.64/10: CGNAT do provedor
+    }
+    std::string IpLog(uint32_t ip) { return IpPrivado(ip) ? Ip(ip) : "x.x.x.x"; }
+    std::string IpLog(const std::string& t)   // IP ou nome escrito por alguem (nome: tambem escondido)
+    {
+        in_addr a{};
+        return inet_pton(AF_INET, t.c_str(), &a) == 1 ? IpLog(ntohl(a.s_addr)) : std::string("x.x.x.x");
+    }
 
     void LerAdaptadores()
     {
@@ -236,7 +249,7 @@ namespace
         for (uint16_t p : { (uint16_t)1000, (uint16_t)1010 })
             if (SOCKET sp = SocketDaPorta(p); sp != INVALID_SOCKET) Furar(sp, p, Endereco(g_anfitriao, p));
         static std::atomic<int> vezes{ 0 };
-        if (vezes++ == 0) Log("[online] procurando partida no anfitriao %s:%u%s", Ip(g_anfitriao).c_str(), g_portaBusca, r < 0 ? " (o envio falhou)" : "");
+        if (vezes++ == 0) Log("[online] procurando partida no anfitriao %s:%u%s", IpLog(g_anfitriao).c_str(), g_portaBusca, r < 0 ? " (o envio falhou)" : "");
     }
     // anfitriao: o anuncio da partida vai direto para quem procurou pela internet, saindo pela 1004
     void AnunciarAosBuscadores(SOCKET s, const char* dados, int len, int flags)
@@ -280,7 +293,7 @@ namespace
                     else if (g_buscadores.size() < 32) g_buscadores.push_back({ ip, porta, Agora() });
                 }
             }
-            if (novo) Log("[online] jogador pela internet: %s:%u (na rede dele %s, MAC ..%02X%02X)", Ip(ip).c_str(), porta, Ip(ina).c_str(), mac[4], mac[5]);
+            if (novo) Log("[online] jogador pela internet: %s:%u (na rede dele %s, MAC ..%02X%02X)", IpLog(ip).c_str(), porta, IpLog(ina).c_str(), mac[4], mac[5]);
             if (tipo == OLA)
             {
                 uint8_t b[32];
@@ -298,7 +311,7 @@ namespace
                 Aprender(mac, ina, ip, porta, logica, novo);
             }
             if (novo) Log("[online] o anfitriao %s respondeu (na rede dele %s); o seu IP na internet, visto por ele: %s:%u",
-                          Ip(ip).c_str(), Ip(ina).c_str(), Ip(Tirar32(d + 21)).c_str(), Tirar16(d + 25));
+                          IpLog(ip).c_str(), IpLog(ina).c_str(), IpLog(Tirar32(d + 21)).c_str(), Tirar16(d + 25));
         }
         return true;
     }
@@ -317,13 +330,13 @@ namespace
         dica.ai_socktype = SOCK_DGRAM;
         if (getaddrinfo(t.c_str(), nullptr, &dica, &res) != 0 || !res)
         {
-            Log("[online] nao achei o anfitriao '%s' (IP ou nome errado, ou sem internet): so rede local", texto.c_str());
+            Log("[online] nao achei o anfitriao '%s' (IP ou nome errado, ou sem internet): so rede local", IpLog(t).c_str());
             return;
         }
         g_anfitriao = ntohl(((sockaddr_in*)res->ai_addr)->sin_addr.s_addr);
         g_portaBusca = porta ? porta : 1004;
         freeaddrinfo(res);
-        Log("[online] entrar por IP: anfitriao %s (%s), busca na porta %u", t.c_str(), Ip(g_anfitriao).c_str(), g_portaBusca);
+        Log("[online] entrar por IP: anfitriao %s, busca na porta %u", IpLog(g_anfitriao).c_str(), g_portaBusca);
     }
 }
 
@@ -342,13 +355,13 @@ namespace
         g_semBroadcast = getenv("PREDATOR_SEMBROADCAST") != nullptr;
         g_natTeste = g_teste && getenv("PREDATOR_NAT_TESTE") != nullptr;
         if (g_semBroadcast) Log("[online] PREDATOR_SEMBROADCAST: sem broadcast (so o caminho direto pelo IP)");
-        if (g_natTeste) Log("[online] PREDATOR_NAT_TESTE: finge um roteador (portas +%u, IP local anunciado %s)", NAT_DESLOCA, Ip(InaAnunciado()).c_str());
+        if (g_natTeste) Log("[online] PREDATOR_NAT_TESTE: finge um roteador (portas +%u, IP local anunciado %s)", NAT_DESLOCA, IpLog(InaAnunciado()).c_str());
         const char* e = getenv("PREDATOR_ONLINE_HOST");
         LerAnfitriao(e ? std::string(e) : OpcoesAtuais().modoTeste ? std::string() : OpcoesAtuais().ipAnfitriao);
         if (const char* p = getenv("PREDATOR_ONLINE_IP_PUBLICO"))
         {
             in_addr a{};
-            if (inet_pton(AF_INET, p, &a) == 1) { g_ipPublico = ntohl(a.s_addr); g_ipPublicoFixo = true; Log("[online] IP de internet deste PC (opcao): %s", p); }
+            if (inet_pton(AF_INET, p, &a) == 1) { g_ipPublico = ntohl(a.s_addr); g_ipPublicoFixo = true; Log("[online] IP de internet deste PC (opcao): %s", IpLog(std::string(p)).c_str()); }
         }
         // IP de internet pelo roteador, em segundo plano (vai no XNADDR.inaOnline; os amigos precisam dele)
         if (!g_ipPublicoFixo && UpnpLigado())
@@ -358,7 +371,7 @@ namespace
                 in_addr a{};
                 inet_pton(AF_INET, ip.c_str(), &a);
                 if (!g_ipPublicoFixo) g_ipPublico = ntohl(a.s_addr);
-                Log("[upnp] IP de internet deste PC: %s", ip.c_str());
+                Log("[upnp] IP de internet deste PC: %s", IpLog(ip).c_str());
                 if (!aviso.empty()) Log("[upnp] ATENCAO: %s", aviso.c_str());
             }).detach();
         // o jogo foi reaberto (troca de fase) com as portas abertas: continua com elas (e fecha ao sair)
@@ -379,16 +392,16 @@ namespace
                     g_teste = true;
                     g_ip = a << 24 | b << 16 | c << 8 | d;
                     g_mac[5] = (uint8_t)d;
-                    Log("[lan] modo de teste no mesmo PC: endereco %s", Ip(g_ip).c_str());
+                    Log("[lan] modo de teste no mesmo PC: endereco %s", IpLog(g_ip).c_str());
                     ConfigurarInternet();
                     return;
                 }
             }
             LerAdaptadores();
             for (auto& a : g_adaptadores)
-                Log("[lan] adaptador %s (%s): %s / %s", a.nome.c_str(), a.wifi ? "Wi-Fi" : "cabo ou outro", Ip(a.ip).c_str(), Ip(a.mascara).c_str());
+                Log("[lan] adaptador %s (%s): %s / %s", a.nome.c_str(), a.wifi ? "Wi-Fi" : "cabo ou outro", IpLog(a.ip).c_str(), IpLog(a.mascara).c_str());
             if (g_adaptadores.empty()) Log("[lan] nenhuma rede ligada (cabo ou Wi-Fi): SYSTEM LINK desligado");
-            else { g_ip = g_adaptadores[0].ip; memcpy(g_mac, g_adaptadores[0].mac, 6); Log("[lan] o jogo usa o endereco %s", Ip(g_ip).c_str()); }
+            else { g_ip = g_adaptadores[0].ip; memcpy(g_mac, g_adaptadores[0].mac, 6); Log("[lan] o jogo usa o endereco %s", IpLog(g_ip).c_str()); }
             if (g_semRede) Log("[lan] FCRECOMP_SEMREDE: rede desligada");
             else if (g_ip) ConfigurarInternet();
         });
@@ -595,7 +608,7 @@ KFUNC(NetDll_connect)
     if (s == INVALID_SOCKET) { t_erro = WSAECONNREFUSED; Ret(ctx, 0xFFFFFFFF); return; }
     if (!LerEndereco(Gpr32(ctx, 5), sa)) { t_erro = WSAEFAULT; Ret(ctx, 0xFFFFFFFF); return; }
     LigarNoTeste(k);
-    if (LanLog()) Log("[lan] connect %X -> %s:%u", Gpr32(ctx, 4), Ip(ntohl(sa.sin_addr.s_addr)).c_str(), ntohs(sa.sin_port));
+    if (LanLog()) Log("[lan] connect %X -> %s:%u", Gpr32(ctx, 4), IpLog(ntohl(sa.sin_addr.s_addr)).c_str(), ntohs(sa.sin_port));
     Ret(ctx, connect(s, (sockaddr*)&sa, sizeof(sa)) == 0 ? 0 : Falhou());
 }
 
@@ -614,7 +627,7 @@ KFUNC(NetDll_accept)
         g_socks[id] = { n, false, true };
     }
     EscreverEndereco(Gpr32(ctx, 5), Gpr32(ctx, 6), sa);
-    Log("[lan] conexao aceita de %s", Ip(ntohl(sa.sin_addr.s_addr)).c_str());
+    Log("[lan] conexao aceita de %s", IpLog(ntohl(sa.sin_addr.s_addr)).c_str());
     Ret(ctx, id);
 }
 
@@ -647,7 +660,7 @@ KFUNC(NetDll_sendto)
     const char* dados = (const char*)G(Gpr32(ctx, 5));
     const int flags = (int)Gpr32(ctx, 7);
     uint32_t dest = ntohl(sa.sin_addr.s_addr);
-    if (LanLog()) { static int n = 0; if (n++ < 200) Log("[lan] sendto %X: %u bytes para %s:%u", Gpr32(ctx, 4), len, Ip(dest).c_str(), ntohs(sa.sin_port)); }
+    if (LanLog()) { static int n = 0; if (n++ < 200) Log("[lan] sendto %X: %u bytes para %s:%u", Gpr32(ctx, 4), len, IpLog(dest).c_str(), ntohs(sa.sin_port)); }
     const uint16_t minhaPorta = k ? k->porta : 0;
     if (dest == 0xFFFFFFFF)
     {
@@ -698,7 +711,7 @@ KFUNC(NetDll_recvfrom)
     TraduzirEntrada(sa);
     EscreverEndereco(Gpr32(ctx, 8), Gpr32(ctx, 9), sa);
     LanDump("recebido", Gpr32(ctx, 4), G(Gpr32(ctx, 5)), r);
-    if (LanLog()) { static int n = 0; if (n++ < 200) Log("[lan] recvfrom %X: %d bytes de %s:%u", Gpr32(ctx, 4), r, Ip(ntohl(sa.sin_addr.s_addr)).c_str(), ntohs(sa.sin_port)); }
+    if (LanLog()) { static int n = 0; if (n++ < 200) Log("[lan] recvfrom %X: %d bytes de %s:%u", Gpr32(ctx, 4), r, IpLog(ntohl(sa.sin_addr.s_addr)).c_str(), ntohs(sa.sin_port)); }
     Ret(ctx, (uint32_t)r);
 }
 
@@ -807,7 +820,7 @@ KFUNC(NetDll_XNetXnAddrToInAddr)
     if (LanLog() || (ip != local && strcmp(como, "este PC")))
     {
         static std::atomic<int> n{ 0 };
-        if (n++ < 40) Log("[lan] XNetXnAddrToInAddr %s (MAC ..%02X%02X) -> %s (%s)", Ip(local).c_str(), mac[4], mac[5], Ip(ip).c_str(), como);
+        if (n++ < 40) Log("[lan] XNetXnAddrToInAddr %s (MAC ..%02X%02X) -> %s (%s)", IpLog(local).c_str(), mac[4], mac[5], IpLog(ip).c_str(), como);
     }
     Ret(ctx, 0);
 }
@@ -882,7 +895,7 @@ bool RedeXMsg(const char* fn, uint32_t app, uint32_t msg, uint32_t buf, uint32_t
         uint32_t info = R32(buf + 0x14), nonce = R32(buf + 0x18);
         static std::mt19937_64 rng{ std::random_device{}() ^ (uint64_t)GetTickCount64() };
         const bool anfitriao = R32(buf + 4) & 1;   // XSESSION_CREATE_HOST; sem ele (quem entra) o XSESSION_INFO e do anfitriao
-        if (info && !anfitriao) Log("[lan] entrando na partida de %s%s", Ip(R32(info + 8)).c_str(), g_anfitriao ? " (pela internet)" : "");
+        if (info && !anfitriao) Log("[lan] entrando na partida de %s%s", IpLog(R32(info + 8)).c_str(), g_anfitriao ? " (pela internet)" : "");
         if (info && anfitriao)
         {
             // XSESSION_INFO { XNKID id[8]; XNADDR anfitriao[36]; XNKEY chave[16] }; id do SYSTEM LINK: 4 bits altos 0
@@ -894,10 +907,10 @@ bool RedeXMsg(const char* fn, uint32_t app, uint32_t msg, uint32_t buf, uint32_t
             W32(info + 8 + 4, g_ipPublico.load());   // inaOnline: IP de internet (se ja se sabe)
             memcpy(G(info + 8 + 10), g_mac, 6);
             for (uint32_t i = 0; i < 16; i++) W8(info + 44 + i, (uint8_t)rng());
-            Log("[lan] partida criada: flags %08X, %u vagas, anfitriao %s", R32(buf + 4), R32(buf + 8) + R32(buf + 12), Ip(g_ip).c_str());
+            Log("[lan] partida criada: flags %08X, %u vagas, anfitriao %s", R32(buf + 4), R32(buf + 8) + R32(buf + 12), IpLog(g_ip).c_str());
             // anfitriao: abre as portas do jogo no roteador (para os amigos entrarem pela internet)
             if (UpnpLigado()) UpnpAbrirPortas();
-            if (g_ipPublico) Log("[online] para os amigos entrarem pela internet: IP %s (eles escrevem no launcher, em \"IP do anfitriao\")", Ip(g_ipPublico).c_str());
+            if (g_ipPublico) Log("[online] para os amigos entrarem pela internet: o seu IP de internet (botao MEU IP do launcher; eles escrevem em \"IP do anfitriao\")");
         }
         if (nonce) W64(nonce, rng());
     }

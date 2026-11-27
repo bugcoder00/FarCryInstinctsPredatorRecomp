@@ -29,10 +29,10 @@ COMO JOGAR
 4. Ajuste o video e os controles, se quiser, e clique em Jogar.
    Na primeira vez o programa prepara os arquivos e os graficos: pode demorar cerca de 1 minuto a mais.
    "Resolucao interna" 1,5x ou 2x deixa a imagem mais nitida, mas pesa bem mais na placa de video
-   (em video integrado use 1x). 3x (4K) e experimental: precisa de placa de video forte.
-   "Quadros por segundo": 30 (como o jogo original), 60 (mais fluido, pesa o dobro na placa de video) ou
-   sem limite (experimental).
-   "Formato da imagem": "Monitor" e para monitor ultrawide (21:9, 32:9; experimental): o jogo mostra
+   (em video integrado use 1x). 3x (4K) precisa de placa de video forte.
+   "Quadros por segundo": 30 (como o jogo original), 45 (meio-termo) ou 60 (mais fluido, pesa o dobro na
+   placa de video).
+   "Formato da imagem": "Monitor" e para monitor ultrawide (21:9, 32:9): o jogo mostra
    mais cenario dos lados e o HUD e os menus ficam no centro. Use com tela cheia; em 2x a imagem fica mais nitida.
    "16:9 com barras pretas" mostra o jogo como o original, sem esticar, com faixas pretas nos lados.
    O botao Salvar guarda as opcoes sem abrir o jogo.

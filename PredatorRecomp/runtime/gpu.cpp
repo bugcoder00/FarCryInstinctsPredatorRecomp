@@ -62,6 +62,7 @@ int64_t OclusaoLogTique();       // input.cpp: tique do roteiro (FCRECOMP_OCLUSA
 
 void QuadroTroca();   // quadro_na_hora.cpp
 bool QuadroTrocaImediata(uint32_t intervalo);
+void QuadroRitmo(double periodoMs);   // quadro_na_hora.cpp: dorme ate a hora do proximo quadro (45 FPS)
 namespace
 {
     constexpr uint32_t REG_CP_RB_RPTR = 0x01C4;
@@ -2473,12 +2474,15 @@ GUEST_FUNC(GUEST_SUB_GPUWAIT)
     ShortWait(spins++, 100);
 }
 
-// FPS (opcao do launcher "fps": 0 = 30, 1 = 60, 2 = sem limite; FCRECOMP_FPS=30/60/0 forca): sub_8273E6F8 e chamada pelo
+// FPS (opcao do launcher "fps": 0 = 30, 1 = 60, 2 = 45; FCRECOMP_FPS=30/45/60/0 forca, 0 = sem limite): sub_8273E6F8 e chamada pelo
 // D3D do jogo a cada troca de imagem e arma a espera de vblanks antes de mostrar a proxima: 16 bits de cima de r3 =
 // intervalo (o jogo pede 2 = 30 FPS), contado a partir do vblank da ultima troca (dispositivo+15620; o contador de vblanks
 // e +15616 e a contagem regressiva +15624, que a interrupcao de vblank, sub_827373F8, desconta so enquanto > 0). Se o
 // intervalo ja passou, a troca sai na hora quando a posicao do feixe (0..100 %) <= 16 bits de baixo (limite); senao espera
 // 1 vblank. 60 FPS: intervalo 1. Sem limite: intervalo 0 e limite FFFF (a troca sai sempre na hora, sem esperar vblank).
+// Sem limite saiu das opcoes na 1.0.1 (acima de 60 FPS o jogo tem bugs); fica para o pulo de cena (g_acelerando) e
+// FCRECOMP_FPS=0. 45 FPS: 45 nao e um numero inteiro de vblanks de 60 Hz, entao a troca sai na hora (como sem limite) e
+// o ritmo de 1/45 s e feito antes dela (quadro_na_hora.cpp QuadroRitmo); o limitador de 1/60 s do jogo continua.
 // So muda o ritmo das trocas: o vblank continua a 60 Hz (videos e o resto seguem iguais) e o jogo mede o tempo de
 // cada quadro pelo relogio (mftb), entao anda na mesma velocidade (medido em 12/11: 4,8 m/s a 30 e 4,2 a 60 FPS).
 // proporcao (largura/altura) da imagem do jogo: 16/9, ou a do monitor com a opcao ultrawide (so mais larga que 16:9,
@@ -2507,17 +2511,19 @@ float AspectoTela()
     return a;
 }
 
-int ModoFps()
+int ModoFps()   // 0 = 30, 1 = 60, 2 = sem limite (pulo de cena, FCRECOMP_FPS=0), 3 = 45
 {
 #ifndef PREDATOR_EDITOR
     if (g_acelerando.load(std::memory_order_relaxed)) return 2;
 #endif
     static const int teste = [] {
-        if (const char* e = getenv("FCRECOMP_FPS")) { int n = atoi(e); return n == 30 ? 0 : n == 60 ? 1 : 2; }
+        if (const char* e = getenv("FCRECOMP_FPS")) { int n = atoi(e); return n == 30 ? 0 : n == 60 ? 1 : n == 45 ? 3 : 2; }
         if (const char* e = getenv("FCRECOMP_FPS60")) return atoi(e) != 0 ? 1 : 0;
         return -1;
     }();
-    return teste >= 0 ? teste : OpcoesAtuais().fps;   // a opcao muda na hora em OPCOES DE VIDEO (menu_video.cpp)
+    if (teste >= 0) return teste;
+    const int f = OpcoesAtuais().fps;   // a opcao muda na hora em OPCOES DE VIDEO (menu_video.cpp) e no F2
+    return f == 2 ? 3 : f == 1 ? 1 : 0;
 }
 // a mesma funcao no editor de mapas (ige.xex) e sub_826460B0 (12/11: o editor ficava a 30 FPS com a opcao em 60)
 #ifdef PREDATOR_EDITOR
@@ -2529,8 +2535,18 @@ GUEST_DECLARE_ORIGINAL(FPS_TROCA);
 GUEST_FUNC(FPS_TROCA)
 {
     const int modo = ModoFps();
+    if (modo == 3)   // 45 FPS: espera a hora do quadro aqui e a troca sai na hora (nao espera o vblank de 60 Hz)
+    {
+        if ((Gpr32(ctx, 3) >> 16) != 0)
+        {
+            static bool avisou = false;
+            if (!avisou) { avisou = true; Log("[gpu] 45 FPS: troca de imagem a cada %u vblank(s) passou a sair na hora, ritmo de 1/45 s", Gpr32(ctx, 3) >> 16); }
+            QuadroRitmo(1000.0 / 45.0);
+            SetGpr(ctx, 3, 0xFFFFu);
+        }
+    }
     // jogando: a troca sai na hora e o ritmo e feito antes de ler a entrada (quadro_na_hora.cpp)
-    if (const uint32_t pedido = Gpr32(ctx, 3) >> 16; modo != 2 && QuadroTrocaImediata(modo == 1 ? std::min(pedido, 1u) : pedido))
+    else if (const uint32_t pedido = Gpr32(ctx, 3) >> 16; modo != 2 && QuadroTrocaImediata(modo == 1 ? std::min(pedido, 1u) : pedido))
         SetGpr(ctx, 3, 0xFFFFu);
     else if (modo != 0)
     {

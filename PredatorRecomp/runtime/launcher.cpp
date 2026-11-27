@@ -109,7 +109,7 @@ void OpcoesCarregar(const std::filesystem::path& exeDir)
         else if (k == "placa_video") g_op.placaVideo = DeUtf8(v).wstring();
         else if (k == "fov") g_op.fov = std::clamp(n, 0, FOV_MAX);
         else if (k == "mira") g_op.mira = std::clamp(n, MIRA_MIN, MIRA_MAX);
-        else if (k == "fps") g_op.fps = std::clamp(n, 0, 2);
+        else if (k == "fps") g_op.fps = std::clamp(n, 0, 2);   // 2 era "sem limite" ate a 1.0.1: agora 45
         else if (k == "fps60") g_op.fps = n != 0 ? 1 : 0;   // 0.1.1 de testes: caixa "60 FPS"
         else if (k == "mostrar_registro") g_op.mostrarRegistro = n != 0;
         else if (k == "abrir_direto") g_op.pularLauncher = n != 0;
@@ -175,7 +175,7 @@ void OpcoesSalvar()
       << "fsr = " << g_op.fsr << "\n"
       << TR("; nitidez do FSR: 0 desligada, 1 baixa, 2 media, 3 alta, 4 maxima\n", "; FSR sharpness (fsr_nitidez): 0 off, 1 low, 2 medium, 3 high, 4 maximum\n")
       << "fsr_nitidez = " << g_op.fsrNitidez << "\n"
-      << TR("; formato da imagem: 0 = 16:9 (como o original), 1 = o do monitor (ultrawide 21:9 / 32:9, experimental), 2 = 16:9 com barras pretas (sem esticar)\n", "; aspect ratio (formato): 0 = 16:9 (like the original), 1 = the monitor's (ultrawide 21:9 / 32:9, experimental), 2 = 16:9 with black bars (not stretched)\n")
+      << TR("; formato da imagem: 0 = 16:9 (como o original), 1 = o do monitor (ultrawide 21:9 / 32:9), 2 = 16:9 com barras pretas (sem esticar)\n", "; aspect ratio (formato): 0 = 16:9 (like the original), 1 = the monitor's (ultrawide 21:9 / 32:9), 2 = 16:9 with black bars (not stretched)\n")
       << "formato = " << g_op.formato << "\n"
       << TR("; qualidade das sombras (mapa de sombras maior, bordas mais definidas): 0 = normal, 1 = alta 2x, 2 = muito alta 3x\n", "; shadow quality (sombras; bigger shadow map, sharper edges): 0 = normal, 1 = high 2x, 2 = very high 3x; vsync = vertical sync\n")
       << "sombras = " << g_op.sombras << "\n"
@@ -194,7 +194,7 @@ void OpcoesSalvar()
       << "detalhe = " << g_op.detalhe << "\n"
       << TR("; oclusao de ambiente (cantos e encontros mais escuros): 0 desligada, 1 leve, 2 media, 3 forte\n", "; ambient occlusion (ao; darker corners and contact areas): 0 off, 1 light, 2 medium, 3 strong\n")
       << "ao = " << g_op.ao << "\n"
-      << TR("; quadros por segundo: 0 = 30 (como o original), 1 = 60, 2 = sem limite (experimental)\n", "; frames per second (fps): 0 = 30 (like the original), 1 = 60, 2 = unlocked (experimental); mostrar_registro = log window, abrir_direto = skip the launcher\n")
+      << TR("; quadros por segundo: 0 = 30 (como o original), 1 = 60, 2 = 45\n", "; frames per second (fps): 0 = 30 (like the original), 1 = 60, 2 = 45; mostrar_registro = log window, abrir_direto = skip the launcher\n")
       << TR("; placa de video (o nome dela; vazio = automatica, a mais forte); campo de visao: graus a mais (0 = o do jogo, ate 45)\n",
             "; graphics card (placa_video; its name; empty = automatic, the strongest); field of view (fov): extra degrees (0 = the game's, up to 45)\n")
       << "placa_video = " << Utf8(std::filesystem::path(g_op.placaVideo)) << "\n"
@@ -716,7 +716,7 @@ namespace
         g_op.fsr = FsrDaLista(std::max(0, (int)SendDlgItemMessageW(j, ID_FSR, CB_GETCURSEL, 0, 0)));
         g_op.fsrNitidez = std::max(0, (int)SendDlgItemMessageW(j, ID_FSR_NITIDEZ, CB_GETCURSEL, 0, 0));
         g_op.sombras = std::max(0, (int)SendDlgItemMessageW(j, ID_SOMBRAS, CB_GETCURSEL, 0, 0));
-        g_op.fps = std::max(0, (int)SendDlgItemMessageW(j, ID_FPS, CB_GETCURSEL, 0, 0));
+        g_op.fps = FpsLista(std::max(0, (int)SendDlgItemMessageW(j, ID_FPS, CB_GETCURSEL, 0, 0)));   // lista 30, 45, 60
         g_op.filtroTextura = std::max(0, (int)SendDlgItemMessageW(j, ID_FILTRO_TEX, CB_GETCURSEL, 0, 0));
         // listas com os niveis menores no topo: item = valor + 2 (o valor 0 continua sendo o original no ini antigo)
         g_op.distancia = std::max(0, (int)SendDlgItemMessageW(j, ID_DISTANCIA, CB_GETCURSEL, 0, 0)) - 2;
@@ -2252,7 +2252,7 @@ namespace
             Criar(j, L"BUTTON", TR(L"Tela cheia (Alt+Enter troca durante o jogo)", L"Full screen (Alt+Enter switches during the game)"), WS_TABSTOP, 24, 326, 536, 24, ID_TELACHEIA);
             Lista(j, ID_FORMATO, 354, TR(L"Formato da imagem:", L"Aspect ratio:"),
                   { TR(L"16:9 (como o jogo original)", L"16:9 (like the original game)"),
-                    TR(L"Monitor - ultrawide 21:9 / 32:9 (experimental)", L"Monitor - ultrawide 21:9 / 32:9 (experimental)"),
+                    TR(L"Monitor - ultrawide 21:9 / 32:9", L"Monitor - ultrawide 21:9 / 32:9"),
                     TR(L"16:9 com barras pretas (ultrawide sem esticar)", L"16:9 with black bars (ultrawide without stretching)") }, g_op.formato);
             Lista(j, ID_AA, 386, TR(L"Antisserrilhado (FXAA):", L"Anti-aliasing (FXAA):"),
                   { TR(L"Desligado", L"Off"), TR(L"1 - leve", L"1 - light"), TR(L"2 - médio", L"2 - medium"), TR(L"3 - forte (bordas mais lisas)", L"3 - strong (smoother edges)") }, g_op.antisserrilhado);
@@ -2263,7 +2263,7 @@ namespace
             Lista(j, ID_ESCALA, 482, TR(L"Resolução interna:", L"Internal resolution:"),
                   { TR(L"1x - 1280 × 720 (mais leve)", L"1x - 1280 × 720 (lightest)"), TR(L"1,5x - 1920 × 1080", L"1.5x - 1920 × 1080"),
                     TR(L"2x - 2560 × 1440 (mais nítido, mais pesado)", L"2x - 2560 × 1440 (sharper, heavier)"),
-                    TR(L"3x - 3840 × 2160 / 4K (experimental)", L"3x - 3840 × 2160 / 4K (experimental)") }, g_op.escala);
+                    TR(L"3x - 3840 × 2160 / 4K", L"3x - 3840 × 2160 / 4K") }, g_op.escala);
             // FSR ligado: a resolucao interna sai do tamanho da janela (a lista de cima fica desligada)
             Lista(j, ID_FSR, 514, TR(L"Upscale AMD FSR 1:", L"AMD FSR 1 upscaling:"),
                   { TR(L"Desligado", L"Off"), TR(L"Ultra qualidade (desenha em 1x: 1280 × 720, mais nítido)", L"Ultra quality (draws at 1x: 1280 × 720, sharpest)"),
@@ -2292,8 +2292,8 @@ namespace
                   { TR(L"Desligada (original)", L"Off (original)"), TR(L"Leve", L"Light"), TR(L"Média", L"Medium"),
                     TR(L"Forte (cantos bem marcados)", L"Strong (well-marked corners)") }, g_op.ao);
             Lista(j, ID_FPS, 738, TR(L"Quadros por segundo:", L"Frames per second:"),
-                  { TR(L"30 FPS (como o jogo original)", L"30 FPS (like the original game)"), TR(L"60 FPS (mais fluido, pesa o dobro)", L"60 FPS (smoother, twice the load)"),
-                    TR(L"Sem limite (experimental)", L"Unlocked (experimental)") }, g_op.fps);
+                  { TR(L"30 FPS (como o jogo original)", L"30 FPS (like the original game)"), TR(L"45 FPS (meio-termo)", L"45 FPS (in between)"),
+                    TR(L"60 FPS (mais fluido, pesa o dobro)", L"60 FPS (smoother, twice the load)") }, FpsLista(g_op.fps));
             {
                 // campo de visao (fov.cpp): barra de 95 graus (o do jogo) ate 140; o numero fica ao lado
                 Criar(j, L"STATIC", TR(L"Campo de visão (FOV):", L"Field of view (FOV):"), 0, 24, 774, 166, 20, -1);

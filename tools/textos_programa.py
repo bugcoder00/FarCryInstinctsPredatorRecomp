@@ -262,7 +262,7 @@ r"Automatic (the largest that fits the screen)": (r"Automatique (la plus grande 
 r"Full screen (Alt+Enter switches during the game)": (r"Plein écran (Alt+Entrée bascule pendant le jeu)", r"Vollbild (Alt+Eingabe wechselt im Spiel)", r"Pantalla completa (Alt+Intro cambia durante el juego)", r"Schermo intero (Alt+Invio cambia durante il gioco)"),
 r"Aspect ratio:": (r"Format d'image :", r"Seitenverhältnis:", r"Relación de aspecto:", r"Formato immagine:"),
 r"16:9 (like the original game)": (r"16:9 (comme le jeu original)", r"16:9 (wie das Originalspiel)", r"16:9 (como el juego original)", r"16:9 (come il gioco originale)"),
-r"Monitor - ultrawide 21:9 / 32:9 (experimental)": (r"Moniteur - ultra-large 21:9 / 32:9 (expérimental)", r"Monitor - Ultrawide 21:9 / 32:9 (experimentell)", r"Monitor - ultrapanorámico 21:9 / 32:9 (experimental)", r"Monitor - ultrawide 21:9 / 32:9 (sperimentale)"),
+r"Monitor - ultrawide 21:9 / 32:9": (r"Moniteur - ultra-large 21:9 / 32:9", r"Monitor - Ultrawide 21:9 / 32:9", r"Monitor - ultrapanorámico 21:9 / 32:9", r"Monitor - ultrawide 21:9 / 32:9"),
 r"16:9 with black bars (ultrawide without stretching)": (r"16:9 avec bandes noires (ultra-large sans étirer)", r"16:9 mit schwarzen Balken (Ultrawide ohne Strecken)", r"16:9 con barras negras (ultrapanorámico sin estirar)", r"16:9 con bande nere (ultrawide senza allungare)"),
 r"Anti-aliasing (FXAA):": (r"Anticrénelage (FXAA) :", r"Kantenglättung (FXAA):", r"Antialiasing (FXAA):", r"Antialiasing (FXAA):"),
 r"MSAA anti-aliasing:": (r"Anticrénelage MSAA :", r"MSAA-Kantenglättung:", r"Antialiasing MSAA:", r"Antialiasing MSAA:"),
@@ -275,7 +275,6 @@ r"Internal resolution:": (r"Résolution interne :", r"Interne Auflösung:", r"Re
 r"1x - 1280 × 720 (lightest)": (r"1x - 1280 × 720 (le plus léger)", r"1x - 1280 × 720 (am leichtesten)", r"1x - 1280 × 720 (el más ligero)", r"1x - 1280 × 720 (il più leggero)"),
 r"1.5x - 1920 × 1080": (r"1,5x - 1920 × 1080", r"1,5x - 1920 × 1080", r"1,5x - 1920 × 1080", r"1,5x - 1920 × 1080"),
 r"2x - 2560 × 1440 (sharper, heavier)": (r"2x - 2560 × 1440 (plus net, plus lourd)", r"2x - 2560 × 1440 (schärfer, aufwendiger)", r"2x - 2560 × 1440 (más nítido, más pesado)", r"2x - 2560 × 1440 (più nitido, più pesante)"),
-r"3x - 3840 × 2160 / 4K (experimental)": (r"3x - 3840 × 2160 / 4K (expérimental)", r"3x - 3840 × 2160 / 4K (experimentell)", r"3x - 3840 × 2160 / 4K (experimental)", r"3x - 3840 × 2160 / 4K (sperimentale)"),
 r"AMD FSR 1 upscaling:": (r"Mise à l'échelle AMD FSR 1 :", r"AMD FSR 1 Hochskalierung:", r"Escalado AMD FSR 1:", r"Upscaling AMD FSR 1:"),
 r"Fake HDR (more contrast and color on a regular monitor, no HDR)": (r"HDR simulé (plus de contraste et de couleur sur un écran normal, sans HDR)", r"Falsches HDR (mehr Kontrast und Farbe auf einem normalen Monitor, ohne HDR)", r"HDR falso (más contraste y color en un monitor normal, sin HDR)", r"HDR finto (più contrasto e colore su un monitor normale, senza HDR)"),
 r"Show FPS and ms in the corner of the screen": (r"Afficher les FPS et les ms dans le coin de l'écran", r"FPS und ms in der Bildschirmecke anzeigen", r"Mostrar FPS y ms en la esquina de la pantalla", r"Mostra FPS e ms nell'angolo dello schermo"),
@@ -371,7 +370,7 @@ r"Strong (well-marked corners)": (r"Forte (coins bien marqués)", r"Stark (deutl
 r"Frames per second:": (r"Images par seconde :", r"Bilder pro Sekunde:", r"Fotogramas por segundo:", r"Fotogrammi al secondo:"),
 r"30 FPS (like the original game)": (r"30 FPS (comme le jeu original)", r"30 FPS (wie das Originalspiel)", r"30 FPS (como el juego original)", r"30 FPS (come il gioco originale)"),
 r"60 FPS (smoother, twice the load)": (r"60 FPS (plus fluide, deux fois plus lourd)", r"60 FPS (flüssiger, doppelte Last)", r"60 FPS (más fluido, el doble de carga)", r"60 FPS (più fluido, il doppio del carico)"),
-r"Unlocked (experimental)": (r"Illimité (expérimental)", r"Unbegrenzt (experimentell)", r"Sin límite (experimental)", r"Illimitato (sperimentale)"),
+r"45 FPS (in between)": (r"45 FPS (entre les deux)", r"45 FPS (dazwischen)", r"45 FPS (intermedio)", r"45 FPS (via di mezzo)"),
 r"Vertical sync (avoids image \"tearing\", may lower the FPS)": (r"Synchronisation verticale (évite le « tearing », peut baisser les FPS)", r"Vertikale Synchronisation (verhindert „Tearing“, kann die FPS senken)", r"Sincronización vertical (evita el \"tearing\", puede bajar los FPS)", r"Sincronizzazione verticale (evita il \"tearing\", può ridurre gli FPS)"),
 r"Higher options make the image nicer, but weigh on the graphics card.": (r"Les options plus élevées embellissent l'image, mais chargent la carte graphique.", r"Höhere Optionen verschönern das Bild, belasten aber die Grafikkarte.", r"Las opciones más altas mejoran la imagen, pero cargan la tarjeta gráfica.", r"Le opzioni più alte migliorano l'immagine, ma pesano sulla scheda video."),
 
@@ -410,7 +409,7 @@ r"FSR BALANCED": (r"FSR ÉQUILIBRÉ", r"FSR AUSGEWOGEN", r"FSR EQUILIBRADO", r"F
 r"FSR PERFORMANCE": (r"FSR PERFORMANCE", r"FSR LEISTUNG", r"FSR RENDIMIENTO", r"FSR PRESTAZIONI"),
 r"Shadows with sharper edges (heavier).": (r"Ombres aux bords plus nets (plus lourd).", r"Schatten mit schärferen Kanten (aufwendiger).", r"Sombras con bordes más definidos (más pesado).", r"Ombre con bordi più definiti (più pesante)."),
 r"Smooths the jagged edges of the image.": (r"Adoucit les bords crénelés de l'image.", r"Glättet die gezackten Kanten des Bildes.", r"Suaviza los bordes dentados de la imagen.", r"Ammorbidisce i bordi seghettati dell'immagine."),
-r"30 like the original, 60 smoother. Unlocked is experimental.": (r"30 comme l'original, 60 plus fluide. Illimité est expérimental.", r"30 wie das Original, 60 flüssiger. Unbegrenzt ist experimentell.", r"30 como el original, 60 más fluido. Sin límite es experimental.", r"30 come l'originale, 60 più fluido. Illimitato è sperimentale."),
+r"30 like the original, 45 and 60 smoother.": (r"30 comme l'original, 45 et 60 plus fluides.", r"30 wie das Original, 45 und 60 flüssiger.", r"30 como el original, 45 y 60 más fluidos.", r"30 come l'originale, 45 e 60 più fluidi."),
 r"Avoids image \"tearing\", but may lower the FPS.": (r"Évite le « tearing » de l'image, mais peut baisser les FPS.", r"Verhindert „Tearing“ im Bild, kann aber die FPS senken.", r"Evita el \"tearing\" de la imagen, pero puede bajar los FPS.", r"Evita il \"tearing\" dell'immagine, ma può ridurre gli FPS."),
 
 # ---------------------------------------------------------------- pular cena / teclado na tela

@@ -37,7 +37,7 @@ struct Opcoes
     bool hdrFalso = false;             // HDR falso: filtro em SDR (contraste local, sombras mais claras, luzes e cores mais fortes; render.cpp)
     bool mostrarFps = false;           // contador de FPS e ms no canto da tela (render.cpp ContadorDesenhar)
     bool avisoTeclas = true;           // aviso das teclas F1/F2/F3 quando o jogo comeca (render.cpp)
-    int formato = 0;                   // formato da imagem: 0 = 16:9 (original), 1 = o do monitor (ultrawide 21:9, 32:9; experimental), 2 = 16:9 com barras pretas
+    int formato = 0;                   // formato da imagem: 0 = 16:9 (original), 1 = o do monitor (ultrawide 21:9, 32:9), 2 = 16:9 com barras pretas
     int filtroTextura = 0;             // filtro anisotropico: 0 = o do jogo, 1 = 2x, 2 = 4x, 3 = 8x, 4 = 16x (xenos_draw.cpp)
     int distancia = 0;                 // distancia de visao (objetos, vegetacao): -2 = 0,5x, -1 = 0,75x, 0 = original, 1 = 1,5x, 2 = 2x, 3 = 3x (graficos_extra.cpp)
     int detalhe = 0;                   // nivel de detalhe dos objetos (LOD) mais longe: -2 = 0,5x, -1 = 0,75x, 0 = original, 1 = 1,5x, 2 = 2x, 3 = 3x
@@ -45,7 +45,7 @@ struct Opcoes
     std::wstring placaVideo;           // placa de video (nome; placas_video.cpp): vazio = automatica (a de alto desempenho)
     int fov = 0;                       // campo de visao: 0 = o do jogo; senao graus a mais (fov.cpp), ate FOV_MAX
     int mira = 100;                    // tamanho da mira em porcentagem (mira.cpp): 100 = o do jogo, de MIRA_MIN a MIRA_MAX
-    int fps = 0;                       // quadros por segundo: 0 = 30 (como o original), 1 = 60, 2 = sem limite (experimental); gpu.cpp sub_8273E6F8
+    int fps = 0;                       // quadros por segundo: 0 = 30 (como o original), 1 = 60, 2 = 45 (era "sem limite" ate a 1.0.1: bugs acima de 60); gpu.cpp sub_8273E6F8
     bool mostrarRegistro = false;      // janela de console com o registro
     bool pularLauncher = false;        // abre direto o jogo (Shift ao abrir mostra o launcher)
     bool launcherIcones = false;       // launcher: saves e conquistas em grade de icones (false = lista)
@@ -117,3 +117,6 @@ struct tagDRAWITEMSTRUCT;
 void DesenharNivelMic(const tagDRAWITEMSTRUCT* d, unsigned long atras);   // barra do nivel (STATIC com SS_OWNERDRAW)
 // cria o image.bin a partir do default.xex (xex_imagem.cpp)
 bool XexCriarImagem(const std::filesystem::path& xex, const std::filesystem::path& saida, std::string& erro, bool conferir = true);
+
+// lista de FPS nas telas (30, 45, 60) <-> opcao fps (0 = 30, 1 = 60, 2 = 45): a mesma troca vale nos dois sentidos
+inline int FpsLista(int v) { return v == 1 ? 2 : v == 2 ? 1 : 0; }

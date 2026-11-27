@@ -26,7 +26,7 @@
 #include <condition_variable>
 #include <mutex>
 
-int ModoFps();   // gpu.cpp: 0 = 30, 1 = 60, 2 = sem limite
+int ModoFps();   // gpu.cpp: 0 = 30, 1 = 60, 2 = sem limite, 3 = 45
 void CamSeqMarca(const char* o, uint64_t n);   // camera_tardia.cpp (FCRECOMP_CAMTARDIALOG=2: hora de cada etapa)
 
 namespace
@@ -68,6 +68,17 @@ bool QuadroTrocaImediata(uint32_t intervalo)
     return g_ligado && intervalo != 0 && Jogando();
 }
 
+// gpu.cpp FPS_TROCA com 45 FPS (thread de desenho do jogo, antes de pedir a troca, que sai na hora): dorme ate a hora
+// do proximo quadro. Atrasou mais de 2 ms (ou a hora marcada ficou longe: carregamento): o ritmo recomeca dali.
+void QuadroRitmo(double periodoMs)
+{
+    static double alvo = 0;
+    const double agora = perf::Now();
+    alvo += periodoMs;
+    if (agora > alvo + 2.0 || alvo > agora + periodoMs) alvo = agora;
+    else if (alvo > agora) DormirAte(alvo);
+}
+
 // gpu.cpp: troca de imagem processada pela placa (XE_SWAP): so registro
 void QuadroTroca()
 {
@@ -93,7 +104,7 @@ void QuadroNaHoraEsperar()
     const double periodo = iv * (1000.0 / 60.0);
     if (g_ligado)
     {
-        if (!jogava || periodo <= 0 || ModoFps() == 2) { g_alvo = agora; return; }
+        if (!jogava || periodo <= 0 || ModoFps() >= 2) { g_alvo = agora; return; }   // 45 FPS: ritmo em QuadroRitmo
         g_alvo += periodo;
         if (agora > g_alvo + 2.0) { g_alvo = agora; g_atrasos++; }   // atrasou: o ritmo recomeca daqui (recuperar o atraso
                                                                      // no passo seguinte deu mais atraso: 74 ms no jogo)
